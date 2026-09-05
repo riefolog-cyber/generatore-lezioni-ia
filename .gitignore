@@ -1,0 +1,19 @@
+# dipendenze scaricabili al primo avvio (mai in git)
+.tools/
+assets/
+
+# cache ed esecuzione runtime
+__pycache__/
+*.pyc
+*.lock
+
+# log di generazione/avvio
+*.log
+
+# lezioni generate (rigenerabili dal codice) e fonte docx
+*_lesson/
+*.docx
+
+# report di classe prodotti dagli export
+report_classe.csv
+report_classe.html

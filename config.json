@@ -1,0 +1,14 @@
+{
+  "llm_url": "http://localhost:20128/v1",
+  "llm_model": "groq/openai/gpt-oss-120b",
+  "llm_contesto_caratteri": 18000,
+  "voice": "it_IT-serena-high",
+  "edge_voice": "it-IT-GiuseppeMultilingualNeural",
+  "edge_rate": "-4%",
+  "audio_bitrate": 96,
+  "theme": "dark",
+  "num_moduli_min": 4,
+  "num_moduli_max": 7,
+  "porta": 8341,
+  "cache_max_mb": 300
+}

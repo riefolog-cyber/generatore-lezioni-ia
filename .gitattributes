@@ -1,0 +1,9 @@
+# normalizza gli a-capo: LF nei sorgenti, fine riga coerente su ogni sistema
+* text=auto
+*.py text eol=lf
+*.bat text eol=crlf
+*.md text eol=lf
+*.json text eol=lf
+*.js text eol=lf
+*.css text eol=lf
+*.html text eol=lf
