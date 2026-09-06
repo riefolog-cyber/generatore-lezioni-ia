@@ -13,6 +13,7 @@ Produce in output:
 """
 import csv
 import json
+import statistics
 import sys
 from pathlib import Path
 
@@ -64,6 +65,30 @@ def build_csv(reports, out_path):
                                  in sorted(_per_tipo(r).items()))
             w.writerow([r.get("studente"), r.get("lezione"), r.get("data"),
                         r.get("tempo_min"), pt, prec, tipo_txt])
+        precs, tempi = _aggregate(reports)
+        w.writerow([])
+        w.writerow(["STATISTICHE DI CLASSE"])
+        if precs:
+            w.writerow(["precisione media %", f"{statistics.mean(precs):.0f}"])
+            w.writerow(["precisione mediana %", f"{statistics.median(precs):.0f}"])
+            w.writerow(["precisione min %", f"{min(precs)}"])
+            w.writerow(["precisione max %", f"{max(precs)}"])
+        if tempi:
+            w.writerow(["tempo medio min", f"{statistics.mean(tempi):.1f}"])
+            w.writerow(["tempo mediano min", f"{statistics.median(tempi):.1f}"])
+
+
+def _aggregate(reports):
+    """Liste di (precisione %, tempo min) valide dai report."""
+    precs, tempi = [], []
+    for r in reports:
+        p = str(r.get("precisione") or "").replace("%", "").strip()
+        if p.replace(",", "").replace(".", "").isdigit():
+            precs.append(float(p.replace(",", ".")))
+        t = str(r.get("tempo_min") or "").replace(",", ".").strip()
+        if t.replace(".", "").isdigit():
+            tempi.append(float(t))
+    return precs, tempi
 
 
 def build_html(reports, out_path):
@@ -85,11 +110,23 @@ def build_html(reports, out_path):
     weak_html = ("<ul>" + "".join(
         f"<li><b>{tipo}</b>: {c}/{t} corrette ({_pct(c, t)}%) — da ripassare</li>"
         for tipo, c, t in weak) + "</ul>") if weak else "<p>Nessun dato.</p>"
+    precs, tempi = _aggregate(reports)
+    if precs:
+        stats_html = (f"<p>Precisione: media <b>{statistics.mean(precs):.0f}%</b> · "
+                      f"mediana <b>{statistics.median(precs):.0f}%</b> · "
+                      f"min {min(precs):.0f}% · max {max(precs):.0f}%</p>")
+    else:
+        stats_html = "<p>Nessuna precisione valida.</p>"
+    if tempi:
+        stats_html += (f"<p>Tempo: media <b>{statistics.mean(tempi):.1f} min</b> · "
+                       f"mediana <b>{statistics.median(tempi):.1f} min</b></p>")
     html = f"""<!DOCTYPE html><html lang="it"><meta charset="utf-8">
 <title>Report di classe</title>
 <body style="font-family:'Segoe UI',sans-serif;max-width:760px;margin:2rem auto;background:#0d1420;color:#eaf1ff">
 <h1>📊 Report di classe — {reports[0].get('lezione', '?') if reports else '?'}</h1>
 <p>{len(reports)} studenti · generato il {__import__('datetime').date.today().isoformat()}</p>
+<h2>Statistiche di classe</h2>
+{stats_html}
 <h2>Classifica (per precisione)</h2>
 <table border="1" cellpadding="8" style="border-collapse:collapse">
 <tr style="background:#1a2740"><th>Studente</th><th>Punti</th><th>Precisione</th><th>Tempo</th></tr>

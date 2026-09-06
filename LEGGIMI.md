@@ -2,15 +2,38 @@
 
 ## Avvio (un solo file)
 
-Doppio clic su **`AVVIA.bat`**: fa tutto da solo in ordine —
-1. controlla e installa le dipendenze Python,
-2. controlla la voce Piper,
-3. genera le lezioni mancanti dai `.docx` (salta quelle già pronte),
-4. apre la lezione nel browser.
+Doppio clic su **`AVVIA.bat`**: parte il server locale e si apre nel browser
+il **pannello di controllo** (pagina grafica), con cui puoi:
+1. scegliere il **materiale**: trascinalo nella zona tratteggiata del pannello
+   o usa "Sfoglia" per caricarlo dal browser (`.docx`, `.pdf`, `.txt`, `.md`,
+   `.html`), oppure usa i file già presenti nella cartella, e premere **Genera**;
+2. generare da **link** (sito web o video YouTube);
+3. impostare le **opzioni**: rigenera anche le lezioni esistenti (`--force`),
+   bozza senza LLM (`--bozza`), rigenera solo l'audio di una lezione;
+4. seguire il **log** in tempo reale;
+5. **aprire** le lezioni generate (anche da tablet/telefono sulla stessa rete
+   Wi-Fi: l'indirizzo LAN è mostrato nel pannello).
 
-`AVVIA.bat gui` → apre la GUI (anteprima, genera, apri, esporta ZIP).
+`AVVIA.bat gui` → vecchia GUI desktop (tkinter: anteprima, genera, esporta ZIP).
+`python avvia.py` → flusso automatico da terminale (senza pannello).
 
-Metti un `.docx` in questa cartella e rilancia `AVVIA.bat`.
+In alternativa al pannello, da terminale: `python new_lesson.py build <file|URL>`.
+
+## Fonti di partenza
+
+La pipeline accetta qualsiasi di queste fonti (stessa struttura interna):
+
+- **File**: `.docx` (python-docx), `.pdf` (serve `pypdf`), `.txt`, `.md`,
+  `.html` — si caricano dal pannello (drag & drop o pulsante: atterrano
+  nella cartella del progetto) oppure si mettono direttamente in cartella:
+  vengono presi in carico automaticamente da `AVVIA.bat` / `watch`.
+- **Sito web**: `python new_lesson.py build https://esempio.it/pagina`
+- **Video YouTube**: `python new_lesson.py build https://www.youtube.com/watch?v=...`
+  (usa la trascrizione automatica via `youtube-transcript-api`; se manca o non
+  è disponibile, ripiega su titolo + descrizione).
+- **Anteprima** senza audio: `python new_lesson.py preview <file|URL>`.
+
+Dipendenze opzionali per PDF e YouTube: `pip install -r requirements-extra.txt`.
 
 ## Cosa genera
 
@@ -70,18 +93,24 @@ Metti un `.docx` in questa cartella e rilancia `AVVIA.bat`.
 ```
 AVVIA.bat            avvio unico (tutto automatico, o interfaccia con "gui")
 avvia.py             flusso automatico: dipendenze -> build mancanti -> serve
+panel.py             pannello di controllo web: carica materiale (upload),
+                     genera da file/link, log in tempo reale, apre le lezioni
 app.py               GUI: verifica, anteprima, genera, apri, esporta
 new_lesson.py        pipeline: watch | build | preview | reaudio
 start_lesson.py      server locale con porta libera (8341-8350);
                      senza argomenti serve la prima lezione, con più
                      lezioni apre l'indice per scegliere
 check_env.py         controllo ambiente
-config.json          llm_url, llm_model, llm_contesto_caratteri, voice,
-                     edge_voice, edge_rate, theme, num_moduli_min/max,
-                     porta, cache_max_mb
+config.json          llm_url, llm_model, llm_api_key (opzionale), voice,
+                     edge_voice, edge_rate, audio_bitrate, theme,
+                     num_moduli_min/max, porta, cache_max_mb,
+                     tts_workers, tts_retries
 requirements.txt     python-docx, edge-tts (ffmpeg serve per durata/fallback)
+requirements-extra.txt  pypdf (PDF), youtube-transcript-api (YouTube)
+requirements-dev.txt    pytest (test unitari)
 tools/               common, player_template (player autogenerato),
-                     export_zip, selftest (QA automatico)
+                     sources (fonti di partenza), export_zip,
+                     selftest (QA automatico)
 assets/voice/        modello Piper + cache audio
 ```
 
@@ -95,6 +124,10 @@ assets/voice/        modello Piper + cache audio
 - **Cache audio** in `assets/voice/cache`: riusa le tracce per lo stesso
   testo+voce e si autolimita a `cache_max_mb` (default 300 MB) eliminando le
   voci più vecchie.
+- **Cache LLM** (`.llm_cache/`): rigenerando con `--force` la stessa fonte e lo
+  stesso modello configurato, la struttura dei contenuti si riusa al posto di
+  rifare la chiamata LLM (risparmio di minuti). Con `--no-cache` si forza una
+  nuova strutturazione. Autolimitata a 200 voci (le più vecchie vengono rimosse).
 - Log in `generazione.log`. Rigenera con `python new_lesson.py build file.docx --force`.
 - **Niente pagina bianca da cache**: il server della lezione invia intestazioni
   no-cache e i file sono caricati con versione (`main.js?v=4`); se il browser

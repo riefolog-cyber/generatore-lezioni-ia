@@ -2,10 +2,14 @@
 .tools/
 assets/
 
+# repo esterno scaricato per errore nella cartella di lavoro
+_archify/
+
 # cache ed esecuzione runtime
 __pycache__/
 *.pyc
 *.lock
+.llm_cache/
 
 # log di generazione/avvio
 *.log
@@ -13,6 +17,10 @@ __pycache__/
 # lezioni generate (rigenerabili dal codice) e fonte docx
 *_lesson/
 *.docx
+*.pdf
+
+# artefatto generato dallo strumento esterno Archify (mappa del progetto)
+generatore-lezioni-mappa.html
 
 # report di classe prodotti dagli export
 report_classe.csv

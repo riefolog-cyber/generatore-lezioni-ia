@@ -55,6 +55,22 @@ except Exception:
     avviso("edge-tts: voce neurale primaria", False,
            "pip install edge-tts — senza, audio solo da Piper locale o silenzio")
 
+try:
+    import pypdf  # noqa: F401
+    avviso("pypdf (materiale PDF)", True)
+except Exception:
+    avviso("pypdf (materiale PDF)", False,
+           "pip install -r requirements-extra.txt — senza, i .pdf non sono "
+           "leggibili come materiale di partenza")
+
+try:
+    import youtube_transcript_api  # noqa: F401
+    avviso("youtube-transcript-api (trascrizioni YouTube)", True)
+except Exception:
+    avviso("youtube-transcript-api (trascrizioni YouTube)", False,
+           "pip install -r requirements-extra.txt — senza, i video YouTube "
+           "usano solo titolo e descrizione")
+
 voice, _ = resolve_voice()
 avviso(f"voce Piper di riserva ({voice.name})", voice.exists(),
        f"file mancante: {voice} — senza, in assenza di rete le slide avranno "
@@ -68,7 +84,8 @@ avviso("ffprobe (durata audio)", bool(shutil.which("ffprobe")),
 cfg = load_config()
 print(f"Config: llm={cfg.get('llm_url')} modello={cfg.get('llm_model')} | "
       f"voce edge={cfg.get('edge_voice')} @ {cfg.get('edge_rate')} | "
-      f"piper={cfg.get('voice')} | tema={cfg.get('theme')} | porta={cfg.get('porta')}")
+      f"piper={cfg.get('voice')} | tema={cfg.get('theme')} | porta={cfg.get('porta')} | "
+      f"tts workers={cfg.get('tts_workers', 4)} retries={cfg.get('tts_retries', 2)}")
 
 import urllib.request  # noqa: E402
 try:

@@ -64,11 +64,15 @@ def main():
 
     # 4. genera le lezioni mancanti (una sola alla volta: blocco anti-concorrenza)
     from new_lesson import sanitize_stem, build_from_docx
+    from sources import SUPPORTED_EXT
     from common import setup_logging
     log = setup_logging()
-    docs = sorted(BASE.glob("*.docx"))
+    docs = sorted(p for p in BASE.iterdir()
+                  if p.suffix.lower() in SUPPORTED_EXT and p.is_file())
     if not docs:
-        print("[4/5] Nessun file .docx: mettine uno in questa cartella e rilancia AVVIA.")
+        print("[4/5] Nessun file di materiale (.docx, .pdf, .txt, .md, .html): "
+              "mettine uno in questa cartella e rilancia AVVIA. "
+              "Per un link (sito/YouTube) usa: python new_lesson.py build <URL>")
     else:
         for d in docs:
             out = BASE / f"{sanitize_stem(d.stem)}_lesson"

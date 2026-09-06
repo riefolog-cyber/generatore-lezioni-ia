@@ -1,15 +1,20 @@
 # -*- coding: utf-8 -*-
-"""Pipeline automatica: metti un .docx nella cartella -> lezione interattiva completa.
+"""Pipeline automatica: metti un materiale (docx/pdf/txt/md/html o URL di sito/YouTube)
+nella cartella -> lezione interattiva completa.
 
 Uso:
   python new_lesson.py watch                    # osserva la cartella e genera al volo
   python new_lesson.py build <file.docx>        # genera da un singolo file
+  python new_lesson.py build <file.pdf|.txt|.md|.html>
+  python new_lesson.py build https://esempio.it/pagina
+  python new_lesson.py build https://www.youtube.com/watch?v=...
   python new_lesson.py build <file.docx> --bozza  # senza LLM (struttura dal docx)
-  python new_lesson.py preview <file.docx>      # anteprima struttura (nessun audio)
+  python new_lesson.py build <file.docx> --no-cache  # salta la cache LLM (nuovi contenuti)
+  python new_lesson.py preview <file|URL>       # anteprima struttura (nessun audio)
   python new_lesson.py reaudio <cartella_lesson>  # rigenera audio/VTT/player (senza LLM)
 
 Flusso di build:
-  1. estrae il contenuto dal docx (python-docx)
+  1. estrae il contenuto dalla fonte (docx/pdf/txt/md/html/URL/YouTube)
   2. 9router (LLM) struttura il materiale in moduli, quiz e abbinamenti (JSON)
      con retry su più modelli; fallback strutturale senza LLM
   3. costruisce le SLIDE della lezione: ogni slide ha DENTRO la sua narrazione,
@@ -40,6 +45,7 @@ BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE / "tools"))
 from common import (load_config, resolve_voice, setup_logging, validate_lesson, write_report)
 from player_template import write_player, bust_cache
+from sources import extract_source, is_url, SUPPORTED_EXT
 
 CONFIG = load_config()
 LLM_URL = CONFIG.get("llm_url", "http://localhost:20128/v1").rstrip("/")
@@ -49,57 +55,19 @@ STATE = BASE / "_generated.json"
 LOCK = BASE / ".generazione.lock"      # blocco anti-concorrenza tra build
 FLATTEN_LIMIT = int(CONFIG.get("llm_contesto_caratteri", 18000))
 CACHE_MAX_MB = int(CONFIG.get("cache_max_mb", 300))
+TTS_WORKERS = int(CONFIG.get("tts_workers", 4))
+TTS_RETRIES = int(CONFIG.get("tts_retries", 2))
+LLM_API_KEY = CONFIG.get("llm_api_key") or ""
 
 MIN_MODULI = int(CONFIG.get("num_moduli_min", 4))
 MAX_MODULI = int(CONFIG.get("num_moduli_max", 7))
 
 
-# ================================================================== 1. estrazione docx
+# ================================================================== 1. estrazione fonte
 def extract_docx(path):
-    """Estrae titolo + sezioni (heading -> paragrafi) da un .docx (python-docx)."""
-    from docx import Document
-    d = Document(str(path))
-    title, sections, cur = None, [], None
-
-    def flush():
-        nonlocal cur
-        if cur and cur["paras"]:
-            sections.append(cur)
-        cur = None
-
-    for p in d.paragraphs:
-        txt = p.text.strip()
-        if not txt:
-            continue
-        name = (p.style.name or "").lower()
-        is_head = ("heading" in name or "title" in name or name.startswith("titolo")
-                   or name.startswith("intestazione"))
-        if is_head:
-            if title is None:
-                title = txt
-                continue
-            flush()
-            cur = {"heading": txt, "paras": []}
-        else:
-            if cur is None:
-                cur = {"heading": None, "paras": []}
-            cur["paras"].append(txt)
-    flush()
-
-    for t in d.tables:
-        for row in t.rows:
-            cells = [c.text.strip() for c in row.cells if c.text.strip()]
-            if cells:
-                if cur is None:
-                    cur = {"heading": None, "paras": []}
-                cur["paras"].append(" • ".join(cells))
-    flush()
-
-    if title is None and sections and sections[0]["heading"]:
-        title = sections[0]["heading"]
-    if title is None:
-        title = Path(path).stem
-    return {"title": title, "sections": sections}
+    """Compat: estrazione .docx delegata a tools/sources.py."""
+    from sources import extract_docx as _extract_docx
+    return _extract_docx(path)
 
 
 # ================================================================== 2. LLM (9router)
@@ -205,17 +173,7 @@ in una lezione interattiva strutturata. Regole:
 - Dividi il materiale in {nmin}-{nmax} moduli logici e coesi (mai meno di {nmin}).
 - RISPOSTA COMPATTA: "testo" max 2 frasi, "punti" max 3, spiegazioni e feedback
   max 12 parole ciascuno. Nessun testo fuori dal JSON.
-- Ogni quiz ha ESATTAMENTE 4 opzioni, una sola corretta.
-- Ogni modulo ha 2-3 abbinamenti termine/definizione.
-- Ogni modulo ha ESATTAMENTE 3 affermazioni vero/falso (mischiare vere e false)
-  con una breve spiegazione.
-- Ogni modulo ha ESATTAMENTE 2 frasi "compila" (___ = parola chiave mancante;
-  "aiuto" = 2 parole plausibili ma SBAGLIATE, mai la risposta).
-- Ogni modulo ha ESATTAMENTE 1 scenario decisionale (3 opzioni, una sola corretta).
-- Ogni modulo ha ESATTAMENTE 1 "errore" da trovare (brano 15-25 parole;
-  "errore" riporta ESATTAMENTE le parole sbagliate del brano).
-- Ogni modulo ha ESATTAMENTE 3 "flashcards" termine/definizione sui concetti
-  chiave (definizioni brevi, definizioni diverse tra loro).
+{regole}
 - Se il materiale lo consente aggiungi anche "sequenza" (3-5 passi); altrimenti null/vuoto.
 - Sii fedele al documento: nessuna invenzione.
 - Le narrazioni devono suonare naturali e parlate, in italiano.
@@ -225,6 +183,40 @@ in una lezione interattiva strutturata. Regole:
 
 MATERIALE DIDATTICO:
 {testo}"""
+
+
+def _regole_adattive(nchars):
+    """Regole per l'LLM proporzionate alla quantità di materiale: con poco
+    testo chiediamo meno attività (e MAI inventare), con molto tutto il
+    pacchetto. Ritorna (regole, nmin, nmax)."""
+    if nchars < 3500:
+        return ("""- Ogni quiz ha ESATTAMENTE 4 opzioni, una sola corretta (se il materiale
+  non basta a 4 opzioni serie, usa 3 opzioni: mai distrattori inventati).
+- Ogni modulo ha 2 abbinamenti termine/definizione (se il materiale lo consente).
+- Ogni modulo ha ESATTAMENTE 2 affermazioni vero/falso (mischiare vere e false)
+  con una breve spiegazione.
+- Ogni modulo ha ESATTAMENTE 1 frase "compila" (___ = parola chiave mancante;
+  "aiuto" = 2 parole plausibili ma SBAGLIATE, mai la risposta).
+- Ogni modulo ha ESATTAMENTE 1 scenario decisionale (3 opzioni, una sola corretta).
+- Ogni modulo ha ESATTAMENTE 1 "errore" da trovare (brano 15-25 parole;
+  "errore" riporta ESATTAMENTE le parole sbagliate del brano).
+- Ogni modulo ha ESATTAMENTE 3 "flashcards" termine/definizione sui concetti
+  chiave (definizioni brevi, definizioni diverse tra loro).
+- MATERIALE SCARSO: se un'attività richiede contenuti che nel documento non
+  esistono, omettila o rendila più semplice (3 opzioni, 1 abbinamento, 2
+  flashcards) piuttosto che inventare.""", 3, 4)
+    return ("""- Ogni quiz ha ESATTAMENTE 4 opzioni, una sola corretta.
+- Ogni modulo ha 2-3 abbinamenti termine/definizione.
+- Ogni modulo ha ESATTAMENTE 3 affermazioni vero/falso (mischiare vere e false)
+  con una breve spiegazione.
+- Ogni modulo ha ESATTAMENTE 2 frasi "compila" (___ = parola chiave mancante;
+  "aiuto" = 2 parole plausibili ma SBAGLIATE, mai la risposta).
+- Ogni modulo ha ESATTAMENTE 1 scenario decisionale (3 opzioni, una sola corretta).
+- Ogni modulo ha ESATTAMENTE 1 "errore" da trovare (brano 15-25 parole;
+  "errore" riporta ESATTAMENTE le parole sbagliate del brano).
+- Ogni modulo ha ESATTAMENTE 3 "flashcards" termine/definizione sui concetti
+  chiave (definizioni brevi, definizioni diverse tra loro).""",
+            MIN_MODULI, MAX_MODULI)
 
 
 def parse_json(content):
@@ -251,12 +243,25 @@ LLM_REQUEST_TIMEOUT = 150   # secondi per singola richiesta
 LLM_TOTAL_DEADLINE = 420    # secondi totali per tutta la fase LLM (poi fallback)
 
 
-def llm_structure(ext):
-    """Chiama 9router e restituisce la struttura della lezione.
-    Prova più modelli con retry, ma con un limite di tempo totale: se l'LLM è
-    lento o giù, la build prosegue in modalità ridotta invece di bloccarsi."""
+def llm_structure(ext, use_cache=True):
+    """Chiama 9router e restituisce (struttura, via).
+    via è "cache" se la struttura viene riusata da una chiamata precedente
+    sulla stessa fonte (stesso hash testo+modello+parametri), altrimenti "llm".
+    Con use_cache (default), rigenerare lo stesso materiale non rifà la chiamata
+    LLM (che può durare minuti): si usa --no-cache per forzare contenuti nuovi."""
+    key = _llm_cache_key(ext) if use_cache else None
+    if key:
+        hit = _llm_cache_get(key)
+        if hit is not None:
+            print("  cache LLM: struttura riusata (fonte e modello invariati; "
+                  "--no-cache per rigenerarla)", flush=True)
+            return hit, "cache"
     testo = _flatten(ext)
-    prompt = PROMPT_TMPL.format(nmin=MIN_MODULI, nmax=MAX_MODULI, schema=SCHEMA, testo=testo)
+    regole, nmin, nmax = _regole_adattive(len(testo))
+    if (nmin, nmax) != (MIN_MODULI, MAX_MODULI):
+        print(f"  materiale corto ({len(testo)} caratteri): moduli {nmin}-{nmax} "
+              "e attività ridotte per non inventare contenuti", flush=True)
+    prompt = PROMPT_TMPL.format(nmin=nmin, nmax=nmax, regole=regole, schema=SCHEMA, testo=testo)
     models = []
     for m in (LLM_MODEL or pick_model(), "comboact", "openrouter/openrouter/free"):
         if m and m not in models:
@@ -283,10 +288,13 @@ def llm_structure(ext):
                 if use_rf:
                     p["response_format"] = {"type": "json_object"}
                 try:
+                    headers = {"Content-Type": "application/json"}
+                    if LLM_API_KEY:
+                        headers["Authorization"] = f"Bearer {LLM_API_KEY}"
                     req = urllib.request.Request(
                         f"{LLM_URL}/chat/completions",
                         data=json.dumps(p).encode("utf-8"),
-                        headers={"Content-Type": "application/json"})
+                        headers=headers)
                     with urllib.request.urlopen(req, timeout=LLM_REQUEST_TIMEOUT) as r:
                         out = _extract_api_body(r.read().decode("utf-8"))
                     content = out["choices"][0]["message"]["content"]
@@ -295,11 +303,43 @@ def llm_structure(ext):
                     if not struct.get("titolo"):
                         struct["titolo"] = ext["title"]
                     _check_struct(struct)
-                    return struct
+                    if key:
+                        _llm_cache_put(key, struct)
+                    return struct, "llm"
                 except Exception as e:  # noqa: BLE001
                     last = e
                     print(f"  scarto risposta {model}: {str(e)[:100]}", flush=True)
     raise RuntimeError(f"LLM non disponibile entro {LLM_TOTAL_DEADLINE}s: {last}")
+
+
+def _norm_opts(raw, maxn=4):
+    """Opzioni LLM pulite: distinte (case-insensitive), max `maxn`,
+    con esattamente una corretta (la prima) e almeno una. Conserva le
+    chiavi extra (feedback/conseguenza) presenti nell'input."""
+    seen = set()
+    out = []
+    for o in raw:
+        if not isinstance(o, dict) or not str(o.get("testo") or "").strip():
+            continue
+        t = str(o["testo"]).strip()
+        key = t.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        item = dict(o)
+        item["testo"] = t
+        item["corretta"] = bool(o.get("corretta"))
+        out.append(item)
+    if not out:
+        return []
+    first_correct = next((o for o in out if o["corretta"]), None)
+    if first_correct is None:
+        out[0]["corretta"] = True
+        first_correct = out[0]
+    for o in out:
+        if o is not first_correct:
+            o["corretta"] = False
+    return out[:maxn]
 
 
 def _check_struct(struct):
@@ -312,7 +352,14 @@ def _check_struct(struct):
             raise ValueError("modulo malformato (non è un oggetto con titolo)")
     for m in mods:
         q = m.get("quiz")
-        if q is not None and not isinstance(q, dict):
+        if isinstance(q, dict) and q.get("domanda"):
+            opts = _norm_opts(q.get("opzioni") if isinstance(q.get("opzioni"), list) else [])
+            if len(opts) >= 2:
+                m["quiz"] = {"domanda": str(q["domanda"]), "opzioni": opts,
+                             "ok": str(q.get("ok") or ""), "ko": str(q.get("ko") or "")}
+            else:
+                m["quiz"] = None
+        else:
             m["quiz"] = None
         ab = m.get("abbinamenti")
         if ab is not None and not isinstance(ab, list):
@@ -360,14 +407,11 @@ def _check_struct(struct):
         m["scenari"] = None
         if isinstance(sc, list) and sc and isinstance(sc[0], dict):
             s0 = sc[0]
-            opts = []
             raw_opts = s0.get("opzioni") if isinstance(s0.get("opzioni"), list) else []
-            for o in raw_opts:
-                if isinstance(o, dict) and o.get("testo"):
-                    opts.append({"testo": str(o["testo"]),
-                                 "corretta": bool(o.get("corretta")),
-                                 "conseguenza": str(o.get("conseguenza") or "")})
-            if s0.get("situazione") and len(opts) >= 2 and any(o["corretta"] for o in opts):
+            opts = _norm_opts(raw_opts)
+            for o in opts:
+                o.setdefault("conseguenza", "")
+            if s0.get("situazione") and len(opts) >= 2:
                 m["scenari"] = {"situazione": str(s0["situazione"]), "opzioni": opts[:3],
                                 "conclusione": str(s0.get("conclusione") or "")}
         # flashcards: termini chiave con definizioni distinte (studio + verifica)
@@ -409,7 +453,59 @@ def _flatten(ext, limit=None):
             out.append(f'\n## {s["heading"]}')
         out.extend(s["paras"])
     txt = "\n".join(out)
+    if len(txt) > limit:
+        print(f"  ⚠ materiale lungo ({len(txt)} caratteri): l'LLM vede i primi "
+              f"{limit} caratteri ({len(txt) - limit} troncati). "
+              "Valuta di spezzare il documento in più lezioni.", flush=True)
     return txt[:limit] + ("…" if len(txt) > limit else "")
+
+
+# ---------------------------------------------------------------- cache LLM
+# La strutturazione dei contenuti dipende dal testo di partenza e dal modello:
+# se la fonte non è cambiata (stesso hash), riusare l'ultima struttura buona
+# salva una chiamata LLM di minuti. Disattivabile con --no-cache.
+LLM_CACHE_DIR = BASE / ".llm_cache"
+LLM_CACHE_MAX = 200        # oltre questo numero di voci si eliminano le più vecchie
+
+
+def _llm_cache_key(ext):
+    """Chiave: hash del testo appiattito + parametri che influenzano il prompt
+    (modello, URL del router, numero moduli, limite contesto)."""
+    txt = _flatten(ext)
+    payload = "\x1f".join([
+        txt, LLM_URL, str(LLM_MODEL or ""),
+        str(MIN_MODULI), str(MAX_MODULI), str(FLATTEN_LIMIT),
+    ])
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+
+def _llm_cache_get(key):
+    try:
+        data = json.loads((LLM_CACHE_DIR / f"{key}.json").read_text(encoding="utf-8"))
+        return data.get("struct") if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _llm_cache_put(key, struct):
+    try:
+        LLM_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        (LLM_CACHE_DIR / f"{key}.json").write_text(
+            json.dumps({"struct": struct}, ensure_ascii=False), encoding="utf-8")
+        _llm_cache_prune()
+        return True
+    except Exception:
+        return False
+
+
+def _llm_cache_prune():
+    """Autolimite: oltre LLM_CACHE_MAX voci, elimina le più vecchie per mtime."""
+    try:
+        files = sorted(LLM_CACHE_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime)
+        for p in files[:max(0, len(files) - LLM_CACHE_MAX)]:
+            p.unlink()
+    except Exception:
+        pass
 
 
 def fallback_structure(ext):
@@ -771,6 +867,24 @@ def _tts_text(raw):
     return t.strip()
 
 
+def _weighted_words(text, dur):
+    """Timing parole stimati quando l'engine non fornisce i word boundary:
+    ogni parola pesata sulla lunghezza, distribuite sulla durata reale."""
+    ws = (text or "").split()
+    if not ws:
+        return []
+    weights = [max(len(w) + 2, 3) for w in ws]
+    wsum = sum(weights) or 1
+    cur = 0.0
+    words = []
+    for wi, w in enumerate(ws):
+        d = max(dur * weights[wi] / wsum, 0.12)
+        end = min(cur + d, dur) if wi < len(ws) - 1 else dur
+        words.append((cur, end, w))
+        cur = end
+    return words
+
+
 def _silent_mp3(path, seconds):
     """Ultimo recurso: mp3 silenzioso (l'audio non è mai assente)."""
     subprocess.run(
@@ -783,12 +897,15 @@ def _silent_mp3(path, seconds):
 def generate_audio(out_dir, slides):
     """Audio per OGNI slide, motore a cascata edge-tts -> Piper -> silenzio.
     Durata misurata con ffprobe; word boundary reali dall'engine quando dati,
-    altrimenti pesati sulla durata reale. Cache per testo+voce."""
+    altrimenti pesati sulla durata reale. Cache per testo+voce.
+    Ritorna (n_cached, durate): le durate misurate vengono riusate dalla
+    validazione per evitare una seconda chiamata ffprobe per ogni traccia."""
     AUDIO = out_dir / "assets" / "audio"
     AUDIO.mkdir(parents=True, exist_ok=True)
     CACHE.mkdir(parents=True, exist_ok=True)
 
     cached = 0
+    durations = {}
     todo = []   # (i, text, mp3, cached_mp3, cached_meta) da sintetizzare
     engines = {}
     for i, s in enumerate(slides):
@@ -822,7 +939,15 @@ def generate_audio(out_dir, slides):
 
         def _track(item):
             i, text, mp3, cached_mp3, cached_meta = item
-            ok, words = _try_edge_tts(text, mp3)
+            ok, words = False, []
+            # retry con backoff: edge-tts è un servizio di rete, un timeout
+            # singolo non deve far scendere la traccia a Piper/silenzio
+            for attempt in range(TTS_RETRIES + 1):
+                ok, words = _try_edge_tts(text, mp3)
+                if ok:
+                    break
+                if attempt < TTS_RETRIES:
+                    time.sleep(2 * (attempt + 1))
             engine = "edge"
             if not ok:
                 engine = "piper"
@@ -840,7 +965,7 @@ def generate_audio(out_dir, slides):
                                            encoding="utf-8")
             return item, engine, words
 
-        workers = min(4, len(todo))
+        workers = min(TTS_WORKERS, len(todo))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             for (i, text, mp3, _cm, _cj), engine, words in pool.map(_track, todo):
                 engines[i] = engine
@@ -859,17 +984,10 @@ def generate_audio(out_dir, slides):
         dur = _ffmpeg_probe(mp3)
         if not dur or dur <= 0:
             dur = max(2.0, len(text.split()) / 2.8)
+        durations[i] = round(dur, 2)
         # timing parole: reali se l'engine li ha forniti, altrimenti pesati
         if not words:
-            ws = text.split()
-            weights = [max(len(w) + 2, 3) for w in ws]
-            wsum = sum(weights) or 1
-            cur = 0.0
-            for wi, w in enumerate(ws):
-                d = max(dur * weights[wi] / wsum, 0.12)
-                end = min(cur + d, dur) if wi < len(ws) - 1 else dur
-                words.append((cur, end, w))
-                cur = end
+            words = _weighted_words(text, dur)
         s["audio"] = f"./assets/audio/narration-{i + 1:02d}.mp3"
         s["duration"] = round(dur, 2)
         s["caption"] = f"./assets/captions/narration-{i + 1:02d}.vtt"
@@ -893,7 +1011,7 @@ def generate_audio(out_dir, slides):
             print(f"  cache audio ridotta: ora ~{total:.0f} MB (limite {CACHE_MAX_MB} MB)")
     except Exception:
         pass
-    return cached
+    return cached, durations
 
 
 def write_vtt(out_dir, slides):
@@ -914,26 +1032,18 @@ def write_vtt(out_dir, slides):
         if wdata:
             lines = [(float(a), float(b), t) for a, b, t in wdata]
         else:
-            text = (s.get("narration") or " ").strip() or " "
-            ws = text.split()
-            weights = [max(len(w) + 2, 3) for w in ws]
-            wsum = sum(weights) or 1
-            cur = 0.0
-            lines = []
-            for wi, w in enumerate(ws):
-                d = max(total * weights[wi] / wsum, 0.12)
-                end = min(cur + d, total) if wi < len(ws) - 1 else total
-                lines.append((cur, end, w))
-                cur = end
+            lines = _weighted_words(s.get("narration") or " ", total)
         out = "WEBVTT\n\n" + "\n\n".join(
             f"{n}\n{fmt(a)} --> {fmt(b)}\n{t}" for n, (a, b, t) in enumerate(lines, 1))
         (CAP / f"narration-{i + 1:02d}.vtt").write_text(out, encoding="utf-8")
 
 
 # ================================================================== 5. build
-def _validate_audio(out_dir, slides):
-    """Controllo finale: ogni traccia deve esistere, essere leggibile da ffprobe
-    e durare quanto dichiarato (tolleranza 0.6s). Problemi su disco, non in teoria."""
+def _validate_audio(out_dir, slides, durations=None):
+    """Controllo finale: ogni traccia deve esistere, essere leggibile e durare
+    quanto dichiarato (tolleranza 0.6s). Le durate già misurate durante la
+    sintesi (`durations`) evitano una seconda chiamata ffprobe per ogni file."""
+    durations = durations or {}
     problems = []
     AUDIO = out_dir / "assets" / "audio"
     for i, s in enumerate(slides):
@@ -941,7 +1051,9 @@ def _validate_audio(out_dir, slides):
         if not mp3.exists() or mp3.stat().st_size < 1000:
             problems.append(f"slide {i + 1}: traccia audio assente o vuota")
             continue
-        real = _ffmpeg_probe(mp3)
+        real = durations.get(i)
+        if real is None:
+            real = _ffmpeg_probe(mp3)
         if not real or real <= 0:
             problems.append(f"slide {i + 1}: traccia illeggibile (ffprobe)")
             continue
@@ -983,31 +1095,37 @@ def _unlock_build():
         pass
 
 
-def build_from_docx(path, force=False, bozza=False):
-    """Avvia la generazione (con blocco anti-concorrenza: una alla volta)."""
+def build_from_docx(path, force=False, bozza=False, no_cache=False):
+    """Avvia la generazione (con blocco anti-concorrenza: una alla volta).
+    `path` può essere un file (.docx/.pdf/.txt/.md/.html) oppure un URL
+    (sito web o video YouTube). no_cache=True salta la cache LLM."""
     if not _lock_build():
-        print(f"  ⚠ Un'altra generazione è già in corso ({LOCK.name} presente): salto {Path(path).name}.")
+        print(f"  ⚠ Un'altra generazione è già in corso ({LOCK.name} presente): salto {path}.")
         return None, False
     try:
-        return _build_impl(path, force=force, bozza=bozza)
+        return _build_impl(path, force=force, bozza=bozza, no_cache=no_cache)
     finally:
         _unlock_build()
 
 
-def _build_impl(path, force=False, bozza=False):
+def _build_impl(source, force=False, bozza=False, no_cache=False):
     log = setup_logging()
-    path = Path(path)
-    out_dir = BASE / f"{sanitize_stem(path.stem)}_lesson"
+    src = str(source)
+    display = src if is_url(src) else Path(src).name
+
+    t0 = time.time()
+    msg = f"=== GENERO LA LEZIONE DA: {display} ==="
+    print(f"\n{msg}")
+    log.info(msg)
+    ext = extract_source(src)
+    print(f'[1/6] Materiale letto ({len(ext["sections"])} sezioni), '
+          f'titolo: {ext["title"][:60]}')
+
+    stem = sanitize_stem(ext["title"] if is_url(src) else Path(src).stem)
+    out_dir = BASE / f"{stem}_lesson"
     if out_dir.exists() and not force:
         print(f"  → {out_dir.name} esiste già, salto (usa --force per rigenerare)")
         return out_dir, False
-
-    t0 = time.time()
-    msg = f"=== GENERO LA LEZIONE DA: {path.name} ==="
-    print(f"\n{msg}")
-    log.info(msg)
-    ext = extract_docx(path)
-    print(f'[1/6] Docx letto: {len(ext["sections"])} sezioni, titolo: {ext["title"][:60]}')
 
     if bozza:
         print("[2/6] Modalità BOZZA: salto LLM, struttura dal docx (senza quiz).")
@@ -1015,8 +1133,10 @@ def _build_impl(path, force=False, bozza=False):
     elif ensure_llm():
         print("[2/6] 9router raggiungibile: strutturazione contenuti (LLM)…")
         try:
-            struct = llm_structure(ext)
+            struct, _via = llm_structure(ext, use_cache=not no_cache)
             via_llm = True
+            if _via == "cache":
+                print("  (struttura dalla cache LLM: stessa fonte e modello)", flush=True)
         except Exception as e:  # noqa: BLE001
             print(f"  ⚠ LLM fallito ({str(e)[:120]}): uso struttura ridotta dal docx")
             struct, via_llm = fallback_structure(ext), False
@@ -1049,9 +1169,9 @@ def _build_impl(path, force=False, bozza=False):
     write_player(out_dir, struct["titolo"], tema=tema)
 
     print("[5/6] Audio neurale edge-tts per ogni slide (cache) + sottotitoli sincronizzati…")
-    cached = generate_audio(out_dir, slides)
+    cached, measured = generate_audio(out_dir, slides)
     write_vtt(out_dir, slides)
-    audio_probs = _validate_audio(out_dir, slides)
+    audio_probs = _validate_audio(out_dir, slides, measured)
     print(f"  cache audio: {cached}/{len(slides)} tracce riusate")
 
     data = {"titolo": struct["titolo"], "slides": slides}
@@ -1087,20 +1207,21 @@ def _build_impl(path, force=False, bozza=False):
     return out_dir, ok
 
 
-def preview_from_docx(path, out_name=None):
-    """Anteprima veloce: solo struttura moduli/quiz, senza audio."""
-    path = Path(path)
-    ext = extract_docx(path)
+def preview_from_docx(path, out_name=None, no_cache=False):
+    """Anteprima veloce: solo struttura moduli/quiz, senza audio.
+    Accetta un file oppure un URL (sito web / YouTube)."""
+    ext = extract_source(str(path))
     if ensure_llm(timeout=15):
         try:
-            struct = llm_structure(ext)
-            via = "LLM 9router"
+            struct, via = llm_structure(ext, use_cache=not no_cache)
+            via = "cache LLM" if via == "cache" else "LLM 9router"
         except Exception as e:  # noqa: BLE001
             struct, via = fallback_structure(ext), f"fallback (LLM errore: {e})"
     else:
         struct, via = fallback_structure(ext), "fallback (9router non raggiungibile)"
     slides = build_slides(struct)
-    out = BASE / (out_name or f"{sanitize_stem(path.stem)}_anteprima.json")
+    stem = sanitize_stem(ext["title"])
+    out = BASE / (out_name or f"{stem}_anteprima.json")
     out.write_text(json.dumps(struct, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"Anteprima ({via}): {len(slides)} slide → {out.name}")
     for i, s in enumerate(slides, 1):
@@ -1196,7 +1317,8 @@ def watch():
         print("⏸ 9router non pronto: riprovo tra 10s… (Ctrl+C per uscire)")
         time.sleep(10)
     while True:
-        docs = sorted(BASE.glob("*.docx"))
+        docs = sorted(p for p in BASE.iterdir()
+                      if p.suffix.lower() in SUPPORTED_EXT and p.is_file())
         for f in docs:
             st = state.get(f.name, {})
             if st.get("status") == "ok":
@@ -1220,7 +1342,18 @@ def watch():
 
 def regen_audio_lesson(lesson_dir):
     """Rigenera audio (voce/config correnti), sottotitoli e player di una lezione
-    già generata, senza toccare la struttura dei contenuti (niente LLM)."""
+    già generata, senza toccare la struttura dei contenuti (niente LLM).
+    Protetto dal lock anti-concorrenza: niente collisioni con una build in corso."""
+    if not _lock_build():
+        print(f"  ⚠ Un'altra generazione è già in corso ({LOCK.name} presente): salto {lesson_dir}.")
+        return
+    try:
+        _regen_audio_impl(lesson_dir)
+    finally:
+        _unlock_build()
+
+
+def _regen_audio_impl(lesson_dir):
     out = Path(lesson_dir)
     js = out / "lesson-data.js"
     if not (out.exists() and js.exists()):
@@ -1236,9 +1369,9 @@ def regen_audio_lesson(lesson_dir):
     print(f"\n=== RIGENERO AUDIO PER: {out.name} ({len(slides)} slide) ===")
     print(f"  voce: {EDGE_VOICE} @ {EDGE_RATE}")
     write_player(out, payload.get("titolo") or out.name, tema=CONFIG.get("theme", "dark"))
-    cached = generate_audio(out, slides)
+    cached, measured = generate_audio(out, slides)
     write_vtt(out, slides)
-    audio_probs = _validate_audio(out, slides)
+    audio_probs = _validate_audio(out, slides, measured)
     js.write_text("window.LESSON_DATA = "
                   + json.dumps(payload, ensure_ascii=False) + ";\n", encoding="utf-8")
     bust_cache(out)   # versiona i riferimenti con l'hash dei file
@@ -1270,12 +1403,17 @@ def main():
     if len(args) >= 1 and args[0] == "watch":
         watch()
     elif len(args) >= 2 and args[0] == "build":
-        f = need_file(args[1], "Genera lezione")
+        src = args[1]
+        if is_url(src):
+            f = src
+        else:
+            f = need_file(args[1], "Genera lezione")
         try:
-            build_from_docx(f, force="--force" in sys.argv, bozza="--bozza" in sys.argv)
+            build_from_docx(f, force="--force" in sys.argv, bozza="--bozza" in sys.argv,
+                            no_cache="--no-cache" in sys.argv)
         except Exception as e:  # noqa: BLE001
             print(f"✗ Generazione fallita: {e}")
-            log.error(f"build {f.name}: {e}")
+            log.error(f"build {f if isinstance(f, str) else f.name}: {e}")
             sys.exit(1)
     elif len(args) >= 2 and args[0] == "reaudio":
         d = need_file(args[1], "Riaudio/riplayer")
@@ -1286,11 +1424,26 @@ def main():
             log.error(f"reaudio {d.name}: {e}")
             sys.exit(1)
     elif len(args) >= 2 and args[0] == "preview":
-        f = need_file(args[1], "Anteprima")
+        src = args[1]
+        if is_url(src):
+            f = src
+        else:
+            f = need_file(args[1], "Anteprima")
         try:
-            preview_from_docx(f)
+            preview_from_docx(f, no_cache="--no-cache" in sys.argv)
         except Exception as e:  # noqa: BLE001
             print(f"✗ Anteprima fallita: {e}")
+            sys.exit(1)
+    elif len(args) >= 2 and args[0] in ("single", "export"):
+        d = need_file(args[1], "HTML singolo")
+        from export_single import export_single
+        try:
+            p = export_single(d)
+            mb = p.stat().st_size / 1024 / 1024
+            print(f"→ HTML singolo pronto: {p}")
+            print(f"  dimensione: {mb:.1f} MB — apri con doppio clic nel browser")
+        except Exception as e:  # noqa: BLE001
+            print(f"✗ Esportazione fallita: {e}")
             sys.exit(1)
     elif len(args) >= 1 and args[0] == "check":
         import runpy
@@ -1300,7 +1453,10 @@ def main():
         print("Esempi:")
         print("  python new_lesson.py watch")
         print("  python new_lesson.py build 02_Regolamento_IA_Revisionato.docx")
+        print("  python new_lesson.py build https://it.wikipedia.org/wiki/Energia")
+        print("  python new_lesson.py build https://www.youtube.com/watch?v=VIDEO_ID")
         print("  python new_lesson.py preview 02_Regolamento_IA_Revisionato.docx")
+        print("  python new_lesson.py single <cartella_lesson>   # HTML unico, tutto incluso")
         sys.exit(1)
 
 

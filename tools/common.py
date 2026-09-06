@@ -17,15 +17,19 @@ BASE = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = {
     "llm_url": "http://localhost:20128/v1",
     "llm_model": "comboact",
+    "llm_api_key": "",
     "voice": "it_IT-serena-high",
     "edge_voice": "it-IT-GiuseppeMultilingualNeural",
     "edge_rate": "-4%",
+    "audio_bitrate": 96,
     "theme": "dark",
     "num_moduli_min": 4,
     "num_moduli_max": 7,
     "porta": 8341,
     "llm_contesto_caratteri": 18000,
     "cache_max_mb": 300,
+    "tts_workers": 4,
+    "tts_retries": 2,
 }
 
 

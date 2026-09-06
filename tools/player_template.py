@@ -1842,16 +1842,20 @@ function blockErrore(s, idx) {
 const audio = new Audio();
 audio.preload = 'auto';
 audio.playbackRate = rate;
+const preAudio = new Audio();   // usato SOLO per scaldare la cache del browser
+preAudio.preload = 'auto';
+let preloadedUrl = null;
 let dur = 0, wordTimings = [], chunks = [], raf = null;
 
 function loadAudio(i, autoplay) {
   const s = slides[i];
-  // preload della traccia successiva: zero attesa quando si clicca Avanti
+  // preload della traccia successiva: il server glielo permette (ri-validazione
+  // 304), così quando si clicca Avanti il browser riusa il file scaricato e il
+  // passaggio tra slide è senza attese.
   const nxt = slides[i + 1];
-  if (nxt && nxt.audio && !window._preloaded) window._preloaded = {};
-  if (nxt && nxt.audio && !window._preloaded[nxt.audio]) {
-    const pre = new Audio(); pre.preload = 'auto'; pre.src = nxt.audio;
-    window._preloaded[nxt.audio] = true;
+  if (nxt && nxt.audio && nxt.audio !== preloadedUrl) {
+    try { preAudio.src = nxt.audio; } catch (e) {}
+    preloadedUrl = nxt.audio;
   }
   audio.pause();
   audio.src = s.audio || '';

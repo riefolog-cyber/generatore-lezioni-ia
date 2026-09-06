@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+import tkinter as tk
 from tkinter import Tk, Button, Listbox, Text, Label, END, SINGLE, Checkbutton, BooleanVar
 from tkinter import filedialog, messagebox
 
@@ -46,6 +47,13 @@ class App:
         Label(root, text="2. Lezioni generate (*_lesson)").pack(anchor="w", padx=8)
         self.lb_lessons = Listbox(root, selectmode=SINGLE, height=4)
         self.lb_lessons.pack(fill="x", padx=8)
+
+        Label(root, text="3. Oppure genera da un link (sito web o video YouTube)").pack(anchor="w", padx=8)
+        url_row = tk.Frame(root)
+        url_row.pack(fill="x", padx=8)
+        self.url_var = tk.StringVar()
+        tk.Entry(url_row, textvariable=self.url_var).pack(side="left", fill="x", expand=True, padx=(0, 4))
+        tk.Button(url_row, text="Genera da link", command=self.do_build_url).pack(side="left")
 
         self.force = BooleanVar(value=False)
         Checkbutton(root, text="Rigenera anche se esiste già (--force)",
@@ -155,6 +163,16 @@ class App:
             cmd.append("--force")
         if messagebox.askyesno("Genera", f"Genero la lezione da {f}? Può durare diversi minuti."):
             self.run(cmd)
+
+    def do_build_url(self):
+        u = self.url_var.get().strip()
+        if not u.lower().startswith(("http://", "https://")):
+            messagebox.showinfo("Genera da link",
+                                "Incolla un indirizzo completo (https://…).")
+            return
+        if messagebox.askyesno("Genera da link",
+                               f"Genero la lezione da:\n{u}\n\nPuò durare diversi minuti."):
+            self.run([sys.executable, "new_lesson.py", "build", u])
 
     def do_open(self):
         l = self.selected(self.lb_lessons)

@@ -27,12 +27,17 @@ def list_lessons():
 
 
 def find_port(start=DEFAULT_PORT, tries=10):
+    """Prima porta libera tra `start` e `start + tries`, provando a legarla
+    davvero (bind): un semplice test di connessione può dare falsi positivi.
+    Ritorna None se non c'è nessuna porta disponibile."""
     for port in range(start, start + tries):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(0.3)
-            if s.connect_ex(("127.0.0.1", port)) != 0:
+            try:
+                s.bind(("127.0.0.1", port))
                 return port
-    return start
+            except OSError:
+                continue
+    return None
 
 
 class _QuietHandler(http.server.SimpleHTTPRequestHandler):
@@ -47,9 +52,19 @@ class _QuietHandler(http.server.SimpleHTTPRequestHandler):
         pass
 
     def end_headers(self):
-        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
-        self.send_header("Pragma", "no-cache")
-        self.send_header("Expires", "0")
+        # Gli MP3 sono i file "pesanti" e il player li pre-carica (traccia
+        # successiva). Con `no-cache` (ri-validazione, NON no-store) il browser
+        # li riusa dopo un semplice 304 e il passaggio tra slide è immediato;
+        # se la lezione viene rigenerata, il nuovo mtime del file forza un 200
+        # con contenuto fresco. Hanno già Last-Modified/If-Modified-Since via
+        # SimpleHTTPRequestHandler.send_head(). Il resto (html/js/css/dati)
+        # resta no-store: la pagina non può mai arrivare "stantia".
+        if self.path.lower().endswith(".mp3"):
+            self.send_header("Cache-Control", "private, no-cache")
+        else:
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
         self.send_header("Accept-Ranges", "bytes")   # seek fluido nella barra audio
         super().end_headers()
 
@@ -147,8 +162,16 @@ def serve(lesson_dir=None, port=None):
                     print(f"  - {l.name}")
             sys.exit(1)
     port = port or find_port()
+    if port is None:
+        print(f"ERRORE: nessuna porta libera tra {DEFAULT_PORT} e "
+              f"{DEFAULT_PORT + 9} (tutte occupate). Chiudi gli altri server "
+              "e riprova, oppure imposta un'altra porta in config.json.")
+        sys.exit(1)
     if lesson_dir is None:
-        # hub: indice delle lezioni, i link puntano alle singole cartelle
+        # hub: indice delle lezioni, i link puntano alle singole cartelle.
+        # Sicurezza: vengono esposte SOLO le cartelle *_lesson; qualsiasi altro
+        # file del progetto (config.json, sorgenti, log, .git…) risponde 404.
+        _allowed = {l.name for l in list_lessons()}
         url = f"http://localhost:{port}/"
         print("=" * 60)
         print("  Indice lezioni (hub)")
@@ -166,8 +189,13 @@ def serve(lesson_dir=None, port=None):
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
                     self.wfile.write(body)
-                else:
-                    super().do_GET()
+                    return
+                first = self.path.lstrip("/").split("/", 1)[0]
+                if first not in _allowed:
+                    self.send_error(404, "Non disponibile")
+                    return
+                super().do_GET()
+
 
         handler_cls = _HubHandler
         directory = str(BASE)

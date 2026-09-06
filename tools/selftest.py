@@ -26,7 +26,28 @@ import threading
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent.parent
-CHROME = r"C:/Program Files/Google/Chrome/Application/chrome.exe"
+
+
+def _find_chrome():
+    """Chrome in più percorsi comuni (non solo Program Files) + PATH."""
+    cands = [
+        r"C:/Program Files/Google/Chrome/Application/chrome.exe",
+        r"C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
+        r"C:/Users/{0}/AppData/Local/Google/Chrome/Application/chrome.exe",
+        r"C:/Program Files/Microsoft/Edge/Application/msedge.exe",
+        r"C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
+    ]
+    import os
+    user = os.environ.get("USERNAME", "")
+    for c in cands:
+        p = Path(c.format(user) if "{0}" in c else c)
+        if p.exists():
+            return str(p)
+    w = shutil.which("chrome") or shutil.which("msedge")
+    return w
+
+
+CHROME = _find_chrome()
 
 
 def find_lessons():
@@ -183,7 +204,7 @@ def check_render(L, n_slides, errs):
                 pass
 
 
-def run(lesson_name=None):
+def run(lesson_name=None, no_render=False):
     lessons = [BASE / lesson_name] if lesson_name else find_lessons()
     if not lessons:
         print("Nessuna lezione da testare.")
@@ -198,7 +219,8 @@ def run(lesson_name=None):
             data = check_data(L, errs, stats)
         if data is not None and not [e for e in errs if "manca" in e]:
             check_http(L, data, errs)
-            check_render(L, stats.get("slide", 0), errs)
+            if not no_render:
+                check_render(L, stats.get("slide", 0), errs)
         if stats:
             print(f"  slide: {stats.get('slide', '?')} — attività: {stats.get('attivita', '?')}"
                   f" — audio: {stats.get('audio', '?')}")
@@ -219,4 +241,5 @@ if __name__ == "__main__":
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
-    sys.exit(run(sys.argv[1] if len(sys.argv) > 1 else None))
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    sys.exit(run(args[0] if args else None, no_render="--no-render" in sys.argv))
