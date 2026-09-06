@@ -10,6 +10,8 @@ Uso:
   python new_lesson.py build https://www.youtube.com/watch?v=...
   python new_lesson.py build <file.docx> --bozza  # senza LLM (struttura dal docx)
   python new_lesson.py build <file.docx> --no-cache  # salta la cache LLM (nuovi contenuti)
+  python new_lesson.py build <file.docx> --single  # SOLO file HTML unico (senza cartella)
+  python new_lesson.py build <file.docx> --single --keep-folder  # file unico + cartella
   python new_lesson.py preview <file|URL>       # anteprima struttura (nessun audio)
   python new_lesson.py reaudio <cartella_lesson>  # rigenera audio/VTT/player (senza LLM)
 
@@ -1095,20 +1097,25 @@ def _unlock_build():
         pass
 
 
-def build_from_docx(path, force=False, bozza=False, no_cache=False):
+def build_from_docx(path, force=False, bozza=False, no_cache=False,
+                    single=False, keep_folder=False):
     """Avvia la generazione (con blocco anti-concorrenza: una alla volta).
     `path` può essere un file (.docx/.pdf/.txt/.md/.html) oppure un URL
-    (sito web o video YouTube). no_cache=True salta la cache LLM."""
+    (sito web o video YouTube). no_cache=True salta la cache LLM.
+    single=True: resta UN SOLO file HTML completo (audio incorporato) e la
+    cartella temporanea viene rimossa (keep_folder=True la conserva)."""
     if not _lock_build():
         print(f"  ⚠ Un'altra generazione è già in corso ({LOCK.name} presente): salto {path}.")
         return None, False
     try:
-        return _build_impl(path, force=force, bozza=bozza, no_cache=no_cache)
+        return _build_impl(path, force=force, bozza=bozza, no_cache=no_cache,
+                           single=single, keep_folder=keep_folder)
     finally:
         _unlock_build()
 
 
-def _build_impl(source, force=False, bozza=False, no_cache=False):
+def _build_impl(source, force=False, bozza=False, no_cache=False,
+                single=False, keep_folder=False):
     log = setup_logging()
     src = str(source)
     display = src if is_url(src) else Path(src).name
@@ -1204,6 +1211,26 @@ def _build_impl(source, force=False, bozza=False, no_cache=False):
     print(f"→ LEZIONE PRONTA: {out_dir}  ({time.time() - t0:.0f}s)\n")
     if not ok:
         print("⚠ La lezione è stata generata ma la validazione ha segnalato problemi.\n")
+
+    # modalità "file unico": esporta tutto (audio compreso) in un solo HTML
+    # auto-contenuto e, se richiesto, rimuove la cartella temporanea
+    if single:
+        try:
+            from export_single import export_single
+            out_single = BASE / f"{out_dir.name.replace('_lesson', '')}_singola.html"
+            export_single(out_dir, out_path=out_single)
+            mb = out_single.stat().st_size / 1024 / 1024
+            print(f"→ FILE UNICO PRONTO: {out_single} ({mb:.1f} MB — "
+                  "ha tutto dentro: audio, testi, attività)", flush=True)
+            if not keep_folder:
+                shutil.rmtree(out_dir, ignore_errors=True)
+                print(f"  cartella {out_dir.name} rimossa: basta il file unico.\n",
+                      flush=True)
+            return out_single, ok
+        except Exception as e:  # noqa: BLE001
+            print(f"  ⚠ File unico non creato ({e}): resta la cartella {out_dir.name}\n",
+                  flush=True)
+            return out_dir, ok
     return out_dir, ok
 
 
@@ -1410,7 +1437,9 @@ def main():
             f = need_file(args[1], "Genera lezione")
         try:
             build_from_docx(f, force="--force" in sys.argv, bozza="--bozza" in sys.argv,
-                            no_cache="--no-cache" in sys.argv)
+                            no_cache="--no-cache" in sys.argv,
+                            single="--single" in sys.argv,
+                            keep_folder="--keep-folder" in sys.argv)
         except Exception as e:  # noqa: BLE001
             print(f"✗ Generazione fallita: {e}")
             log.error(f"build {f if isinstance(f, str) else f.name}: {e}")

@@ -9,7 +9,8 @@ il **pannello di controllo** (pagina grafica), con cui puoi:
    `.html`), oppure usa i file già presenti nella cartella, e premere **Genera**;
 2. generare da **link** (sito web o video YouTube);
 3. impostare le **opzioni**: rigenera anche le lezioni esistenti (`--force`),
-   bozza senza LLM (`--bozza`), rigenera solo l'audio di una lezione;
+   bozza senza LLM (`--bozza`), rigenera solo l'audio di una lezione,
+   generare come **file HTML unico** (senza cartella);
 4. seguire il **log** in tempo reale;
 5. **aprire** le lezioni generate (anche da tablet/telefono sulla stessa rete
    Wi-Fi: l'indirizzo LAN è mostrato nel pannello).
@@ -85,6 +86,13 @@ Dipendenze opzionali per PDF e YouTube: `pip install -r requirements-extra.txt`.
   indice da cui scegliere quale lezione avviare.
 - **Self-test**: `python tools/selftest.py` verifica in un colpo solo file,
   dati, audio, sottotitoli, server e rendering headless (zero errori JS).
+- **File unico "HTML singolo"**: con `python new_lesson.py build <file> --single`
+  (o la casella **"Genera come file HTML unico"** nel pannello) la build produce
+  un solo `Nome_singola.html` auto-contenuto — CSS, script, dati e TUTTO l'audio
+  incorporato — e rimuove la cartella: basta un doppio clic per aprirlo su
+  qualsiasi computer, anche da pendrive o via email, senza server né internet.
+  `--keep-folder` conserva anche la cartella. I file unici generati compaiono
+  nel pannello sotto "File unici" con il link per aprirli/salvarli.
 - Nessun video: niente clip da generare (build molto più rapida).
 - `report.html` in ogni lezione con l'esito della validazione.
 
@@ -142,3 +150,4 @@ assets/voice/        modello Piper + cache audio
 - Anteprima veloce senza audio: `python new_lesson.py preview file.docx`.
 - Riaudio/riplayer senza rifare l'LLM (dopo aver cambiato voce o tema in
   config.json): `python new_lesson.py reaudio Nome_Lezione_lesson`.
+- File HTML unico senza cartella: `python new_lesson.py build file.docx --single`.

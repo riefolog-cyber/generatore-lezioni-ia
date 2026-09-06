@@ -183,6 +183,37 @@ def test_llm_cache_put_get_roundtrip():
         new_lesson.LLM_CACHE_DIR = old
 
 
+# ---------------------------------------------------------------- export_single
+def test_export_single_incorpora_css_js_audio():
+    import shutil
+    import tempfile
+    from export_single import export_single
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        d = root / "Lezione_Prova_lesson_test"
+        (d / "assets" / "audio").mkdir(parents=True)
+        (d / "assets" / "captions").mkdir(parents=True)
+        (d / "main.css").write_text("body{}", encoding="utf-8")
+        (d / "main.js").write_text("// js", encoding="utf-8")
+        (d / "index.html").write_text(
+            '<link rel="stylesheet" href="main.css?v=123">'
+            '<script src="lesson-data.js?v=123"></script>'
+            '<script src="main.js?v=123"></script>', encoding="utf-8")
+        (d / "assets" / "audio" / "narration-01.mp3").write_bytes(b"\x00\x01\x02")
+        (d / "lesson-data.js").write_text(
+            'window.LESSON_DATA={"titolo":"T","slides":'
+            '[{"audio":"./assets/audio/narration-01.mp3"}]};',
+            encoding="utf-8")
+        out = export_single(d, out_path=root / "Lezione_Prova_singola.html")
+        html = out.read_text(encoding="utf-8")
+        assert out.exists()
+        # audio incorporato come data URI, niente riferimenti esterni rimasti
+        assert "data:audio/mpeg;base64" in html
+        assert 'href="main.css' not in html
+        assert 'src="main.js' not in html
+        assert 'src="lesson-data.js' not in html
+
+
 # ---------------------------------------------------------------- sources
 def test_supported_ext():
     assert ".docx" in SUPPORTED_EXT and ".pdf" in SUPPORTED_EXT

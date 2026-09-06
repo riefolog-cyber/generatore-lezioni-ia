@@ -19,6 +19,9 @@ __pycache__/
 *.docx
 *.pdf
 
+# file HTML unici generati (così non finiscono in git: si rigenerano al volo)
+*_singola.html
+
 # artefatto generato dallo strumento esterno Archify (mappa del progetto)
 generatore-lezioni-mappa.html
 

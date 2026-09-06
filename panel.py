@@ -65,7 +65,7 @@ class _UploadTooBig(Exception):
 # l'invalidazione esplicita (dopo upload/generazione/ri-audio) rende le novità
 # subito disponibili senza aspettare la scadenza.
 LESSONS_CACHE_TTL = 2.0
-_lessons_cache = {"at": 0.0, "names": None, "hub": None}
+_lessons_cache = {"at": 0.0, "names": None, "hub": None, "singles": None}
 
 
 def _bump_lessons_cache():
@@ -73,12 +73,19 @@ def _bump_lessons_cache():
     if _lessons_cache["names"] is None or now - _lessons_cache["at"] > LESSONS_CACHE_TTL:
         _lessons_cache.update(at=now,
                               names={l.name for l in list_lessons()},
+                              singles={p.name for p in BASE.glob("*_singola.html")
+                                       if p.is_file()},
                               hub=None)
 
 
 def _allowed_lesson_names():
     _bump_lessons_cache()
     return _lessons_cache["names"] or set()
+
+
+def _allowed_single_names():
+    _bump_lessons_cache()
+    return _lessons_cache["singles"] or set()
 
 
 def _hub_page_cached():
@@ -183,12 +190,27 @@ def _deps():
     }
 
 
+def _single_files():
+    """File HTML unici generati (Nome_singola.html) con dimensione."""
+    out = []
+    for p in sorted(BASE.glob("*_singola.html")):
+        if p.is_file():
+            try:
+                out.append({"name": p.name,
+                            "stem": p.name.replace("_singola.html", ""),
+                            "size": p.stat().st_size})
+            except OSError:
+                continue
+    return out
+
+
 def _state():
     lessons = [{"name": l.name,
                 "title": l.name.replace("_lesson", "")} for l in list_lessons()]
     return {
         "materials": _materials(),
         "lessons": lessons,
+        "singles": _single_files(),
         "deps": _deps(),
         "lan_ip": lan_ip(),
         "port": DEFAULT_PORT,
@@ -256,13 +278,15 @@ class PanelHandler(_RangeHandler):
         src = self._resolve_source(str(data.get("source") or ""))
         force = bool(data.get("force"))
         bozza = bool(data.get("bozza"))
-        return src, force, bozza
+        single = bool(data.get("single"))
+        return src, force, bozza, single
 
     def _start(self, parsed):
         import new_lesson
-        src, force, bozza = parsed
+        src, force, bozza, single = parsed
         ok = start_job(
-            lambda: new_lesson.build_from_docx(src, force=force, bozza=bozza),
+            lambda: new_lesson.build_from_docx(src, force=force, bozza=bozza,
+                                               single=single),
             "generazione", Path(src).name if not is_url(src) else src)
         if not ok:
             self._json({"started": False, "reason": "Un'altra generazione è già in corso."}, 409)
@@ -366,9 +390,9 @@ class PanelHandler(_RangeHandler):
             return
         first = path.lstrip("/").split("/", 1)[0]
         # whitelist con TTL breve (2s) + invalidazione su upload/generazione:
-        # le lezioni appena create diventano subito disponibili, ma senza fare
-        # glob su disco a ogni file audio richiesto durante la riproduzione
-        if first not in _allowed_lesson_names():
+        # le lezioni appena create (o i file unici *_singola.html) diventano
+        # subito disponibili, ma senza fare glob su disco a ogni asset
+        if first not in _allowed_lesson_names() and first not in _allowed_single_names():
             self.send_error(404, "Non disponibile")
             return
         super().do_GET()
@@ -485,6 +509,7 @@ margin:0 0 14px;color:var(--mut);font-size:13px;cursor:pointer;user-select:none}
     <div class="opts">
       <label><input type="checkbox" id="forceAll"> Rigenera anche le lezioni già esistenti (--force)</label>
       <label><input type="checkbox" id="bozzaAll"> Bozza senza LLM (struttura dal testo, --bozza)</label>
+      <label><input type="checkbox" id="singleAll"> Genera come file HTML unico, senza cartella</label>
     </div>
   </div>
 
@@ -499,6 +524,8 @@ margin:0 0 14px;color:var(--mut);font-size:13px;cursor:pointer;user-select:none}
   <div class="card">
     <h2>3. Lezioni generate</h2>
     <div id="lessons"></div>
+    <h2 style="margin-top:16px">File unici (HTML singolo)</h2>
+    <div id="singles"></div>
   </div>
 
   <div class="card">
@@ -562,6 +589,15 @@ async function refresh() {
         <button class="mini ghost" onclick="reaudio('${l.name}')">Rigenera audio</button>
       </div>`).join('')
       : '<div class="empty">Nessuna lezione generata ancora.</div>';
+
+    const singles = s.singles || [];
+    $('#singles').innerHTML = singles.length ? singles.map(f =>
+      `<div class="row">
+        <span class="name">${f.stem}</span>
+        <span class="meta">${fmtSize(f.size)}</span>
+        <a class="apri" href="/${f.name}" target="_blank" download="${f.name}">Apri / salva →</a>
+      </div>`).join('')
+      : '<div class="empty">Nessun file unico: spunta "Genera come file HTML unico" qui sopra la prossima volta.</div>';
   } catch (e) {
     $('#statusline').textContent = 'Errore: ' + e.message;
   }
@@ -605,7 +641,8 @@ async function startJob(path, payload) {
 }
 
 async function gen(name) {
-  startJob('build', { source: name, force: $('#forceAll').checked, bozza: $('#bozzaAll').checked });
+  startJob('build', { source: name, force: $('#forceAll').checked,
+                      bozza: $('#bozzaAll').checked, single: $('#singleAll').checked });
 }
 
 async function reaudio(lesson) {
@@ -693,7 +730,8 @@ $('#btnUpX').onclick = clearUpload;
 $('#btnUrl').onclick = () => {
   const u = $('#url').value.trim();
   if (!/^https?:\/\//i.test(u)) { alert('Incolla un indirizzo completo (https://…).'); return; }
-  startJob('build', { source: u, force: $('#forceAll').checked, bozza: $('#bozzaAll').checked });
+  startJob('build', { source: u, force: $('#forceAll').checked,
+                      bozza: $('#bozzaAll').checked, single: $('#singleAll').checked });
 };
 
 refresh();
