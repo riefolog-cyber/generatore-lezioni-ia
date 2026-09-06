@@ -113,6 +113,9 @@ config.json          llm_url, llm_model, llm_api_key (opzionale), voice,
                      edge_voice, edge_rate, audio_bitrate, theme,
                      num_moduli_min/max, porta, cache_max_mb,
                      tts_workers, tts_retries
+generatore-lezioni-mappa.html   mappa interattiva del sistema (Archify):
+                     apri nel browser per esplorare componenti e percorsi
+generatore-lezioni-mappa.json   sorgente dell'IR per rigenerare la mappa
 requirements.txt     python-docx, edge-tts (ffmpeg serve per durata/fallback)
 requirements-extra.txt  pypdf (PDF), youtube-transcript-api (YouTube)
 requirements-dev.txt    pytest (test unitari)
