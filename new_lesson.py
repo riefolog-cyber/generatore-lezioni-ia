@@ -33,6 +33,7 @@ Configurazione (config.json): llm_url, llm_model, voice, theme, porta.
 import hashlib
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -62,6 +63,32 @@ LLM_API_KEY = CONFIG.get("llm_api_key") or ""
 
 MIN_MODULI = int(CONFIG.get("num_moduli_min", 4))
 MAX_MODULI = int(CONFIG.get("num_moduli_max", 7))
+CACHE_VERSION = "v2"  # bump per invalidare cache audio/llm dopo fix Fase 0/1
+_FFMPEG_OK = None
+AUDIO_DUAL_PASS = bool(CONFIG.get("audio_loudnorm_dual", False))
+
+
+def _ffmpeg_ok():
+    """Cache del check ffmpeg: evita decine di spawn falliti quando manca."""
+    global _FFMPEG_OK
+    if _FFMPEG_OK is None:
+        _FFMPEG_OK = bool(shutil.which("ffmpeg"))
+    return _FFMPEG_OK
+
+
+def _jitter_sleep(base):
+    time.sleep(base + random.uniform(0, 1.0))
+
+
+def _is_retryable(msg):
+    """Solo errori transienti meritano retry: 429/5xx/timeout/connessione.
+    401/403/400/404 (voce/modello errati) falliscono subito."""
+    m = (msg or "").lower()
+    if any(k in m for k in ("401", "403", "unauthorized", "forbidden",
+                            "400", "bad request", "404", "not found",
+                            "invalid voice", "invalid model")):
+        return False
+    return True
 
 
 # ================================================================== 1. estrazione fonte
@@ -173,6 +200,7 @@ in una lezione interattiva strutturata. Regole:
 - RISPOSTA COMPATTA: "testo" max 2 frasi, "punti" max 3, spiegazioni e feedback
   max 12 parole ciascuno. Nessun testo fuori dal JSON.
 {regole}
+{profilo_istruzioni}
 - Se il materiale lo consente aggiungi anche "sequenza" (3-5 passi); altrimenti null/vuoto.
 - Sii fedele al documento: nessuna invenzione.
 - Le narrazioni devono suonare naturali e parlate, in italiano.
@@ -184,10 +212,39 @@ MATERIALE DIDATTICO:
 {testo}"""
 
 
-def _regole_adattive(nchars):
+def profilo_istruzioni(profilo):
+    """Istruzioni LLM dal profilo (durata/livello/obiettivo Bloom)."""
+    if not isinstance(profilo, dict):
+        return ""
+    durata = profilo.get("durata", "standard")
+    livello = profilo.get("livello", "intermedio")
+    obiettivo = profilo.get("obiettivo", "comprensione")
+    liv = {"base": "linguaggio semplice, definisci ogni termine tecnico, esempi concreti",
+           "intermedio": "linguaggio chiaro ma preciso, collegamenti tra concetti",
+           "avanzato": "dettagli, casi limite, distinzioni sottili, niente banalizzazioni"}.get(livello, "")
+    ob = {"conoscenza": "verifica il ricordo: definizioni, fatti, termini chiave",
+          "comprensione": "verifica la comprensione: spiega con parole tue, esempi, confronti",
+          "applicazione": "verifica l'uso: casi concreti, cosa faresti, errori tipici",
+          "analisi": "verifica l'analisi: confronta, scomponi, trova relazioni ed errori"}.get(obiettivo, "")
+    return (f"- PROFILO LEZIONE: durata {durata}, livello {livello} ({liv}). "
+            f"Obiettivo Bloom: {obiettivo} ({ob}).")
+
+
+def profilo_moduli(profilo):
+    """Range moduli dal profilo durata (None = usa config)."""
+    d = (profilo or {}).get("durata", "standard") if isinstance(profilo, dict) else "standard"
+    if d == "breve":
+        return (3, 4)
+    if d == "approfondita":
+        return (6, 8)
+    return (MIN_MODULI, MAX_MODULI)
+
+
+def _regole_adattive(nchars, profilo=None):
     """Regole per l'LLM proporzionate alla quantità di materiale: con poco
     testo chiediamo meno attività (e MAI inventare), con molto tutto il
-    pacchetto. Ritorna (regole, nmin, nmax)."""
+    pacchetto. Ritorna (regole, nmin, nmax). Il profilo durata può restringere
+    o estendere il range moduli."""
     if nchars < 3500:
         return ("""- Ogni quiz ha ESATTAMENTE 4 opzioni, una sola corretta (se il materiale
   non basta a 4 opzioni serie, usa 3 opzioni: mai distrattori inventati).
@@ -215,7 +272,7 @@ def _regole_adattive(nchars):
   "errore" riporta ESATTAMENTE le parole sbagliate del brano).
 - Ogni modulo ha ESATTAMENTE 3 "flashcards" termine/definizione sui concetti
   chiave (definizioni brevi, definizioni diverse tra loro).""",
-            MIN_MODULI, MAX_MODULI)
+            *profilo_moduli(profilo))
 
 
 def parse_json(content):
@@ -242,25 +299,30 @@ LLM_REQUEST_TIMEOUT = 150   # secondi per singola richiesta
 LLM_TOTAL_DEADLINE = 420    # secondi totali per tutta la fase LLM (poi fallback)
 
 
-def llm_structure(ext, use_cache=True):
+def llm_structure(ext, use_cache=True, profilo=None):
     """Chiama 9router e restituisce (struttura, via).
     via è "cache" se la struttura viene riusata da una chiamata precedente
-    sulla stessa fonte (stesso hash testo+modello+parametri), altrimenti "llm".
+    sulla stessa fonte (stesso hash testo+modello+parametri+profilo), altrimenti "llm".
     Con use_cache (default), rigenerare lo stesso materiale non rifà la chiamata
     LLM (che può durare minuti): si usa --no-cache per forzare contenuti nuovi."""
-    key = _llm_cache_key(ext) if use_cache else None
+    key = _llm_cache_key(ext, profilo) if use_cache else None
     if key:
         hit = _llm_cache_get(key)
         if hit is not None:
-            print("  cache LLM: struttura riusata (fonte e modello invariati; "
+            print("  cache LLM: struttura riusata (fonte, modello e profilo invariati; "
                   "--no-cache per rigenerarla)", flush=True)
             return hit, "cache"
     testo = _flatten(ext)
-    regole, nmin, nmax = _regole_adattive(len(testo))
-    if (nmin, nmax) != (MIN_MODULI, MAX_MODULI):
+    regole, nmin, nmax = _regole_adattive(len(testo), profilo)
+    if (nmin, nmax) != profilo_moduli(profilo):
         print(f"  materiale corto ({len(testo)} caratteri): moduli {nmin}-{nmax} "
               "e attività ridotte per non inventare contenuti", flush=True)
-    prompt = PROMPT_TMPL.format(nmin=nmin, nmax=nmax, regole=regole, schema=SCHEMA, testo=testo)
+    print(f"  profilo: {((profilo or {}).get('durata', '?'))}/"
+          f"{((profilo or {}).get('livello', '?'))}/"
+          f"{((profilo or {}).get('obiettivo', '?'))} -> moduli {nmin}-{nmax}", flush=True)
+    prompt = PROMPT_TMPL.format(nmin=nmin, nmax=nmax, regole=regole,
+                                profilo_istruzioni=profilo_istruzioni(profilo),
+                                schema=SCHEMA, testo=testo)
     models = []
     for m in (LLM_MODEL or pick_model(), "comboact", "openrouter/openrouter/free"):
         if m and m not in models:
@@ -307,7 +369,14 @@ def llm_structure(ext, use_cache=True):
                     return struct, "llm"
                 except Exception as e:  # noqa: BLE001
                     last = e
-                    print(f"  scarto risposta {model}: {str(e)[:100]}", flush=True)
+                    msg = str(e)[:100]
+                    print(f"  scarto risposta {model}: {msg}", flush=True)
+                    if not _is_retryable(str(e)):
+                        print(f"  errore non retryable su {model}, passo oltre", flush=True)
+                        continue
+            # backoff con jitter tra round completi (evita hammering su 429/5xx)
+            if time.time() - t0 < LLM_TOTAL_DEADLINE:
+                _jitter_sleep(min(2 * attempt, 10))
     raise RuntimeError(f"LLM non disponibile entro {LLM_TOTAL_DEADLINE}s: {last}")
 
 
@@ -453,10 +522,15 @@ def _flatten(ext, limit=None):
         out.extend(s["paras"])
     txt = "\n".join(out)
     if len(txt) > limit:
-        print(f"  ⚠ materiale lungo ({len(txt)} caratteri): l'LLM vede i primi "
-              f"{limit} caratteri ({len(txt) - limit} troncati). "
-              "Valuta di spezzare il documento in più lezioni.", flush=True)
-    return txt[:limit] + ("…" if len(txt) > limit else "")
+        # Testa + coda (non solo testa): intro e conclusione restano visibili
+        head = int(limit * 0.67)
+        tail = limit - head
+        txt = (txt[:head] + "\n\n[...omissis: parte centrale tagliata per limite contesto...]\n\n"
+               + txt[len(txt) - tail:])
+        print(f"  [!] materiale lungo: l'LLM vede testa+coda ({limit} caratteri). "
+              "Valuta di spezzare il documento in piu' lezioni.", flush=True)
+        return txt
+    return txt
 
 
 # ---------------------------------------------------------------- cache LLM
@@ -467,13 +541,16 @@ LLM_CACHE_DIR = BASE / ".llm_cache"
 LLM_CACHE_MAX = 200        # oltre questo numero di voci si eliminano le più vecchie
 
 
-def _llm_cache_key(ext):
+def _llm_cache_key(ext, profilo=None):
     """Chiave: hash del testo appiattito + parametri che influenzano il prompt
-    (modello, URL del router, numero moduli, limite contesto)."""
+    (modello, URL del router, numero moduli, limite contesto, profilo)."""
     txt = _flatten(ext)
+    p = profilo if isinstance(profilo, dict) else {}
     payload = "\x1f".join([
         txt, LLM_URL, str(LLM_MODEL or ""),
         str(MIN_MODULI), str(MAX_MODULI), str(FLATTEN_LIMIT),
+        str(p.get("durata", "")), str(p.get("livello", "")), str(p.get("obiettivo", "")),
+        CACHE_VERSION,
     ])
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
@@ -736,26 +813,57 @@ def _ffmpeg_probe(path):
         probe = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
              "-of", "default=nw=1:nk=1", str(path)],
-            capture_output=True, text=True)
+            capture_output=True, text=True, timeout=15)
         return float(probe.stdout.strip())
     except Exception:
         return None
+
+
+def _atomic_write_bytes(path, data):
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
 
 
 def _polish_mp3(src, bitrate="96k"):
     """Post-produzione ffmpeg: loudness uniforme tra le slide (niente salti di
     volume), micro-fade d'ingresso anti-pop e rimux a 44.1 kHz. Se ffmpeg manca
     il file resta com'è: nessun fallimento."""
+    if not _ffmpeg_ok():
+        return False
     try:
         tmp = src.with_suffix(".pol.mp3")
+        filt = "loudnorm=I=-17:TP=-1.5:LRA=9,afade=t=in:st=0:d=0.04"
+        if AUDIO_DUAL_PASS:
+            # Dual-pass: misura poi applica (qualità superiore, ~2x tempo)
+            meas = subprocess.run(
+                ["ffmpeg", "-y", "-i", str(src), "-af",
+                 "loudnorm=I=-17:TP=-1.5:LRA=9:print_format=json",
+                 "-f", "null", "-"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                text=True, timeout=120, check=False)
+            import json as _j
+            m = re.search(r"\{[^}]*measured_[^}]+\}", meas.stderr or "", re.S)
+            if m:
+                try:
+                    vals = _j.loads(m.group(0))
+                    filt = ("loudnorm=I=-17:TP=-1.5:LRA=9:"
+                            f"measured_I={vals['measured_I']}:"
+                            f"measured_TP={vals['measured_TP']}:"
+                            f"measured_LRA={vals['measured_LRA']}:"
+                            f"measured_thresh={vals['measured_thresh']}:"
+                            f"offset={vals.get('target_offset', 0)}:"
+                            "linear=true,afade=t=in:st=0:d=0.04")
+                except Exception:
+                    pass
         subprocess.run(
-            ["ffmpeg", "-y", "-i", str(src), "-af",
-             "loudnorm=I=-17:TP=-1.5:LRA=9,afade=t=in:st=0:d=0.04",
+            ["ffmpeg", "-y", "-i", str(src), "-af", filt,
              "-ar", "44100", "-codec:a", "libmp3lame", "-b:a", bitrate,
              str(tmp)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=120, check=False)
         if tmp.exists() and tmp.stat().st_size > 1000:
-            tmp.replace(src)
+            os.replace(tmp, src)
             return True
         try:
             tmp.unlink(missing_ok=True)
@@ -788,11 +896,14 @@ def _try_edge_tts(text, mp3_path):
 
         mp3, words = asyncio.run(_run())
         if len(mp3) > 1000:
-            mp3_path.write_bytes(mp3)
+            _atomic_write_bytes(mp3_path, mp3)
             return True, words
+        return False, []
     except Exception as e:  # noqa: BLE001
         print(f"  edge-tts non disponibile ({str(e)[:80]})", flush=True)
-    return False, []
+        # Marca l'errore per il chiamante: se non retryable, niente attesa
+        _try_edge_tts.last_retryable = _is_retryable(str(e))
+        return False, []
 
 
 def _try_piper(text, mp3_path):
@@ -816,10 +927,13 @@ def _try_piper(text, mp3_path):
                 except OSError:
                     pass
         if ok:
+            if not _ffmpeg_ok():
+                return False, []
             subprocess.run(
                 ["ffmpeg", "-y", "-i", str(wav), "-codec:a", "libmp3lame",
                  "-b:a", EDGE_BITRATE, "-ar", "44100", "-ac", "1", str(mp3_path)],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=120, check=False)
             try:
                 wav.unlink()
             except OSError:
@@ -886,11 +1000,19 @@ def _weighted_words(text, dur):
 
 def _silent_mp3(path, seconds):
     """Ultimo recurso: mp3 silenzioso (l'audio non è mai assente)."""
-    subprocess.run(
-        ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
-         "-t", str(max(1.0, seconds)), "-codec:a", "libmp3lame", "-b:a", "32k",
-         str(path)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    if not _ffmpeg_ok():
+        # Senza ffmpeg: placeholder minimo (verrà stimata la durata)
+        path.write_bytes(b"\x00" * 2048)
+        return
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=24000:cl=mono",
+             "-t", str(max(1.0, seconds)), "-codec:a", "libmp3lame", "-b:a", "32k",
+             str(path)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=60, check=False)
+    except Exception:
+        pass
 
 
 def generate_audio(out_dir, slides):
@@ -910,7 +1032,7 @@ def generate_audio(out_dir, slides):
     for i, s in enumerate(slides):
         text = _tts_text(s.get("narration")) or "Fine di questa parte."
         h = hashlib.sha1(
-            f"edge|{EDGE_VOICE}|{EDGE_RATE}|{EDGE_BITRATE}|{text}".encode("utf-8")
+            f"{CACHE_VERSION}|edge|{EDGE_VOICE}|{EDGE_RATE}|{EDGE_BITRATE}|{text}".encode("utf-8")
         ).hexdigest()
         mp3 = AUDIO / f"narration-{i + 1:02d}.mp3"
         cached_mp3 = CACHE / f"{h}.mp3"
@@ -939,14 +1061,16 @@ def generate_audio(out_dir, slides):
         def _track(item):
             i, text, mp3, cached_mp3, cached_meta = item
             ok, words = False, []
-            # retry con backoff: edge-tts è un servizio di rete, un timeout
-            # singolo non deve far scendere la traccia a Piper/silenzio
+            # retry con backoff + jitter: solo errori transienti (timeout/429/5xx)
+            _try_edge_tts.last_retryable = True
             for attempt in range(TTS_RETRIES + 1):
                 ok, words = _try_edge_tts(text, mp3)
                 if ok:
                     break
+                if not getattr(_try_edge_tts, "last_retryable", True):
+                    break  # 401/403/voce errata: inutile riprovare
                 if attempt < TTS_RETRIES:
-                    time.sleep(2 * (attempt + 1))
+                    _jitter_sleep(2 * (attempt + 1))
             engine = "edge"
             if not ok:
                 engine = "piper"
@@ -958,10 +1082,18 @@ def generate_audio(out_dir, slides):
             else:
                 # post-produzione: loudness uniforme tra le slide + fade + 44.1 kHz
                 _polish_mp3(mp3, EDGE_BITRATE)
-                shutil.copyfile(mp3, cached_mp3)
-                if words:
-                    cached_meta.write_text(json.dumps(words, ensure_ascii=False),
-                                           encoding="utf-8")
+                try:
+                    # Scrittura cache atomica: mai file troncati su crash/kill
+                    tmp_c = cached_mp3.with_suffix(".mp3.tmp")
+                    shutil.copyfile(mp3, tmp_c)
+                    os.replace(tmp_c, cached_mp3)
+                    if words:
+                        tmp_j = cached_meta.with_suffix(".json.tmp")
+                        tmp_j.write_text(json.dumps(words, ensure_ascii=False),
+                                         encoding="utf-8")
+                        os.replace(tmp_j, cached_meta)
+                except OSError:
+                    pass
             return item, engine, words
 
         workers = min(TTS_WORKERS, len(todo))
@@ -1071,17 +1203,40 @@ def sanitize_stem(stem):
     return s or "Lezione"
 
 
+def _pid_alive(pid):
+    try:
+        if os.name == "nt":
+            import subprocess as _sp
+            out = _sp.run(["tasklist", "/FI", f"PID eq {pid}"],
+                          capture_output=True, text=True, timeout=5)
+            return str(pid) in (out.stdout or "")
+        os.kill(int(pid), 0)
+        return True
+    except Exception:
+        return False
+
+
 def _lock_build():
-    """Acquisisce il blocco di generazione. False = un'altra build è in corso."""
+    """Acquisisce il blocco di generazione. False = un'altra build è in corso.
+    Stale se >30min OPPURE se il PID proprietario non è più vivo (crash)."""
     if LOCK.exists():
         try:
-            stale = time.time() - LOCK.stat().st_mtime > 30 * 60
+            raw = LOCK.read_text(encoding="utf-8").strip()
+            try:
+                info = json.loads(raw)
+                pid, mtime = info.get("pid"), LOCK.stat().st_mtime
+            except Exception:
+                pid, mtime = int(raw), LOCK.stat().st_mtime
+            stale = (time.time() - mtime > 30 * 60) or not _pid_alive(pid)
         except OSError:
+            stale = True
+        except Exception:
             stale = True
         if not stale:
             return False
     try:
-        LOCK.write_text(str(os.getpid()), encoding="utf-8")
+        LOCK.write_text(json.dumps({"pid": os.getpid(), "t": time.time()}),
+                        encoding="utf-8")
         return True
     except OSError:
         return False
@@ -1095,24 +1250,25 @@ def _unlock_build():
 
 
 def build_from_docx(path, force=False, bozza=False, no_cache=False,
-                    single=False, keep_folder=False):
+                    single=False, keep_folder=False, profilo=None):
     """Avvia la generazione (con blocco anti-concorrenza: una alla volta).
     `path` può essere un file (.docx/.pdf/.txt/.md/.html) oppure un URL
     (sito web o video YouTube). no_cache=True salta la cache LLM.
     single=True: resta UN SOLO file HTML completo (audio incorporato) e la
-    cartella temporanea viene rimossa (keep_folder=True la conserva)."""
+    cartella temporanea viene rimossa (keep_folder=True la conserva).
+    profilo: dict {durata, livello, obiettivo} (validato, default da config)."""
     if not _lock_build():
         print(f"  ⚠ Un'altra generazione è già in corso ({LOCK.name} presente): salto {path}.")
         return None, False
     try:
         return _build_impl(path, force=force, bozza=bozza, no_cache=no_cache,
-                           single=single, keep_folder=keep_folder)
+                           single=single, keep_folder=keep_folder, profilo=profilo)
     finally:
         _unlock_build()
 
 
 def _build_impl(source, force=False, bozza=False, no_cache=False,
-                single=False, keep_folder=False):
+                single=False, keep_folder=False, profilo=None):
     log = setup_logging()
     src = str(source)
     display = src if is_url(src) else Path(src).name
@@ -1121,6 +1277,14 @@ def _build_impl(source, force=False, bozza=False, no_cache=False,
     msg = f"=== GENERO LA LEZIONE DA: {display} ==="
     print(f"\n{msg}")
     log.info(msg)
+    try:
+        from common import normalize_profilo as _np
+        _cfg_prof = {"durata": CONFIG.get("profilo_durata"),
+                     "livello": CONFIG.get("profilo_livello"),
+                     "obiettivo": CONFIG.get("profilo_obiettivo")}
+        profilo = _np({**_cfg_prof, **(profilo or {})})
+    except Exception:
+        profilo = {"durata": "standard", "livello": "intermedio", "obiettivo": "comprensione"}
     ext = extract_source(src)
     print(f'[1/6] Materiale letto ({len(ext["sections"])} sezioni), '
           f'titolo: {ext["title"][:60]}')
@@ -1137,7 +1301,7 @@ def _build_impl(source, force=False, bozza=False, no_cache=False,
     elif ensure_llm():
         print("[2/6] 9router raggiungibile: strutturazione contenuti (LLM)…")
         try:
-            struct, _via = llm_structure(ext, use_cache=not no_cache)
+            struct, _via = llm_structure(ext, use_cache=not no_cache, profilo=profilo)
             via_llm = True
             if _via == "cache":
                 print("  (struttura dalla cache LLM: stessa fonte e modello)", flush=True)
@@ -1178,7 +1342,7 @@ def _build_impl(source, force=False, bozza=False, no_cache=False,
     audio_probs = _validate_audio(out_dir, slides, measured)
     print(f"  cache audio: {cached}/{len(slides)} tracce riusate")
 
-    data = {"titolo": struct["titolo"], "slides": slides}
+    data = {"titolo": struct["titolo"], "slides": slides, "profilo": profilo}
     (out_dir / "lesson-data.js").write_text(
         "window.LESSON_DATA = " + json.dumps(data, ensure_ascii=False) + ";\n",
         encoding="utf-8")
@@ -1409,6 +1573,140 @@ def _regen_audio_impl(lesson_dir):
     print(f"→ AUDIO + PLAYER AGGIORNATI ({time.time() - t0:.0f}s)\n")
 
 
+def load_lesson(lesson_dir):
+    """Carica lesson-data.js di una lezione. Ritorna (out_dir, payload)."""
+    out = Path(lesson_dir)
+    js = out / "lesson-data.js"
+    if not (out.is_dir() and js.is_file() and (out / "index.html").is_file()):
+        raise ValueError(f"Lezione non trovata: {lesson_dir}")
+    payload = json.loads(re.sub(r"^window\.LESSON_DATA\s*=\s*", "",
+                                js.read_text(encoding="utf-8")).rstrip().rstrip(";"))
+    if not isinstance(payload.get("slides"), list):
+        raise ValueError("lesson-data.js senza slide")
+    return out, payload
+
+
+def save_lesson(out_dir, payload):
+    """Scrive lesson-data.js + bust cache (nessun TTS/LLM)."""
+    out = Path(out_dir)
+    (out / "lesson-data.js").write_text(
+        "window.LESSON_DATA = " + json.dumps(payload, ensure_ascii=False) + ";\n",
+        encoding="utf-8")
+    bust_cache(out)
+
+
+def validate_slide_edit(index, patch):
+    """Valida una patch {title?, narration?, quiz?} per la slide index.
+    Ritorna dict pulito {title?, narration?, quiz?} o solleva ValueError."""
+    clean = {}
+    if "title" in patch:
+        t = str(patch["title"] or "").strip()[:200]
+        if not t:
+            raise ValueError("Titolo vuoto")
+        clean["title"] = t
+    if "narration" in patch:
+        n = str(patch["narration"] or "").strip()
+        if not n:
+            raise ValueError("Narrazione vuota")
+        if len(n) > 3000:
+            raise ValueError("Narrazione troppo lunga (max 3000 caratteri)")
+        clean["narration"] = n
+    if "quiz" in patch:
+        q = patch["quiz"]
+        if q is None:
+            clean["quiz"] = None
+        elif isinstance(q, dict):
+            domanda = str(q.get("domanda") or q.get("q") or "").strip()
+            raw_opts = q.get("opzioni") or q.get("opts") or []
+            opts = []
+            for o in raw_opts:
+                if isinstance(o, dict):
+                    t = str(o.get("testo") or o.get("t") or "").strip()
+                    if t:
+                        opts.append({"testo": t[:300], "corretta": bool(o.get("corretta") or o.get("ok"))})
+            if not domanda:
+                raise ValueError("Domanda quiz vuota")
+            if len(opts) < 2:
+                raise ValueError("Il quiz deve avere almeno 2 opzioni")
+            if len(opts) > 6:
+                opts = opts[:6]
+            if not any(o["corretta"] for o in opts):
+                opts[0]["corretta"] = True
+            # una sola corretta
+            first = next(o for o in opts if o["corretta"])
+            for o in opts:
+                if o is not first:
+                    o["corretta"] = False
+            clean["quiz"] = {"domanda": domanda[:500], "opzioni": opts}
+        else:
+            raise ValueError("Quiz malformato")
+    if not clean:
+        raise ValueError("Nessuna modifica valida")
+    return clean
+
+
+def regen_slide_audio(lesson_dir, index):
+    """Rigenera audio+VTT della SOLA slide `index` (voce/config correnti).
+    Aggiorna duration/words in lesson-data.js. Ritorna (durata, engine)."""
+    if not _lock_build():
+        raise RuntimeError("Un'altra generazione è in corso: riprova dopo.")
+    try:
+        out, payload = load_lesson(lesson_dir)
+        slides = payload["slides"]
+        if not (0 <= index < len(slides)):
+            raise ValueError(f"Slide {index} fuori range (0-{len(slides) - 1})")
+        s = slides[index]
+        text = _tts_text(s.get("narration")) or "Fine di questa parte."
+        mp3 = out / "assets" / "audio" / f"narration-{index + 1:02d}.mp3"
+        mp3.parent.mkdir(parents=True, exist_ok=True)
+        ok, words = _try_edge_tts(text, mp3)
+        engine = "edge"
+        if not ok:
+            engine = "piper"
+            ok, words = _try_piper(text, mp3)
+        if not ok:
+            engine = "silenzio"
+            _silent_mp3(mp3, max(2.0, len(text.split()) / 2.8))
+        else:
+            _polish_mp3(mp3, EDGE_BITRATE)
+            try:  # aggiorna cache globale
+                h = hashlib.sha1(
+                    f"{CACHE_VERSION}|edge|{EDGE_VOICE}|{EDGE_RATE}|{EDGE_BITRATE}|{text}".encode("utf-8")
+                ).hexdigest()
+                tmp_c = CACHE / f"{h}.mp3.tmp"
+                shutil.copyfile(mp3, tmp_c)
+                os.replace(tmp_c, CACHE / f"{h}.mp3")
+                if words:
+                    tmp_j = CACHE / f"{h}.json.tmp"
+                    tmp_j.write_text(json.dumps(words, ensure_ascii=False), encoding="utf-8")
+                    os.replace(tmp_j, CACHE / f"{h}.json")
+            except OSError:
+                pass
+        dur = _ffmpeg_probe(mp3) or max(2.0, len(text.split()) / 2.8)
+        if not words:
+            words = _weighted_words(text, dur)
+        s["duration"] = round(dur, 2)
+        s["words"] = [[round(a, 2), round(b, 2), t] for a, b, t in words]
+        # VTT della sola slide (stesso formato di write_vtt)
+        cap_dir = out / "assets" / "captions"
+        cap_dir.mkdir(parents=True, exist_ok=True)
+
+        def _fmt(ts):
+            hh = int(ts // 3600)
+            mm = int(ts % 3600 // 60)
+            ss = ts % 60
+            return f"{hh:02d}:{mm:02d}:{ss:06.3f}".replace(".", ",")
+
+        lines = [(float(a), float(b), t) for a, b, t in s["words"]]
+        vtt = "WEBVTT\n\n" + "\n\n".join(
+            f"{n}\n{_fmt(a)} --> {_fmt(b)}\n{t}" for n, (a, b, t) in enumerate(lines, 1))
+        (cap_dir / f"narration-{index + 1:02d}.vtt").write_text(vtt, encoding="utf-8")
+        save_lesson(out, payload)
+        return round(dur, 2), engine
+    finally:
+        _unlock_build()
+
+
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -1433,10 +1731,19 @@ def main():
         else:
             f = need_file(args[1], "Genera lezione")
         try:
+            def _opt(name):
+                for a in sys.argv:
+                    if a.startswith(name + "="):
+                        return a.split("=", 1)[1]
+                return None
+            from common import normalize_profilo as _npc
+            _cli_prof = _npc({"durata": _opt("--durata"), "livello": _opt("--livello"),
+                              "obiettivo": _opt("--obiettivo")})
             build_from_docx(f, force="--force" in sys.argv, bozza="--bozza" in sys.argv,
                             no_cache="--no-cache" in sys.argv,
                             single="--single" in sys.argv,
-                            keep_folder="--keep-folder" in sys.argv)
+                            keep_folder="--keep-folder" in sys.argv,
+                            profilo=_cli_prof)
         except Exception as e:  # noqa: BLE001
             print(f"✗ Generazione fallita: {e}")
             log.error(f"build {f if isinstance(f, str) else f.name}: {e}")

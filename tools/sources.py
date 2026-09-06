@@ -15,6 +15,7 @@ così il resto della pipeline non cambia.
 """
 import json
 import re
+import time
 import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
@@ -24,6 +25,22 @@ SUPPORTED_EXT = {".docx", ".pdf", ".txt", ".md", ".html", ".htm"}
 _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
 _FETCH_TIMEOUT = 25
+_FETCH_RETRIES = 3
+
+
+def _http_get(url, timeout=_FETCH_TIMEOUT):
+    """GET con retry + backoff (3 tentativi): le pagine YT/web flakano spesso."""
+    last = None
+    for attempt in range(_FETCH_RETRIES):
+        try:
+            req = urllib.request.Request(url, headers=_UA)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read(), r.headers.get("Content-Type", "")
+        except Exception as e:  # noqa: BLE001
+            last = e
+            if attempt < _FETCH_RETRIES - 1:
+                time.sleep(1.5 * (attempt + 1))
+    raise ValueError(f"Download fallito dopo {_FETCH_RETRIES} tentativi ({url}): {last}")
 
 
 def is_url(value):
@@ -231,11 +248,8 @@ def parse_html(html):
 def fetch_url(url):
     """Scarica una pagina web e ne estrae titolo + sezioni."""
     try:
-        req = urllib.request.Request(url, headers=_UA)
-        with urllib.request.urlopen(req, timeout=_FETCH_TIMEOUT) as r:
-            raw = r.read()
-            ctype = r.headers.get("Content-Type", "")
-    except Exception as e:
+        raw, ctype = _http_get(url)
+    except ValueError as e:
         raise ValueError(f"Pagina non scaricabile ({url}): {e}")
     try:
         text = raw.decode("utf-8")
@@ -248,16 +262,15 @@ def fetch_url(url):
 
 # ------------------------------------------------------------------ YouTube
 def _youtube_video_id(url):
-    m = re.search(r"(?:v=|youtu\.be/|shorts/|embed/)([\w-]{11})", url)
+    m = re.search(r"(?:v=|youtu\.be/|shorts/|live/|embed/)([\w-]{11})", url)
     return m.group(1) if m else None
 
 
 def _youtube_meta(url):
     """Titolo + descrizione dalla pagina (fallback senza trascrizione)."""
     try:
-        req = urllib.request.Request(url, headers=_UA)
-        with urllib.request.urlopen(req, timeout=_FETCH_TIMEOUT) as r:
-            html = r.read().decode("utf-8", errors="replace")
+        raw, _ = _http_get(url, timeout=_FETCH_TIMEOUT)
+        html = raw.decode("utf-8", errors="replace")
         title = re.search(r"<title>([^<]+)</title>", html)
         desc = re.search(r'<meta\s+name="description"\s+content="([^"]+)"', html)
         return {"title": (title.group(1).replace(" - YouTube", "").strip()
@@ -290,9 +303,8 @@ def _youtube_title(url):
     try:
         embed = ("https://www.youtube.com/oembed?url="
                  f"https://www.youtube.com/watch?v={vid}&format=json")
-        req = urllib.request.Request(embed, headers=_UA)
-        with urllib.request.urlopen(req, timeout=8) as r:
-            data = json.loads(r.read().decode("utf-8", "replace"))
+        raw, _ = _http_get(embed, timeout=8)
+        data = json.loads(raw.decode("utf-8", "replace"))
         t = (data or {}).get("title")
         if t:
             return t

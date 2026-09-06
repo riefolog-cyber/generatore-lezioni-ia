@@ -1,4 +1,4 @@
 # Dipendenze opzionali per fonti di materiale aggiuntive
 #   pip install -r requirements-extra.txt
-pypdf>=4.0.0          # lettura file .pdf
-youtube-transcript-api>=0.6.0   # trascrizioni dei video YouTube
+pypdf>=4.0.0,<7          # lettura file .pdf
+youtube-transcript-api>=0.6.0,<2   # trascrizioni dei video YouTube

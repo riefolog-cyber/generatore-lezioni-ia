@@ -1,6 +1,7 @@
 # dipendenze scaricabili al primo avvio (mai in git)
 .tools/
 assets/
+.venv/
 
 # strumento esterno per la mappa (scaricato in locale, non è codice del progetto)
 _archify/
@@ -9,6 +10,7 @@ _archify/
 __pycache__/
 *.pyc
 *.lock
+!requirements.lock
 .llm_cache/
 _generated.json
 

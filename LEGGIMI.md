@@ -2,17 +2,25 @@
 
 ## Avvio (un solo file)
 
-Doppio clic su **`AVVIA.bat`**: parte il server locale e si apre nel browser
+Doppio clic su **`AVVIA.bat`**: crea/usa l'ambiente virtuale `.venv`,
+installa le dipendenze, parte il server locale e si apre nel browser
 il **pannello di controllo** (pagina grafica), con cui puoi:
-1. scegliere il **materiale**: trascinalo nella zona tratteggiata del pannello
-   o usa "Sfoglia" per caricarlo dal browser (`.docx`, `.pdf`, `.txt`, `.md`,
-   `.html`), oppure usa i file già presenti nella cartella, e premere **Genera**;
+1. caricare il **materiale**: trascinalo nella zona tratteggiata del pannello
+   o usa "Sfoglia" (`.docx`, `.pdf`, `.txt`, `.md`, `.html`) e premi
+   **Carica e genera** — solo upload, i file già presenti in cartella
+   non vengono rilevati;
 2. generare da **link** (sito web o video YouTube);
-3. impostare le **opzioni**: rigenera anche le lezioni esistenti (`--force`),
+3. impostare il **profilo lezione**: durata (breve/standard/approfondita),
+   livello (base/intermedio/avanzato), obiettivo Bloom
+   (conoscenza/comprensione/applicazione/analisi);
+4. impostare le **opzioni**: rigenera anche le lezioni esistenti (`--force`),
    bozza senza LLM (`--bozza`), rigenera solo l'audio di una lezione,
    generare come **file HTML unico** (senza cartella);
-4. seguire il **log** in tempo reale;
-5. **aprire** le lezioni generate (anche da tablet/telefono sulla stessa rete
+5. **modificare** le slide dopo la generazione (titolo, narrazione, quiz)
+   con rigenerazione audio della singola slide;
+6. provare le **voci** neurali (anteprima audio) prima di generare;
+7. seguire il **log** in tempo reale (errori anche in `panel_errors.log`);
+8. **aprire** le lezioni generate (anche da tablet/telefono sulla stessa rete
    Wi-Fi: l'indirizzo LAN è mostrato nel pannello).
 
 `AVVIA.bat gui` → vecchia GUI desktop (tkinter: anteprima, genera, esporta ZIP).
@@ -25,9 +33,11 @@ In alternativa al pannello, da terminale: `python new_lesson.py build <file|URL>
 La pipeline accetta qualsiasi di queste fonti (stessa struttura interna):
 
 - **File**: `.docx` (python-docx), `.pdf` (serve `pypdf`), `.txt`, `.md`,
-  `.html` — si caricano dal pannello (drag & drop o pulsante: atterrano
-  nella cartella del progetto) oppure si mettono direttamente in cartella:
-  vengono presi in carico automaticamente da `AVVIA.bat` / `watch`.
+  `.html` — solo via upload dal pannello (drag & drop o pulsante
+  "Carica e genera": il file atterra nella cartella del progetto).
+  Da terminale restano validi file locali e `watch`:
+  `python new_lesson.py build <file|URL>` (con `--durata= --livello=
+  --obiettivo=` per il profilo).
 - **Sito web**: `python new_lesson.py build https://esempio.it/pagina`
 - **Video YouTube**: `python new_lesson.py build https://www.youtube.com/watch?v=...`
   (usa la trascrizione automatica via `youtube-transcript-api`; se manca o non
@@ -101,8 +111,10 @@ Dipendenze opzionali per PDF e YouTube: `pip install -r requirements-extra.txt`.
 ```
 AVVIA.bat            avvio unico (tutto automatico, o interfaccia con "gui")
 avvia.py             flusso automatico: dipendenze -> build mancanti -> serve
-panel.py             pannello di controllo web: carica materiale (upload),
-                     genera da file/link, log in tempo reale, apre le lezioni
+panel.py             pannello di controllo web: upload materiale (solo upload,
+                      niente scansione cartella), profilo lezione, voci,
+                      editor slide, genera da file/link, coda job, log live,
+                      apre le lezioni
 app.py               GUI: verifica, anteprima, genera, apri, esporta
 new_lesson.py        pipeline: watch | build | preview | reaudio
 start_lesson.py      server locale con porta libera (8341-8350);
@@ -110,13 +122,14 @@ start_lesson.py      server locale con porta libera (8341-8350);
                      lezioni apre l'indice per scegliere
 check_env.py         controllo ambiente
 config.json          llm_url, llm_model, llm_api_key (opzionale), voice,
-                     edge_voice, edge_rate, audio_bitrate, theme,
-                     num_moduli_min/max, porta, cache_max_mb,
-                     tts_workers, tts_retries
+                      edge_voice, edge_rate, audio_bitrate, theme,
+                      num_moduli_min/max, porta, cache_max_mb,
+                      tts_workers, tts_retries, profilo_durata/livello/obiettivo
 generatore-lezioni-mappa.html   mappa interattiva del sistema (Archify):
                      apri nel browser per esplorare componenti e percorsi
 generatore-lezioni-mappa.json   sorgente dell'IR per rigenerare la mappa
 requirements.txt     python-docx, edge-tts (ffmpeg serve per durata/fallback)
+requirements.lock    versioni esatte testate (pip install -r requirements.lock)
 requirements-extra.txt  pypdf (PDF), youtube-transcript-api (YouTube)
 requirements-dev.txt    pytest (test unitari)
 tools/               common, player_template (player autogenerato),
@@ -139,7 +152,8 @@ assets/voice/        modello Piper + cache audio
   stesso modello configurato, la struttura dei contenuti si riusa al posto di
   rifare la chiamata LLM (risparmio di minuti). Con `--no-cache` si forza una
   nuova strutturazione. Autolimitata a 200 voci (le più vecchie vengono rimosse).
-- Log in `generazione.log`. Rigenera con `python new_lesson.py build file.docx --force`.
+- Log in `generazione.log`, errori API del pannello in `panel_errors.log`.
+  Rigenera con `python new_lesson.py build file.docx --force`.
 - **Niente pagina bianca da cache**: il server della lezione invia intestazioni
   no-cache e i file sono caricati con versione (`main.js?v=4`); se il browser
   usa comunque un `index.html` vecchio, il player mostra un messaggio con il

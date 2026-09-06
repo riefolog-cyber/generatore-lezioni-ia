@@ -5,6 +5,7 @@ Uso: python check_env.py  (exit 0 = pronto, 1 = manca qualcosa di grave)
 Bloccanti (senza questi non si parte):  Python >= 3.10, python-docx.
 Avvisi (il flusso continua, con qualità ridotta): edge-tts, voce Piper, ffmpeg.
 """
+import importlib.metadata
 import shutil
 import sys
 from pathlib import Path
@@ -41,35 +42,35 @@ print("=== Controllo ambiente ===")
 print(f"Python: {sys.version.split()[0]}")
 bloccante("Python >= 3.10", sys.version_info >= (3, 10))
 
-try:
-    import docx  # noqa: F401
-    bloccante("python-docx installato (lettura .docx)", True)
-except Exception:
-    bloccante("python-docx installato (lettura .docx)", False,
-              "pip install -r requirements.txt")
 
-try:
-    import edge_tts  # noqa: F401
-    avviso("edge-tts: voce neurale primaria", True)
-except Exception:
-    avviso("edge-tts: voce neurale primaria", False,
-           "pip install edge-tts — senza, audio solo da Piper locale o silenzio")
+def _ver(modulo, distribuzione):
+    try:
+        return importlib.metadata.version(distribuzione)
+    except Exception:
+        try:
+            m = __import__(modulo)
+            return getattr(m, "__version__", "?")
+        except Exception:
+            return None
 
-try:
-    import pypdf  # noqa: F401
-    avviso("pypdf (materiale PDF)", True)
-except Exception:
-    avviso("pypdf (materiale PDF)", False,
-           "pip install -r requirements-extra.txt — senza, i .pdf non sono "
-           "leggibili come materiale di partenza")
 
-try:
-    import youtube_transcript_api  # noqa: F401
-    avviso("youtube-transcript-api (trascrizioni YouTube)", True)
-except Exception:
-    avviso("youtube-transcript-api (trascrizioni YouTube)", False,
-           "pip install -r requirements-extra.txt — senza, i video YouTube "
-           "usano solo titolo e descrizione")
+def _check_modulo(modulo, distribuzione, label, bloccante_=False, hint=""):
+    ver = _ver(modulo, distribuzione)
+    fn = bloccante if bloccante_ else avviso
+    fn(f"{label} ({ver})" if ver else label, bool(ver), hint)
+    return ver
+
+_check_modulo("docx", "python-docx", "python-docx installato (lettura .docx)",
+              bloccante_=True, hint="pip install -r requirements.txt")
+_check_modulo("edge_tts", "edge-tts", "edge-tts: voce neurale primaria",
+              hint="pip install edge-tts — senza, audio solo da Piper locale o silenzio")
+_check_modulo("pypdf", "pypdf", "pypdf (materiale PDF)",
+              hint="pip install -r requirements-extra.txt — senza, i .pdf non sono "
+              "leggibili come materiale di partenza")
+_check_modulo("youtube_transcript_api", "youtube-transcript-api",
+              "youtube-transcript-api (trascrizioni YouTube)",
+              hint="pip install -r requirements-extra.txt — senza, i video YouTube "
+              "usano solo titolo e descrizione")
 
 voice, _ = resolve_voice()
 avviso(f"voce Piper di riserva ({voice.name})", voice.exists(),

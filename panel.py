@@ -2,8 +2,9 @@
 """Pannello di controllo web (locale).
 
 Sostituisce l'avvio da terminale con una pagina grafica nel browser:
-  - elenco dei materiali nella cartella (.docx/.pdf/.txt/.md/.html) con
-    pulsante "Genera" per ciascuno;
+  - caricamento materiale via upload (drag & drop o Sfoglia: .docx/.pdf/
+    .txt/.md/.html) con pulsante "Carica e genera" — SOLO upload, nessuna
+    scansione della cartella progetto;
   - generazione da URL (sito web o video YouTube);
   - opzioni: rigenera anche se esiste (--force), bozza senza LLM (--bozza),
     rigenera solo l'audio di una lezione già generata (--reaudio);
@@ -50,7 +51,8 @@ MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 # ------------------------------------------------------------------ job runner
 LOG = collections.deque(maxlen=500)
 JOB = {"running": False, "kind": None, "source": None, "error": None,
-       "done_at": None, "ok": None}
+       "done_at": None, "ok": None, "started_at": None, "progress": ""}
+QUEUE = collections.deque(maxlen=5)  # coda FIFO: (fn, kind, source)
 
 
 class _UploadTooBig(Exception):
@@ -113,13 +115,32 @@ def _log(txt):
     LOG.append(str(txt).rstrip())
 
 
+def _flog(txt):
+    """Log persistente su file (diagnosi errori API anche dopo il riavvio)."""
+    try:
+        with open(BASE / "panel_errors.log", "a", encoding="utf-8") as f:
+            f.write(time.strftime("%Y-%m-%d %H:%M:%S") + " | " + str(txt).rstrip() + "\n")
+    except OSError:
+        pass
+
+
+def _run_next_queued():
+    if QUEUE:
+        fn, kind, source = QUEUE.popleft()
+        start_job(fn, kind, source)
+
+
 def start_job(fn, kind, source):
-    """Lancia una generazione in background (una alla volta: blocco del progetto
-    incluso). Ritorna True se il job è partito, False se uno è già in corso."""
+    """Lancia una generazione in background. Se una è in corso, accoda (max 5).
+    Ritorna (started, queued): started=True se partito subito."""
     if JOB["running"]:
-        return False
+        if len(QUEUE) >= QUEUE.maxlen:
+            return (False, False)
+        QUEUE.append((fn, kind, source))
+        _log(f"⏳ in coda [{kind}] {source} (posizione {len(QUEUE)})")
+        return (True, True)
     JOB.update(running=True, kind=kind, source=source, error=None,
-               done_at=None, ok=None)
+               done_at=None, ok=None, started_at=time.time(), progress="")
     _log(f"▶ [{kind}] {source}")
 
     def work():
@@ -137,9 +158,18 @@ def start_job(fn, kind, source):
             JOB["running"] = False
             JOB["done_at"] = time.time()
             _invalidate_lessons_cache()   # una nuova lezione è (forse) pronta
+            _run_next_queued()
 
     threading.Thread(target=work, daemon=True).start()
-    return True
+    return (True, False)
+
+
+def cancel_queue():
+    n = len(QUEUE)
+    QUEUE.clear()
+    if n:
+        _log(f"✕ coda svuotata ({n} job rimossi)")
+    return n
 
 
 # ------------------------------------------------------------------ helpers
@@ -154,22 +184,37 @@ def lan_ip():
         return None
 
 
+def _lesson_for(filename):
+    stem = Path(filename).stem
+    return f"{re.sub(r'[^A-Za-z0-9_]+', '_', stem).strip('_') or 'Lezione'}_lesson"
+
+
+# Solo upload: niente più scansione della cartella progetto.
+# I materiali generabili sono SOLO quelli caricati dal pannello in questa
+# sessione (drag&drop / Sfoglia). I file già presenti su disco non compaiono.
+UPLOADED = {}
+
+
 def _materials():
     out = []
-    project = re.compile(r"^(LEGGIMI|README|requirements|CHANGELOG|setup|pyproject)"
-                         r"(?:[._\-].*)?$|^_", re.IGNORECASE)
-    for p in sorted(BASE.iterdir()):
-        if not (p.is_file() and p.suffix.lower() in SUPPORTED_EXT and not p.name.startswith(".")):
+    for name, info in sorted(UPLOADED.items()):
+        p = BASE / name
+        if not p.is_file():
             continue
-        if project.match(p.stem) or p.suffix.lower() == ".bat":
+        try:
+            out.append({
+                "name": name,
+                "size": p.stat().st_size,
+                "modified": p.stat().st_mtime,
+                "lesson": _lesson_for(name),
+            })
+        except OSError:
             continue
-        out.append({
-            "name": p.name,
-            "size": p.stat().st_size,
-            "modified": p.stat().st_mtime,
-            "lesson": f"{re.sub(r'[^A-Za-z0-9_]+', '_', p.stem).strip('_') or 'Lezione'}_lesson",
-        })
     return out
+
+
+def _register_upload(name):
+    UPLOADED[Path(name).name] = {"t": time.time()}
 
 
 def _deps():
@@ -214,8 +259,42 @@ def _state():
         "port": DEFAULT_PORT,
         "config": {k: CONFIG.get(k) for k in
                    ("theme", "voice", "edge_voice", "edge_rate",
-                    "llm_model", "num_moduli_min", "num_moduli_max")},
+                    "llm_model", "num_moduli_min", "num_moduli_max",
+                    "profilo_durata", "profilo_livello", "profilo_obiettivo")},
+        "voices": EDGE_VOICES,
     }
+
+
+EDGE_VOICES = [
+    "it-IT-GiuseppeMultilingualNeural",
+    "it-IT-IsabellaNeural",
+    "it-IT-DiegoNeural",
+    "it-IT-ElsaNeural",
+]
+_VOICES_CACHE = {"at": 0.0, "names": None}
+
+
+def _edge_voices_live():
+    """Lista voci it-IT dal servizio (cache 1h), fallback alla lista statica."""
+    import time as _t
+    if _VOICES_CACHE["names"] and _t.time() - _VOICES_CACHE["at"] < 3600:
+        return _VOICES_CACHE["names"]
+    try:
+        import asyncio
+        import edge_tts
+
+        async def _list():
+            return await edge_tts.list_voices()
+
+        vs = asyncio.run(_list())
+        names = sorted(v["ShortName"] for v in vs
+                       if str(v.get("Locale", "")).startswith("it"))
+        if names:
+            _VOICES_CACHE.update(at=_t.time(), names=names)
+            return names
+    except Exception:
+        pass
+    return list(EDGE_VOICES)
 
 
 def _loopback(handler):
@@ -234,9 +313,13 @@ class PanelHandler(_RangeHandler):
         if path == "/api/state":
             return self._json(_state())
         if path == "/api/log":
+            elapsed = (time.time() - JOB["started_at"]) if JOB.get("started_at") and JOB["running"] else None
             return self._json({"running": JOB["running"], "kind": JOB["kind"],
                                "source": JOB["source"], "error": JOB["error"],
                                "done_at": JOB["done_at"], "ok": JOB["ok"],
+                               "elapsed": round(elapsed, 1) if elapsed else None,
+                               "queued": len(QUEUE),
+                               "queue": [s for _, _, s in list(QUEUE)],
                                "lines": list(LOG)[-200:]})
         if path == "/api/build":
             return self._start(self._parse_build())
@@ -244,6 +327,11 @@ class PanelHandler(_RangeHandler):
             return self._start_reaudio(query)
         if path == "/api/export_single":
             return self._export_single(query)
+        if path == "/api/voices":
+            return self._json({"voices": _edge_voices_live(),
+                               "current": CONFIG.get("edge_voice")})
+        if path == "/api/lesson_data":
+            return self._lesson_data(query)
         self.send_error(404, "API sconosciuta")
 
     def _json(self, data, status=200):
@@ -262,34 +350,42 @@ class PanelHandler(_RangeHandler):
         return json.loads(raw.decode("utf-8") or "{}")
 
     def _resolve_source(self, src):
-        """File nella cartella del progetto (no path traversal) oppure URL."""
+        """Solo file caricati via upload in questa sessione (no scansione
+        cartella) oppure URL. Niente path traversal."""
         if is_url(src):
             return src
-        name = urllib.parse.unquote(src)
+        name = Path(urllib.parse.unquote(src)).name
+        if name not in UPLOADED:
+            raise ValueError(f"Materiale non caricato via pannello: {src} "
+                             "(usa Trascina/Sfoglia qui sopra)")
         p = (BASE / name).resolve()
         if p.parent != BASE or not p.is_file() or p.suffix.lower() not in SUPPORTED_EXT:
             raise ValueError(f"Materiale non valido: {src}")
         return str(p)
 
     def _parse_build(self):
+        from common import normalize_profilo
         data = self._read_json_body()
         src = self._resolve_source(str(data.get("source") or ""))
         force = bool(data.get("force"))
         bozza = bool(data.get("bozza"))
         single = bool(data.get("single"))
-        return src, force, bozza, single
+        profilo = normalize_profilo(data.get("profilo") or {
+            "durata": data.get("durata"), "livello": data.get("livello"),
+            "obiettivo": data.get("obiettivo")})
+        return src, force, bozza, single, profilo
 
     def _start(self, parsed):
         import new_lesson
-        src, force, bozza, single = parsed
-        ok = start_job(
+        src, force, bozza, single, profilo = parsed
+        started, queued = start_job(
             lambda: new_lesson.build_from_docx(src, force=force, bozza=bozza,
-                                               single=single),
+                                               single=single, profilo=profilo),
             "generazione", Path(src).name if not is_url(src) else src)
-        if not ok:
-            self._json({"started": False, "reason": "Un'altra generazione è già in corso."}, 409)
+        if not started:
+            self._json({"started": False, "reason": "Coda piena (5 job): attendi la fine."}, 409)
             return
-        self._json({"started": True})
+        self._json({"started": True, "queued": queued})
 
     def _start_reaudio(self, query):
         name = query.get("lesson", [None])[0] or ""
@@ -298,12 +394,12 @@ class PanelHandler(_RangeHandler):
             self.send_error(400, "Lezione non trovata")
             return
         import new_lesson
-        ok = start_job(lambda: new_lesson.regen_audio_lesson(str(lesson)),
+        started, queued = start_job(lambda: new_lesson.regen_audio_lesson(str(lesson)),
                        "rigenerazione audio", name)
-        if not ok:
-            self._json({"started": False, "reason": "Un'altra generazione è già in corso."}, 409)
+        if not started:
+            self._json({"started": False, "reason": "Coda piena (5 job): attendi la fine."}, 409)
             return
-        self._json({"started": True})
+        self._json({"started": True, "queued": queued})
 
     def _export_single(self, query):
         name = query.get("lesson", [None])[0] or ""
@@ -320,7 +416,174 @@ class PanelHandler(_RangeHandler):
         self._json({"url": f"/{lesson.name}/{p.name}",
                     "size": p.stat().st_size})
 
+    def _check_lesson(self, name):
+        lesson = BASE / (name or "")
+        if not name or not lesson.is_dir() or not (lesson / "index.html").exists():
+            raise ValueError("Lezione non trovata")
+        if lesson.resolve().parent != BASE.resolve():
+            raise ValueError("Lezione non valida")
+        return lesson
+
+    def _lesson_data(self, query):
+        name = query.get("lesson", [None])[0] or ""
+        try:
+            lesson = self._check_lesson(name)
+            import new_lesson
+            _, payload = new_lesson.load_lesson(str(lesson))
+            slides = []
+            for i, s in enumerate(payload.get("slides", [])):
+                q = None
+                for b in s.get("blocks", []):
+                    if "quiz" in b:
+                        q = b["quiz"]
+                        break
+                slides.append({"index": i, "title": s.get("title", ""),
+                               "narration": s.get("narration", ""),
+                               "duration": s.get("duration", 0),
+                               "quiz": q})
+            self._json({"lesson": lesson.name, "titolo": payload.get("titolo"),
+                        "profilo": payload.get("profilo"), "slides": slides})
+        except Exception as e:  # noqa: BLE001
+            self._json({"error": str(e)}, 400)
+
+    def _save_slide(self):
+        data = self._read_json_body()
+        lesson = self._check_lesson(str(data.get("lesson") or ""))
+        index = int(data.get("index", -1))
+        patch = data.get("patch") or {}
+        import new_lesson
+        out, payload = new_lesson.load_lesson(str(lesson))
+        slides = payload["slides"]
+        if not (0 <= index < len(slides)):
+            raise ValueError("Indice slide fuori range")
+        clean = new_lesson.validate_slide_edit(index, patch)
+        s = slides[index]
+        narration_changed = False
+        if "title" in clean:
+            s["title"] = clean["title"]
+            # aggiorna anche l'h1 del blocco se presente
+            for b in s.get("blocks", []):
+                if "h1" in b:
+                    b["h1"] = clean["title"]
+                    break
+        if "narration" in clean and clean["narration"] != s.get("narration"):
+            s["narration"] = clean["narration"]
+            narration_changed = True
+        if "quiz" in clean:
+            for b in s.get("blocks", []):
+                if "quiz" in b:
+                    if clean["quiz"] is None:
+                        s["blocks"].remove(b)
+                    else:
+                        q = clean["quiz"]
+                        b["quiz"] = {"q": q["domanda"],
+                                     "opts": [{"t": o["testo"], "ok": o["corretta"], "fb": ""}
+                                              for o in q["opzioni"]],
+                                     "ok": "Esatto!", "ko": "Rileggi e riprova."}
+                    break
+            else:
+                if clean["quiz"] is not None:
+                    q = clean["quiz"]
+                    s.setdefault("blocks", []).append(
+                        {"quiz": {"q": q["domanda"],
+                                  "opts": [{"t": o["testo"], "ok": o["corretta"], "fb": ""}
+                                           for o in q["opzioni"]],
+                                  "ok": "Esatto!", "ko": "Rileggi e riprova."}})
+        new_lesson.save_lesson(str(out), payload)
+        _invalidate_lessons_cache()
+        self._json({"ok": True, "narration_changed": narration_changed,
+                    "warning": ("Testo narrazione modificato: l'audio è invariato. "
+                                "Usa «Rigenera audio slide» per riallinearlo."
+                                if narration_changed else "")})
+
+    def _reaudio_slide(self, query):
+        name = query.get("lesson", [None])[0] or ""
+        try:
+            index = int(query.get("index", [-1])[0])
+        except Exception:
+            index = -1
+        lesson = self._check_lesson(name)
+        ok = start_job(lambda: self._do_reaudio_slide(str(lesson), index),
+                       "audio slide", f"{lesson.name}#{index}")
+        if not ok[0]:
+            self._json({"started": False, "reason": "Coda piena."}, 409)
+            return
+        self._json({"started": True, "queued": ok[1]})
+
+    @staticmethod
+    def _do_reaudio_slide(lesson, index):
+        import new_lesson
+        dur, engine = new_lesson.regen_slide_audio(lesson, index)
+        _log(f"✔ slide {index + 1} audio rigenerato [{engine}] {dur:.1f}s")
+        _invalidate_lessons_cache()
+
+    def _tts_preview(self):
+        data = self._read_json_body()
+        text = str(data.get("text") or "").strip()[:500]
+        if not text:
+            raise ValueError("Testo vuoto (max 500 caratteri)")
+        voice = str(data.get("voice") or CONFIG.get("edge_voice"))
+        if voice not in _edge_voices_live() and voice not in EDGE_VOICES:
+            raise ValueError(f"Voce non supportata ({voice or 'vuota'}): "
+                             "selezionane una dal menu e ricarica la pagina se è vuoto")
+        rate = str(data.get("rate") or CONFIG.get("edge_rate", "-4%"))
+        if not re.fullmatch(r"-?\d+%", rate):
+            raise ValueError("Rate non valido (es. -4%)")
+        try:
+            import asyncio
+            import edge_tts
+            mp3 = bytearray()
+
+            async def _run():
+                comm = edge_tts.Communicate(text, voice, rate=rate)
+                async for chunk in comm.stream():
+                    if chunk["type"] == "audio":
+                        mp3.extend(chunk["data"])
+                    if len(mp3) > 2 * 1024 * 1024:
+                        break
+
+            asyncio.run(_run())
+        except Exception as e:  # noqa: BLE001
+            cause = str(e)[:150] or type(e).__name__
+            _log(f"✗ anteprima voce fallita [{voice}]: {cause}")
+            _flog(f"tts_preview 502 | [{voice}] {rate} | {cause}")
+            body = json.dumps({"ok": False,
+                               "error": f"Sintesi vocale fallita: {cause}. "
+                                        "Controlla la connessione verso Microsoft."},
+                              ensure_ascii=False).encode("utf-8")
+            self.send_response(502)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if len(mp3) < 1000:
+            _log("✗ anteprima voce: audio vuoto restituito dal servizio")
+            self._json({"ok": False, "error": "Sintesi fallita: audio vuoto, riprova."}, 502)
+            return
+        body = bytes(mp3)
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/mpeg")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     # -- upload materiale -------------------------------------------------------
+    def _read_limited(self, length):
+        """Lettura a chunk 64KB con limite: evita un singolo read() enorme."""
+        buf = bytearray()
+        remaining = length
+        while remaining > 0:
+            chunk = self.rfile.read(min(65536, remaining))
+            if not chunk:
+                break
+            buf.extend(chunk)
+            remaining -= len(chunk)
+            if len(buf) > MAX_UPLOAD_BYTES:
+                raise _UploadTooBig(
+                    f"File troppo grande: supera il limite di {MAX_UPLOAD_MB} MB.")
+        return bytes(buf)
+
     def _parse_upload_body(self):
         """Estrae (filename, contenuto) dalla parte 'file' di un multipart
         form-data (quello che invia il pannello). Solleva ValueError se il
@@ -336,20 +599,36 @@ class PanelHandler(_RangeHandler):
         if length > MAX_UPLOAD_BYTES:
             raise _UploadTooBig(
                 f"File troppo grande: supera il limite di {MAX_UPLOAD_MB} MB.")
-        body = self.rfile.read(length)
+        body = self._read_limited(length)
         sep = b"--" + boundary
+        saw_file_part = False
         for part in body.split(sep):
             part = part.strip(b"\r\n")
             if not part or part == b"--":
                 continue
             head_end = part.find(b"\r\n\r\n")
             if head_end < 0:
+                # Parte file senza contenuto (file vuoto: il separatore finale
+                # viene mangiato dallo strip) — segnalalo invece di "nessun file"
+                if 'name="file"' in part.decode("utf-8", "replace"):
+                    saw_file_part = True
                 continue
             headers = part[:head_end].decode("utf-8", "replace")
             mf = re.search(r'filename="([^"]*)"', headers)
-            if mf is None or 'name="file"' not in headers:
+            fname = mf.group(1) if mf else None
+            if fname is None:
+                # RFC 5987: filename*=utf-8''nome%20file.docx (nomi non-ASCII)
+                m2 = re.search(r"filename\*\s*=\s*[^']*''([^;\s]+)", headers)
+                if m2:
+                    try:
+                        fname = urllib.parse.unquote(m2.group(1))
+                    except Exception:
+                        fname = None
+            if fname is None or 'name="file"' not in headers:
                 continue
-            return mf.group(1), part[head_end + 4:]
+            return fname, part[head_end + 4:]
+        if saw_file_part:
+            raise ValueError("Il file ricevuto è vuoto (0 byte).")
         raise ValueError("Nessun file ricevuto nella richiesta.")
 
     def _upload(self):
@@ -363,14 +642,63 @@ class PanelHandler(_RangeHandler):
                 "usa .docx, .pdf, .txt, .md, .html.")
         if not data:
             raise ValueError("Il file ricevuto è vuoto.")
+        # Scrittura atomica: mai file troncati se il server viene killato.
+        # Su Windows il file esistente può essere bloccato in transito
+        # (antivirus, indicizzazione, OneDrive) o in uso (PDF/Word aperto):
+        # retry con backoff, poi fallback "come copia", solo alla fine errore.
+        import os as _os
+        import stat as _stat
+        import time as _t
         dest = BASE / safe
         replaced = dest.exists()
-        dest.write_bytes(data)
+        final_name = safe
+        tmp = dest.with_suffix(dest.suffix + ".tmp")
+        tmp.write_bytes(data)
+        saved = False
+        try:
+            try:
+                _os.chmod(dest, _stat.S_IWRITE)
+            except OSError:
+                pass
+            for _attempt in range(6):
+                try:
+                    _os.replace(tmp, dest)
+                    saved = True
+                    break
+                except PermissionError:
+                    if _attempt < 5:
+                        _t.sleep(0.5)
+            if not saved:
+                # Fallback: salva come copia (stem (2).ext, …) invece di fallire
+                stem, ext = dest.stem, dest.suffix
+                for _n in range(2, 12):
+                    cand = BASE / f"{stem} ({_n}){ext}"
+                    if cand.exists():
+                        continue
+                    try:
+                        _os.replace(tmp, cand)
+                    except PermissionError:
+                        continue
+                    dest, final_name = cand, cand.name
+                    replaced, saved = False, True
+                    break
+            if not saved:
+                raise ValueError(
+                    f"«{safe}» è bloccato da un altro programma (PDF/Word aperto?) "
+                    "e non riesco a salvarlo nemmeno come copia: chiudilo e "
+                    "riprova, oppure rinomina il file prima di caricarlo.")
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+        _register_upload(final_name)
         _invalidate_lessons_cache()   # il nuovo materiale può generare una lezione
-        _log(f"✔ materiale caricato dal pannello: {safe}"
-             + (" (sostituito)" if replaced else ""))
-        self._json({"ok": True, "name": safe, "replaced": replaced,
-                    "size": len(data)})
+        _log(f"✔ materiale caricato dal pannello: {final_name}"
+             + (" (sostituito)" if replaced else "")
+             + (f" (copia: {safe} bloccato)" if final_name != safe else ""))
+        self._json({"ok": True, "name": final_name, "replaced": replaced,
+                    "size": len(data), "copy": final_name != safe})
 
     # -- GET ------------------------------------------------------------------
     def do_GET(self):
@@ -378,6 +706,10 @@ class PanelHandler(_RangeHandler):
         path, query = parsed.path, urllib.parse.parse_qs(parsed.query)
         if path.startswith("/api/"):
             return self._api(path, query)
+        if path == "/favicon.ico":
+            self.send_response(204)
+            self.end_headers()
+            return
         if path in ("/", "/index.html"):
             body = PANEL_HTML.encode("utf-8") if _loopback(self) else _hub_page_cached().encode("utf-8")
             self.send_response(200)
@@ -414,7 +746,32 @@ class PanelHandler(_RangeHandler):
             try:
                 self._upload()
             except _UploadTooBig as e:
+                _log(f"✗ upload rifiutato (troppo grande): {e}")
+                _flog(f"upload 413 | {e} | len={self.headers.get('Content-Length')} "
+                      f"| ctype={self.headers.get('Content-Type', '')[:100]}")
                 self._json({"ok": False, "error": str(e)}, 413)
+            except Exception as e:  # noqa: BLE001
+                _log(f"✗ upload fallito: {e}")
+                _flog(f"upload 400 | {e} | len={self.headers.get('Content-Length')} "
+                      f"| ctype={self.headers.get('Content-Type', '')[:100]}")
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/cancel_queue":
+            n = cancel_queue()
+            self._json({"ok": True, "removed": n})
+        elif parsed.path == "/api/save_slide":
+            try:
+                self._save_slide()
+            except Exception as e:  # noqa: BLE001
+                _flog(f"save_slide 400 | {e}")
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/reaudio_slide":
+            try:
+                self._reaudio_slide(urllib.parse.parse_qs(parsed.query))
+            except Exception as e:  # noqa: BLE001
+                self._json({"started": False, "reason": str(e)}, 400)
+        elif parsed.path == "/api/tts_preview":
+            try:
+                self._tts_preview()
             except Exception as e:  # noqa: BLE001
                 self._json({"ok": False, "error": str(e)}, 400)
         else:
@@ -490,25 +847,61 @@ margin:0 0 14px;color:var(--mut);font-size:13px;cursor:pointer;user-select:none}
   </div>
 
   <div class="card">
-    <h2>1. Materiale per la lezione</h2>
+    <h2>1. Carica il materiale e genera</h2>
     <div class="upzone" id="upzone" role="button" tabindex="0"
-         title="Carica un file dal pannello (trascinalo qui sopra o clicca per sceglierlo)">
+         title="Carica un file (trascinalo qui sopra o clicca per sceglierlo)">
       <input type="file" id="upfile" accept=".docx,.pdf,.txt,.md,.html,.htm" hidden>
       <span id="uptxt">📄 Trascina qui il materiale (.docx, .pdf, .txt, .md, .html) — oppure clicca per sceglierlo (max 100 MB)</span>
       <div class="uprow" id="uprow" hidden>
         <span class="name" id="upname"></span>
         <span class="meta" id="upsize"></span>
-        <button class="mini" id="btnUp" type="button">Carica</button>
+        <button class="mini" id="btnUpGen" type="button">Carica e genera</button>
+        <button class="mini ghost" id="btnUp" type="button" title="Solo carica, senza generare">Solo carica</button>
         <button class="mini ghost" id="btnUpX" type="button" title="Annulla">✕</button>
       </div>
       <div class="upmsg" id="upmsg" hidden></div>
     </div>
     <div id="materials"></div>
     <div class="opts">
+      <label>Durata <select id="profDurata">
+        <option value="breve">Breve (3-4 moduli)</option>
+        <option value="standard" selected>Standard (4-7)</option>
+        <option value="approfondita">Approfondita (6-8)</option>
+      </select></label>
+      <label>Livello <select id="profLivello">
+        <option value="base">Base</option>
+        <option value="intermedio" selected>Intermedio</option>
+        <option value="avanzato">Avanzato</option>
+      </select></label>
+      <label>Obiettivo <select id="profObiettivo">
+        <option value="conoscenza">Conoscenza</option>
+        <option value="comprensione" selected>Comprensione</option>
+        <option value="applicazione">Applicazione</option>
+        <option value="analisi">Analisi</option>
+      </select></label>
       <label><input type="checkbox" id="forceAll"> Rigenera anche le lezioni già esistenti (--force)</label>
       <label><input type="checkbox" id="bozzaAll"> Bozza senza LLM (struttura dal testo, --bozza)</label>
       <label><input type="checkbox" id="singleAll"> Genera come file HTML unico, senza cartella</label>
     </div>
+  </div>
+
+  <div class="card">
+    <h2>Voce — anteprima</h2>
+    <div class="urlrow">
+      <select id="voiceSel" style="max-width:320px;background:#0d1220;border:1px solid var(--line);color:var(--txt);border-radius:9px;padding:9px"></select>
+      <select id="rateSel" style="background:#0d1220;border:1px solid var(--line);color:var(--txt);border-radius:9px;padding:9px">
+        <option value="-10%">Lenta -10%</option>
+        <option value="-4%" selected>Normale -4%</option>
+        <option value="+0%">+0%</option>
+        <option value="+10%">Veloce +10%</option>
+      </select>
+      <button id="btnVoice" type="button">Prova voce</button>
+    </div>
+    <div class="urlrow" style="margin-top:8px">
+      <input id="voiceTxt" value="Ciao! Questa è un'anteprima della voce per le lezioni." maxlength="500">
+    </div>
+    <audio id="voiceAudio" controls style="width:100%;margin-top:8px" hidden></audio>
+    <div class="upmsg" id="voiceMsg" hidden></div>
   </div>
 
   <div class="card">
@@ -526,8 +919,26 @@ margin:0 0 14px;color:var(--mut);font-size:13px;cursor:pointer;user-select:none}
     <div id="singles"></div>
   </div>
 
+  <div class="card" id="editor" hidden>
+    <h2>Modifica slide <span id="edMeta" style="color:var(--mut);font-weight:400;font-size:12px"></span></h2>
+    <div class="urlrow">
+      <select id="edSel" onchange="ED.idx=+this.value;renderEditor()" style="flex:1;background:#0d1220;border:1px solid var(--line);color:var(--txt);border-radius:9px;padding:9px"></select>
+      <button class="mini ghost" onclick="document.querySelector('#editor').hidden=true" type="button">Chiudi</button>
+    </div>
+    <div class="urlrow" style="margin-top:8px"><input id="edTitle" placeholder="Titolo slide" maxlength="200"></div>
+    <div class="urlrow" style="margin-top:8px"><input id="edNarr" placeholder="Narrazione (voce legge questo testo)" maxlength="3000"></div>
+    <div class="urlrow" style="margin-top:8px"><input id="edQuizQ" placeholder="Domanda quiz (vuoto = nessun quiz)"></div>
+    <div class="urlrow" style="margin-top:8px"><input id="edQuizOpts" placeholder="Opzioni, una per riga — * davanti = corretta (es. * Roma)"></div>
+    <div class="uprow">
+      <button class="mini" onclick="saveEditor(false)" type="button">Salva testo/quiz</button>
+      <button class="mini" onclick="saveEditor(true)" type="button" title="Salva e rigenera l'audio di questa slide">Salva + rigenera audio</button>
+    </div>
+    <div class="upmsg" id="edMsg" hidden></div>
+  </div>
+
   <div class="card">
-    <h2>Log di generazione</h2>
+    <h2>Log di generazione <span id="jobinfo" style="color:var(--mut);font-weight:400;font-size:12px"></span>
+      <button class="mini ghost" id="btnCancelQ" type="button" hidden>Svuota coda</button></h2>
     <pre id="log"></pre>
   </div>
 </div>
@@ -574,15 +985,16 @@ async function refresh() {
       return `<div class="row">
         <span class="name">${m.name}</span>
         <span class="meta">${fmtSize(m.size)}</span>
-        <span class="badge ${exists ? 'exists' : ''}">${exists ? 'lezione esistente' : 'da generare'}</span>
+        <span class="badge ${exists ? 'exists' : ''}">${exists ? 'lezione esistente' : 'caricato'}</span>
         <button class="mini" onclick="gen('${m.name.replace(/'/g, "\\'")}')">Genera</button>
       </div>`;
-    }).join('') : '<div class="empty">Nessun materiale: caricalo qui sopra oppure mettilo nella cartella del progetto.</div>';
+    }).join('') : '<div class="empty">Nessun file caricato: trascina qui sopra o usa Sfoglia, poi premi «Carica e genera».</div>';
 
     $('#lessons').innerHTML = s.lessons.length ? s.lessons.map(l =>
       `<div class="row">
         <span class="name">${l.title}</span>
         <a class="apri" href="/${l.name}/index.html" target="_blank">Apri →</a>
+        <button class="mini ghost" onclick="openEditor('${l.name}')">Modifica</button>
         <button class="mini ghost" onclick="single('${l.name}')">HTML singolo</button>
         <button class="mini ghost" onclick="reaudio('${l.name}')">Rigenera audio</button>
       </div>`).join('')
@@ -614,6 +1026,11 @@ async function pollLog() {
     const lines = s.lines.slice(last);
     last = s.lines.length;
     if (lines.length) addLog(lines);
+    const info = [];
+    if (s.running && s.elapsed != null) info.push(s.elapsed + 's');
+    if (s.queued) info.push('coda: ' + s.queued + (s.queue && s.queue[0] ? ' (' + s.queue[0] + ')' : ''));
+    $('#jobinfo').textContent = info.length ? '· ' + info.join(' · ') : '';
+    $('#btnCancelQ').hidden = !s.queued;
     if (!s.running) {
       busy = false;
       document.querySelectorAll('button').forEach(b => b.disabled = false);
@@ -626,21 +1043,31 @@ async function pollLog() {
 }
 
 async function startJob(path, payload) {
-  if (busy) { alert('Generazione già in corso: attendi la fine.'); return; }
   busy = true;
   document.querySelectorAll('button').forEach(b => b.disabled = true);
   addLog(['— nuova richiesta: ' + path]);
   try {
-    await api(path, { method: 'POST', headers: {'Content-Type': 'application/json'},
+    const j = await api(path, { method: 'POST', headers: {'Content-Type': 'application/json'},
                      body: JSON.stringify(payload) });
+    if (j.queued) addLog(['⏳ accodato: partirà dopo quello in corso']);
   } catch (e) { addLog(['✗ ' + e.message]); busy = false;
     document.querySelectorAll('button').forEach(b => b.disabled = false); return; }
   pollLog();
 }
 
+$('#btnCancelQ').onclick = async () => {
+  await fetch('/api/cancel_queue', { method: 'POST' });
+};
+
+function profilo() {
+  return { durata: $('#profDurata').value, livello: $('#profLivello').value,
+           obiettivo: $('#profObiettivo').value };
+}
+
 async function gen(name) {
   startJob('build', { source: name, force: $('#forceAll').checked,
-                      bozza: $('#bozzaAll').checked, single: $('#singleAll').checked });
+                      bozza: $('#bozzaAll').checked, single: $('#singleAll').checked,
+                      profilo: profilo() });
 }
 
 async function reaudio(lesson) {
@@ -688,8 +1115,8 @@ function clearUpload() {
   upMsg('', null);
 }
 
-async function doUpload() {
-  if (!pendingFile) return;
+async function doUpload(andGenerate) {
+  if (!pendingFile) return null;
   upMsg('Caricamento…', null);
   const fd = new FormData();
   fd.append('file', pendingFile);
@@ -697,13 +1124,18 @@ async function doUpload() {
     const r = await fetch('/api/upload', { method: 'POST', body: fd });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || ('Errore ' + r.status));
-    upMsg('✔ Caricato: ' + j.name + (j.replaced ? ' (sostituito il file esistente)' : ''), true);
+    const fname = j.name;
+    upMsg('✔ Caricato: ' + fname + (j.replaced ? ' (sostituito)' : '') +
+          (j.copy ? ' (salvato come copia: originale bloccato)' : ''), true);
     $('#uprow').hidden = true;
     pendingFile = null;
     upFile.value = '';
-    refresh();
+    await refresh();
+    if (andGenerate) gen(fname);
+    return fname;
   } catch (e) {
     upMsg('✗ ' + e.message, false);
+    return null;
   }
 }
 
@@ -722,15 +1154,103 @@ upZone.addEventListener('drop', e => {
   pickUpload(e.dataTransfer.files[0]);
 });
 upFile.onchange = () => pickUpload(upFile.files[0]);
-$('#btnUp').onclick = doUpload;
+$('#btnUp').onclick = () => doUpload(false);
+$('#btnUpGen').onclick = () => doUpload(true);
 $('#btnUpX').onclick = clearUpload;
 
 $('#btnUrl').onclick = () => {
   const u = $('#url').value.trim();
   if (!/^https?:\/\//i.test(u)) { alert('Incolla un indirizzo completo (https://…).'); return; }
   startJob('build', { source: u, force: $('#forceAll').checked,
-                      bozza: $('#bozzaAll').checked, single: $('#singleAll').checked });
+                      bozza: $('#bozzaAll').checked, single: $('#singleAll').checked,
+                      profilo: profilo() });
 };
+
+// ---------------------------------------------------- voce anteprima + editor
+async function loadVoices() {
+  try {
+    const r = await fetch('/api/voices');
+    const j = await r.json();
+    $('#voiceSel').innerHTML = (j.voices || []).map(v =>
+      `<option value="${v}"${v === j.current ? ' selected' : ''}>${v.replace('it-IT-', '').replace('MultilingualNeural', '')}</option>`).join('');
+  } catch (e) { /* resta vuoto */ }
+}
+
+$('#btnVoice').onclick = async () => {
+  const msg = $('#voiceMsg'), au = $('#voiceAudio');
+  msg.hidden = true; au.hidden = true;
+  msg.textContent = 'Sintesi…'; msg.hidden = false; msg.className = 'upmsg';
+  try {
+    const r = await fetch('/api/tts_preview', { method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ text: $('#voiceTxt').value, voice: $('#voiceSel').value, rate: $('#rateSel').value }) });
+    if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ('Errore ' + r.status)); }
+    const blob = await r.blob();
+    au.src = URL.createObjectURL(blob);
+    au.hidden = false;
+    msg.hidden = true;
+    au.play().catch(() => {});
+  } catch (e) { msg.textContent = '✗ ' + e.message; msg.className = 'upmsg err'; }
+};
+
+let ED = { lesson: null, slides: [], idx: 0 };
+async function openEditor(lesson) {
+  const r = await fetch('/api/lesson_data?lesson=' + encodeURIComponent(lesson));
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.error) { alert('Editor fallito: ' + (j.error || r.status)); return; }
+  ED = { lesson, slides: j.slides || [], idx: 0 };
+  if (!ED.slides.length) { alert('Lezione senza slide.'); return; }
+  renderEditor();
+  $('#editor').hidden = false;
+  $('#editor').scrollIntoView({ behavior: 'smooth' });
+}
+function renderEditor() {
+  const s = ED.slides[ED.idx];
+  $('#edSel').innerHTML = ED.slides.map((x, i) =>
+    `<option value="${i}"${i === ED.idx ? ' selected' : ''}>${i + 1}. ${(x.title || '').slice(0, 50)}</option>`).join('');
+  $('#edTitle').value = s.title || '';
+  $('#edNarr').value = s.narration || '';
+  const q = s.quiz || {};
+  $('#edQuizQ').value = q.q || q.domanda || '';
+  const opts = q.opts || q.opzioni || [];
+  $('#edQuizOpts').value = opts.map(o => ((o.ok || o.corretta) ? '* ' : '') + (o.t || o.testo || '')).join('\n');
+  $('#edMeta').textContent = `Slide ${ED.idx + 1}/${ED.slides.length} · durata ${s.duration || '?'}s` +
+    (s.quiz ? '' : ' · (nessun quiz: compila domanda+opzioni per aggiungerlo)');
+  $('#edMsg').hidden = true;
+}
+async function saveEditor(reaudio) {
+  const msg = $('#edMsg');
+  const lines = $('#edQuizOpts').value.split('\n').map(x => x.trim()).filter(Boolean);
+  let quiz = null;
+  if ($('#edQuizQ').value.trim() || lines.length) {
+    quiz = { domanda: $('#edQuizQ').value.trim(),
+             opzioni: lines.map(l => l.startsWith('* ')
+               ? { testo: l.slice(2).trim(), corretta: true }
+               : { testo: l, corretta: false }) };
+  }
+  const body = { lesson: ED.lesson, index: ED.idx,
+    patch: { title: $('#edTitle').value, narration: $('#edNarr').value,
+             ...(quiz ? { quiz } : {}) } };
+  msg.textContent = 'Salvataggio…'; msg.hidden = false; msg.className = 'upmsg';
+  try {
+    const r = await fetch('/api/save_slide', { method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.ok) throw new Error(j.error || ('Errore ' + r.status));
+    msg.textContent = '✔ Salvato. ' + (j.warning || '');
+    msg.className = 'upmsg ok';
+    if (reaudio) {
+      msg.textContent = '✔ Salvato. Rigenero audio slide…';
+      const r2 = await fetch('/api/reaudio_slide?lesson=' + encodeURIComponent(ED.lesson) + '&index=' + ED.idx, { method: 'POST' });
+      const j2 = await r2.json().catch(() => ({}));
+      if (!r2.ok) throw new Error(j2.reason || j2.error || ('Errore ' + r2.status));
+      busy = true; pollLog();
+    } else {
+      openEditor(ED.lesson);
+    }
+  } catch (e) { msg.textContent = '✗ ' + e.message; msg.className = 'upmsg err'; }
+}
+loadVoices();
 
 refresh();
 setInterval(() => { if (!busy) refresh(); }, 4000);
