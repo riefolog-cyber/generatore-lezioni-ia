@@ -22,9 +22,7 @@ import collections
 import contextlib
 import functools
 import http.server
-import io
 import json
-import os
 import re
 import shutil
 import socket
@@ -42,7 +40,7 @@ sys.path.insert(0, str(BASE))
 
 from common import load_config  # noqa: E402
 from sources import SUPPORTED_EXT, is_url  # noqa: E402
-from start_lesson import _RangeHandler, _hub_page, list_lessons  # noqa: E402
+from start_lesson import _RangeHandler, _hub_page, find_port, list_lessons  # noqa: E402
 
 CONFIG = load_config()
 DEFAULT_PORT = int(CONFIG.get("porta", 8341))
@@ -797,17 +795,6 @@ def main():
         print("\nServer fermato.")
     finally:
         httpd.server_close()
-
-
-def find_port(start=DEFAULT_PORT, tries=10):
-    for p in range(start, start + tries):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind(("127.0.0.1", p))
-                return p
-            except OSError:
-                continue
-    return None
 
 
 if __name__ == "__main__":

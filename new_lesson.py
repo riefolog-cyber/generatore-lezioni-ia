@@ -33,7 +33,6 @@ Configurazione (config.json): llm_url, llm_model, voice, theme, porta.
 import hashlib
 import json
 import os
-import random
 import re
 import shutil
 import subprocess
@@ -66,10 +65,8 @@ MAX_MODULI = int(CONFIG.get("num_moduli_max", 7))
 
 
 # ================================================================== 1. estrazione fonte
-def extract_docx(path):
-    """Compat: estrazione .docx delegata a tools/sources.py."""
-    from sources import extract_docx as _extract_docx
-    return _extract_docx(path)
+# L'estrazione dei contenuti (docx/pdf/txt/md/html/URL/YouTube) vive in
+# tools/sources.py: extract_source() è il punto d'ingresso unico.
 
 
 # ================================================================== 2. LLM (9router)

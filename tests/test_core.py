@@ -185,7 +185,6 @@ def test_llm_cache_put_get_roundtrip():
 
 # ---------------------------------------------------------------- export_single
 def test_export_single_incorpora_css_js_audio():
-    import shutil
     import tempfile
     from export_single import export_single
     with tempfile.TemporaryDirectory() as td:

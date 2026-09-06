@@ -69,7 +69,6 @@ class App:
 
     # ------------------------------------------------------------ UI
     def _build_bar(self):
-        import tkinter as tk
         bar = tk.Frame(self.root)
         bar.pack(fill="x", padx=8)
         entries = [

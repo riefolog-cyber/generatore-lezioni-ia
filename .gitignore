@@ -10,6 +10,7 @@ __pycache__/
 *.pyc
 *.lock
 .llm_cache/
+_generated.json
 
 # log di generazione/avvio
 *.log
