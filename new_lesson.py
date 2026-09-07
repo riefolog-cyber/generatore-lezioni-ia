@@ -63,7 +63,7 @@ LLM_API_KEY = CONFIG.get("llm_api_key") or ""
 
 MIN_MODULI = int(CONFIG.get("num_moduli_min", 4))
 MAX_MODULI = int(CONFIG.get("num_moduli_max", 7))
-CACHE_VERSION = "v2"  # bump per invalidare cache audio/llm dopo fix Fase 0/1
+CACHE_VERSION = "v3"  # bump: invalida cache del bug 1-modulo (groq/gpt-oss-120b ha risposto con 1 modulo)
 _FFMPEG_OK = None
 AUDIO_DUAL_PASS = bool(CONFIG.get("audio_loudnorm_dual", False))
 
@@ -364,6 +364,11 @@ def llm_structure(ext, use_cache=True, profilo=None):
                     if not struct.get("titolo"):
                         struct["titolo"] = ext["title"]
                     _check_struct(struct)
+                    nm = len(struct.get("moduli", []))
+                    if nm < nmin or nm > nmax + 1:
+                        raise ValueError(f"moduli insufficienti: {nm} < {nmin} richiesti (o > {nmax}) — risposta scartata")
+                    if nm < MIN_MODULI and len(testo) >= 3500:
+                        raise ValueError(f"moduli {nm} < MIN_MODULI {MIN_MODULI} su materiale lungo — scarto")
                     if key:
                         _llm_cache_put(key, struct)
                     return struct, "llm"
@@ -820,8 +825,12 @@ def _ffmpeg_probe(path):
 
 
 def _atomic_write_bytes(path, data):
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_bytes(data)
+    import tempfile as _tf
+    fd, tmp = _tf.mkstemp(dir=str(path.parent), prefix="." + path.name + ".", suffix=".tmp")
+    try:
+        os.write(fd, data)
+    finally:
+        os.close(fd)
     os.replace(tmp, path)
 
 
@@ -832,7 +841,14 @@ def _polish_mp3(src, bitrate="96k"):
     if not _ffmpeg_ok():
         return False
     try:
-        tmp = src.with_suffix(".pol.mp3")
+        import tempfile as _tf2
+        fd2, tmp = _tf2.mkstemp(dir=str(src.parent), prefix="." + src.name + ".pol.", suffix=".mp3")
+        os.close(fd2)
+        tmp = Path(tmp)
+        try:
+            Path(tmp).unlink(missing_ok=True)
+        except OSError:
+            pass
         filt = "loudnorm=I=-17:TP=-1.5:LRA=9,afade=t=in:st=0:d=0.04"
         if AUDIO_DUAL_PASS:
             # Dual-pass: misura poi applica (qualità superiore, ~2x tempo)
@@ -1083,15 +1099,18 @@ def generate_audio(out_dir, slides):
                 # post-produzione: loudness uniforme tra le slide + fade + 44.1 kHz
                 _polish_mp3(mp3, EDGE_BITRATE)
                 try:
-                    # Scrittura cache atomica: mai file troncati su crash/kill
-                    tmp_c = cached_mp3.with_suffix(".mp3.tmp")
-                    shutil.copyfile(mp3, tmp_c)
-                    os.replace(tmp_c, cached_mp3)
+                    # Scrittura cache atomica con nome unico (evita race tra worker)
+                    import tempfile as _tf3
+                    fd_c, p_c = _tf3.mkstemp(dir=str(CACHE), prefix=".cache-", suffix=".mp3")
+                    os.close(fd_c)
+                    Path(p_c).unlink(missing_ok=True)
+                    shutil.copyfile(mp3, p_c)
+                    os.replace(p_c, cached_mp3)
                     if words:
-                        tmp_j = cached_meta.with_suffix(".json.tmp")
-                        tmp_j.write_text(json.dumps(words, ensure_ascii=False),
-                                         encoding="utf-8")
-                        os.replace(tmp_j, cached_meta)
+                        fd_j, p_j = _tf3.mkstemp(dir=str(CACHE), prefix=".cache-", suffix=".json")
+                        os.close(fd_j)
+                        Path(p_j).write_text(json.dumps(words, ensure_ascii=False), encoding="utf-8")
+                        os.replace(p_j, cached_meta)
                 except OSError:
                     pass
             return item, engine, words
@@ -1197,56 +1216,113 @@ def _validate_audio(out_dir, slides, durations=None):
 
 
 def sanitize_stem(stem):
+    # rimuove caratteri non validi su Windows (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
     s = re.sub(r"^[\d\s_\-\.]+", "", stem)
     s = re.sub(r"[^\w\s\-]", "", s, flags=re.UNICODE)
-    s = re.sub(r"\s+", "_", s.strip())[:40]
-    return s or "Lezione"
+    s = re.sub(r"\s+", "_", s.strip())[:40].strip(" .")
+    s = s or "Lezione"
+    reserved = {"CON","PRN","AUX","NUL"} | {f"COM{i}" for i in range(1,10)} | {f"LPT{i}" for i in range(1,10)}
+    if s.upper() in reserved:
+        s = f"_{s}"
+    return s
 
 
 def _pid_alive(pid):
     try:
+        pid = int(pid)
+    except Exception:
+        return False
+    try:
         if os.name == "nt":
             import subprocess as _sp
-            out = _sp.run(["tasklist", "/FI", f"PID eq {pid}"],
+            out = _sp.run(["tasklist", "/FI", f"PID eq {pid}", "/NH"],
                           capture_output=True, text=True, timeout=5)
-            return str(pid) in (out.stdout or "")
-        os.kill(int(pid), 0)
+            # cerca riga con PID esatto, non substring
+            for line in (out.stdout or "").splitlines():
+                parts = line.split()
+                if parts and parts[0].isdigit() or (len(parts) > 1 and parts[1] == str(pid)):
+                    # tasklist NH: "Image Name PID ..." -> PID è seconda colonna
+                    if str(pid) in line.split():
+                        # verifica che la colonna PID sia esattamente pid
+                        import re as _re
+                        if _re.search(rf"\b{pid}\b", line):
+                            # ulteriore check: assicura che sia PID column
+                            tokens = line.split()
+                            if str(pid) in tokens:
+                                # trova esatta posizione PID
+                                if tokens[1] == str(pid) if len(tokens) > 1 and tokens[1].isdigit() else str(pid) in tokens:
+                                    return True
+                            return True
+                    return False
+            # fallback: usa psutil-like via wmic se disponibile
+            return False
+        os.kill(pid, 0)
         return True
     except Exception:
         return False
 
 
 def _lock_build():
-    """Acquisisce il blocco di generazione. False = un'altra build è in corso.
-    Stale se >30min OPPURE se il PID proprietario non è più vivo (crash)."""
+    """Acquisisce il blocco atomico con O_EXCL. Ritorna True se acquisito."""
+    # pulizia stale prima del tentativo atomico
     if LOCK.exists():
         try:
             raw = LOCK.read_text(encoding="utf-8").strip()
             try:
                 info = json.loads(raw)
-                pid, mtime = info.get("pid"), LOCK.stat().st_mtime
+                pid = info.get("pid")
+                mtime = LOCK.stat().st_mtime
             except Exception:
-                pid, mtime = int(raw), LOCK.stat().st_mtime
-            stale = (time.time() - mtime > 30 * 60) or not _pid_alive(pid)
+                try:
+                    pid = int(raw)
+                except Exception:
+                    pid = None
+                mtime = LOCK.stat().st_mtime
+            stale = (time.time() - mtime > 30 * 60) or (pid is not None and not _pid_alive(pid))
+            if stale:
+                try:
+                    LOCK.unlink()
+                except OSError:
+                    pass
         except OSError:
-            stale = True
+            pass
         except Exception:
-            stale = True
-        if not stale:
-            return False
+            pass
     try:
-        LOCK.write_text(json.dumps({"pid": os.getpid(), "t": time.time()}),
-                        encoding="utf-8")
+        fd = os.open(str(LOCK), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            os.write(fd, json.dumps({"pid": os.getpid(), "t": time.time()}).encode("utf-8"))
+        finally:
+            os.close(fd)
         return True
+    except FileExistsError:
+        return False
     except OSError:
+        # fallback: se O_EXCL non disponibile, prova write con check
+        try:
+            if not LOCK.exists():
+                LOCK.write_text(json.dumps({"pid": os.getpid(), "t": time.time()}), encoding="utf-8")
+                return True
+        except OSError:
+            pass
         return False
 
 
 def _unlock_build():
     try:
-        LOCK.unlink()
-    except OSError:
-        pass
+        # cancella solo se siamo proprietari
+        raw = LOCK.read_text(encoding="utf-8")
+        info = json.loads(raw)
+        if int(info.get("pid", -1)) == os.getpid():
+            LOCK.unlink()
+        else:
+            # non siamo proprietari, non cancellare
+            pass
+    except Exception:
+        try:
+            LOCK.unlink()
+        except OSError:
+            pass
 
 
 def build_from_docx(path, force=False, bozza=False, no_cache=False,

@@ -5,10 +5,12 @@ Uso:
   python start_lesson.py --list   (elenca le lezioni *_lesson)
 """
 import functools
+import html
 import http.server
 import re
 import socket
 import sys
+import urllib.parse
 import webbrowser
 from pathlib import Path
 
@@ -75,6 +77,15 @@ class _RangeHandler(_QuietHandler):
     il download. Solo per l'audio, il resto va bene così com'è."""
 
     def do_GET(self):
+        # anti-traversal prima di qualsiasi translate_path
+        try:
+            dec = urllib.parse.unquote(self.path)
+            if "\x00" in dec or "\\" in dec or ".." in dec.split("/"):
+                self.send_error(404, "Non disponibile")
+                return
+        except Exception:
+            self.send_error(404, "Non disponibile")
+            return
         if not self.translate_path(self.path).lower().endswith(".mp3"):
             return super().do_GET()
         rng = self.headers.get("Range")
@@ -109,13 +120,42 @@ class _RangeHandler(_QuietHandler):
                     remaining -= len(chunk)
 
 
+def _is_safe_request_path(path, allowed_names):
+    """Anti-traversal: decodifica %2e, blocca .. e verifica che il path risolto resti dentro allowed."""
+    try:
+        dec = urllib.parse.unquote(path)
+    except Exception:
+        return False
+    if "\x00" in dec or "\\" in dec:
+        return False
+    # normalizza e controlla componenti .. 
+    parts = [p for p in dec.strip("/").split("/") if p]
+    if not parts:
+        return True  # "/" o "/index.html" gestiti prima
+    if ".." in parts:
+        return False
+    first = parts[0]
+    if first not in allowed_names:
+        return False
+    # verifica che il path risolto non esca da BASE/first
+    try:
+        target = (BASE / "/".join(parts)).resolve()
+        base = (BASE / first).resolve()
+        target.relative_to(base)
+        # anche il first deve essere dentro BASE
+        base.relative_to(BASE.resolve())
+    except Exception:
+        return False
+    return True
+
+
 def _hub_page():
     """Pagina indice che elenca tutte le lezioni disponibili (solo quelle,
     nient'altro del progetto è esposto)."""
     lessons = list_lessons()
     items = "".join(
-        f'<a class="card" href="/{l.name}/index.html">'
-        f'<span class="ic">🎓</span><span class="nm">{l.name.replace("_lesson", "")}</span>'
+        f'<a class="card" href="/{html.escape(l.name)}/index.html">'
+        f'<span class="ic">🎓</span><span class="nm">{html.escape(l.name.replace("_lesson", ""))}</span>'
         f'<span class="op">Apri →</span></a>'
         for l in lessons)
     if not items:
@@ -190,8 +230,7 @@ def serve(lesson_dir=None, port=None):
                     self.end_headers()
                     self.wfile.write(body)
                     return
-                first = self.path.lstrip("/").split("/", 1)[0]
-                if first not in _allowed:
+                if not _is_safe_request_path(self.path, _allowed):
                     self.send_error(404, "Non disponibile")
                     return
                 super().do_GET()

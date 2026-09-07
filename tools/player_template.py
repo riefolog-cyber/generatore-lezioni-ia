@@ -52,7 +52,8 @@ def _accent_from_title(titolo):
 
 
 def _esc(s):
-    return (s or '').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+    import html as _html
+    return _html.escape(s or '', quote=True)
 
 
 def _theme_block(name, t, accent):
@@ -532,6 +533,12 @@ main { position: relative; z-index: 1; flex: 1; display: flex; min-height: 0; }
   text-align: center; flex: 1; }
 @media (max-width: 760px) { #cap { display: none; } }
 #audioErr { color: var(--ko); font-size: 12.5px; font-weight: 700; flex: 0 0 auto; }
+#audioUnlock { display: flex; align-items: center; gap: 8px; padding: 7px 12px; border-radius: 10px; flex: 0 0 auto;
+  background: color-mix(in srgb, var(--warn, #ffd166) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn, #ffd166) 40%, transparent); font-size: 13px; font-weight: 700; }
+#audioUnlock[hidden] { display: none !important; }
+#audioUnlock button { border: none; background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff;
+  border-radius: 8px; padding: 6px 12px; cursor: pointer; font-weight: 800; font-family: inherit; }
 
 /* ------------------------------------------------ ricerca */
 #sbox { position: fixed; z-index: 60; top: 58px; right: 16px; width: min(360px, 92vw);
@@ -1336,7 +1343,7 @@ function render(i) {
   // quando la slide completa un'attività interattiva, riparte la lettura:
   // la voce accompagna anche il feedback (non solo la teoria)
   if (window.__attivo && !RIPASSO.length) {
-    try { audio.currentTime = 0; audio.play().catch(() => {}); } catch (e) {}
+    try { audio.currentTime = 0; tryPlay(); } catch (e) {}
   }
   const bPrev = _btn('btnPrev'), bNext = _btn('btnNext');
   if (bPrev) bPrev.disabled = i === 0;
@@ -1846,6 +1853,20 @@ const preAudio = new Audio();   // usato SOLO per scaldare la cache del browser
 preAudio.preload = 'auto';
 let preloadedUrl = null;
 let dur = 0, wordTimings = [], chunks = [], raf = null;
+let audioUnlocked = false;
+let pendingAutoplay = false;
+function showAudioUnlock() { const u = _btn('audioUnlock'); if (u) u.hidden = false; }
+function hideAudioUnlock() { const u = _btn('audioUnlock'); if (u) u.hidden = true; }
+function tryPlay() {
+  if (!audio.src) return Promise.resolve();
+  return audio.play().then(() => { audioUnlocked = true; hideAudioUnlock(); pendingAutoplay = false; }).catch(err => {
+    const blocked = err && (err.name === 'NotAllowedError' || /not allowed|gesture|interaction/i.test(err.message || ''));
+    if (blocked) { pendingAutoplay = true; showAudioUnlock(); }
+    else { const aerr = _btn('audioErr'); if (aerr && audio.src) aerr.hidden = false; }
+  });
+}
+document.addEventListener('click', () => { if (pendingAutoplay && !audioUnlocked) tryPlay(); }, { capture: true });
+try { const _au = _btn('audioUnlockBtn'); if (_au) _au.onclick = () => tryPlay(); } catch (e) {}
 
 function loadAudio(i, autoplay) {
   const s = slides[i];
@@ -1871,7 +1892,10 @@ function loadAudio(i, autoplay) {
   if (s.audio) {
     audio.load();
     if (autoplay) {
-      audio.play().catch(() => {});   // bloccato solo prima di una interazione
+      // autoplay può essere bloccato dal browser fino alla prima interazione:
+      // mostriamo il banner "Attiva audio" invece di fallire in silenzio
+      if (audioUnlocked) { tryPlay(); }
+      else { tryPlay(); }
     }
   } else {
     const aerr = _btn('audioErr');
@@ -1912,13 +1936,13 @@ function setPlayIcon() {
 const _btnPlay = _safe('btnPlay');
 if (_btnPlay) _btnPlay.onclick = () => {
   if (!audio.src) return;
-  if (audio.paused) { audio.play(); } else { audio.pause(); }
+  if (audio.paused) { tryPlay(); } else { audio.pause(); }
 };
 const _btnRestart = _safe('btnRestart');
 if (_btnRestart) _btnRestart.onclick = () => {
   if (!audio.src) return;
   audio.currentTime = 0;
-  audio.play().catch(() => {});
+  tryPlay();
 };
 const _btnRate = _safe('btnRate');
 if (_btnRate) _btnRate.onclick = () => {
@@ -2076,31 +2100,33 @@ $('#sinput').addEventListener('input', e => {
 });
 // ------------------------------------------------------------ stampa / PDF
 function printLesson() {
-  const printHead = (cls, txt) => '<' + cls + '>' + txt + '</' + cls + '>';
+  const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const printHead = (cls, txt) => '<' + cls + '>' + esc(txt) + '</' + cls + '>';
   let body = '';
   slides.forEach((s, i) => {
     body += '<div class="sl">';
     body += printHead('h2', (i + 1) + '. ' + (s.icon ? s.icon + ' ' : '') + (s.title || ''));
     (s.blocks || []).forEach(b => {
-      if (b.callout) body += '<div class="call">' + b.callout + '</div>';
+      if (b.callout) body += '<div class="call">' + esc(b.callout) + '</div>';
       else if (b.h1) body += printHead('h3', b.h1);
       else if (b.h2) body += printHead('h4', b.h2);
-      else if (b.p) body += '<p>' + b.p + '</p>';
-      else if (b.quote) body += '<blockquote>' + b.quote + (b.attr ? ' <i>— ' + b.attr + '</i>' : '') + '</blockquote>';
-      else if (b.list) body += '<ul>' + b.list.map(x => '<li>' + x + '</li>').join('') + '</ul>';
-      else if (b.quiz) body += '<p><b>Quiz:</b> ' + b.quiz.q + '<br><i>Risposta: '
-        + ((b.quiz.opts || []).filter(o => o.ok).map(o => o.t).join(' | ') || '-') + '</i></p>';
-      else if (b.vf) body += '<p><b>Vero o falso:</b></p><ul>' + b.vf.map(v2 => '<li>' + v2.t
+      else if (b.p) body += '<p>' + esc(b.p) + '</p>';
+      else if (b.quote) body += '<blockquote>' + esc(b.quote) + (b.attr ? ' <i>— ' + esc(b.attr) + '</i>' : '') + '</blockquote>';
+      else if (b.list) body += '<ul>' + b.list.map(x => '<li>' + esc(x) + '</li>').join('') + '</ul>';
+      else if (b.quiz) body += '<p><b>Quiz:</b> ' + esc(b.quiz.q) + '<br><i>Risposta: '
+        + esc(((b.quiz.opts || []).filter(o => o.ok).map(o => o.t).join(' | ') || '-')) + '</i></p>';
+      else if (b.vf) body += '<p><b>Vero o falso:</b></p><ul>' + b.vf.map(v2 => '<li>' + esc(v2.t)
         + ' — <i>' + (v2.ok ? 'Vero' : 'Falso') + '</i></li>').join('') + '</ul>';
-      else if (b.compila) body += '<p><b>Compila:</b> ' + b.compila.map(c2 => c2.frase.replace(/___/g, '<u>' + (c2.risposta || '…') + '</u>')).join(' · ') + '</p>';
-      else if (b.seq) body += '<p><b>Sequenza:</b> ' + (b.seq.passi || []).join(' → ') + '</p>';
+      else if (b.compila) body += '<p><b>Compila:</b> ' + b.compila.map(c2 => esc(c2.frase).replace(/___/g, '<u>' + esc(c2.risposta || '…') + '</u>')).join(' · ') + '</p>';
+      else if (b.seq) body += '<p><b>Sequenza:</b> ' + esc((b.seq.passi || []).join(' → ')) + '</p>';
       else if (b.flashcards) body += '<p><b>Flashcards:</b></p><ul>'
-        + (b.flashcards.cards || []).map(c2 => '<li><b>' + c2.t + '</b>: ' + c2.d + '</li>').join('') + '</ul>';
+        + (b.flashcards.cards || []).map(c2 => '<li><b>' + esc(c2.t) + '</b>: ' + esc(c2.d) + '</li>').join('') + '</ul>';
     });
     body += '</div>';
   });
   const w = window.open('', '_blank');
-  w.document.write('<html><head><title>' + document.title + ' — versione stampabile</title><style>'
+  const escTitle = String(document.title||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  w.document.write('<html><head><title>' + escTitle + ' — versione stampabile</title><style>'
     + 'body{font-family:Segoe UI,sans-serif;padding:30px;color:#111;max-width:820px;margin:auto}'
     + 'h1{font-size:22px}h2{font-size:17px;margin:18px 0 6px;border-bottom:2px solid #3a55a0;padding-bottom:4px}'
     + 'h3{font-size:15px}h4{font-size:14px}.sl{page-break-inside:avoid;margin-bottom:10px}'
@@ -2180,12 +2206,12 @@ document.addEventListener('keydown', e => {
   }
   else if (e.key === 'r' || e.key === 'R') {
     if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-    if (audio.src) { audio.currentTime = 0; audio.play().catch(() => {}); }
+    if (audio.src) { audio.currentTime = 0; tryPlay(); }
   }
   else if (e.key === ' ') {
     if (tag === 'BUTTON' || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
     e.preventDefault();
-    if (audio.src) { if (audio.paused) { audio.play(); } else { audio.pause(); } }
+    if (audio.src) { if (audio.paused) { tryPlay(); } else { audio.pause(); } }
   }
 });
 render(cur);   // parte dalla posizione salvata (riprendi da dove eri)
@@ -2245,6 +2271,7 @@ def write_player(out_dir: Path, titolo: str, tema: str = 'dark'):
   <span id="tt">0:00 / 0:00</span>
   <span id="cap"></span>
   <span id="audioErr" hidden title="Traccia audio non disponibile per questa slide">⚠ audio</span>
+  <span id="audioUnlock" hidden><button id="audioUnlockBtn" title="Attiva l'audio (richiesto dal browser)">🔊 Attiva audio</button></span>
   <button id="btnRate" class="abar" title="Velocità di lettura">1×</button>
   <button id="btnAuto" class="abar" title="Riproduzione continua: a fine audio vai alla slide successiva">⏭</button>
 </div>

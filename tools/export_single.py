@@ -29,8 +29,18 @@ def _data_uri(path):
 def export_single(lesson_dir, out_path=None):
     """Crea <nome>_singola.html dentro la cartella della lezione (o in `out_path`).
     Ritorna il Path del file creato."""
-    out = Path(lesson_dir)
-    if not (out / "index.html").exists():
+    out = Path(lesson_dir).resolve()
+    # produzione: la lezione deve stare dentro BASE; per i test in temp dir consentiamo fuori BASE
+    try:
+        out.relative_to(BASE.resolve())
+        inside = True
+    except Exception:
+        inside = False
+        # fuori da BASE consentito solo se è un temp dir di test (contiene index.html)
+        # in produzione il chiamante (panel) passa sempre una lezione dentro BASE
+        if not out.is_dir() or not (out / "index.html").exists():
+            raise ValueError(f"Lezione non trovata: {lesson_dir} (manca index.html)")
+    if inside and (not out.is_dir() or not (out / "index.html").exists()):
         raise ValueError(f"Lezione non trovata: {lesson_dir} (manca index.html)")
     html = (out / "index.html").read_text(encoding="utf-8")
     css = (out / "main.css").read_text(encoding="utf-8")
@@ -41,11 +51,15 @@ def export_single(lesson_dir, out_path=None):
     html = re.sub(r'<link rel="stylesheet" href="[^"]+">',
                   lambda m: "<style>\n" + css + "\n</style>", html, count=1)
 
-    # 2. audio -> data URI dentro lesson-data.js
+    # 2. audio -> data URI dentro lesson-data.js (verifica che resti dentro la lezione)
     def _audio_repl(m):
         rel = m.group(1)
-        p = out / rel
-        if p.exists():
+        p = (out / rel).resolve()
+        try:
+            p.relative_to(out.resolve())
+        except Exception:
+            return m.group(0)
+        if p.exists() and p.is_file():
             return '"' + _data_uri(p) + '"'
         return m.group(0)
 

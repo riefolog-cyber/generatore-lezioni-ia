@@ -276,16 +276,17 @@ def validate_lesson(out_dir, slides):
 def write_report(out_dir, errs, stats, extra=None):
     """Scrive report.html leggibile nella cartella lezione."""
     out_dir = Path(out_dir)
-    rows = "".join(f"<tr><td>{k}</td><td><b>{v}</b></td></tr>" for k, v in stats.items())
+    esc = lambda s: __import__("html").escape(str(s), quote=True)
+    rows = "".join(f"<tr><td>{esc(k)}</td><td><b>{esc(v)}</b></td></tr>" for k, v in stats.items())
     if errs:
-        err_html = "<ul>" + "".join(f"<li>{e}</li>" for e in errs) + "</ul>"
+        err_html = "<ul>" + "".join(f"<li>{esc(e)}</li>" for e in errs) + "</ul>"
         stato = "⚠ Generata con avvisi"
     else:
         err_html = "<p>VALIDAZIONE OK — nessun errore.</p>"
         stato = "✓ Lezione pronta"
-    extra_html = f"<p>{extra}</p>" if extra else ""
+    extra_html = f"<p>{esc(extra)}</p>" if extra else ""
     html = f"""<!DOCTYPE html><html lang="it"><meta charset="utf-8">
-<title>Report — {out_dir.name}</title>
+<title>Report — {esc(out_dir.name)}</title>
 <body style="font-family:sans-serif;max-width:720px;margin:2rem auto;background:#0d1420;color:#eaf1ff">
 <h1>{stato}</h1><h2>{out_dir.name}</h2>
 <table border="1" cellpadding="6">{rows}</table>

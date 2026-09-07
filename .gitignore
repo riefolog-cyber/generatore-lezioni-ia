@@ -8,11 +8,14 @@ _archify/
 
 # cache ed esecuzione runtime
 __pycache__/
+.pytest_cache/
+.ruff_cache/
 *.pyc
 *.lock
 !requirements.lock
 .llm_cache/
 _generated.json
+.opencode/
 
 # log di generazione/avvio
 *.log

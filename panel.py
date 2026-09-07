@@ -22,6 +22,7 @@ Uso:  python panel.py        (avvia il pannello e apre il browser)
 import collections
 import contextlib
 import functools
+import html
 import http.server
 import json
 import re
@@ -53,6 +54,8 @@ LOG = collections.deque(maxlen=500)
 JOB = {"running": False, "kind": None, "source": None, "error": None,
        "done_at": None, "ok": None, "started_at": None, "progress": ""}
 QUEUE = collections.deque(maxlen=5)  # coda FIFO: (fn, kind, source)
+JOB_LOCK = threading.RLock()
+LOG_LOCK = threading.RLock()
 
 
 class _UploadTooBig(Exception):
@@ -97,14 +100,17 @@ def _hub_page_cached():
 
 def _invalidate_lessons_cache():
     _lessons_cache["names"] = None
+    _lessons_cache["singles"] = None
     _lessons_cache["hub"] = None
+    _lessons_cache["at"] = 0.0
 
 
 class _LogWriter:
     def write(self, s):
         s = s.rstrip()
         if s:
-            LOG.append(s)
+            with LOG_LOCK:
+                LOG.append(s)
         return len(s) + 1
 
     def flush(self):
@@ -112,7 +118,8 @@ class _LogWriter:
 
 
 def _log(txt):
-    LOG.append(str(txt).rstrip())
+    with LOG_LOCK:
+        LOG.append(str(txt).rstrip())
 
 
 def _flog(txt):
@@ -120,27 +127,33 @@ def _flog(txt):
     try:
         with open(BASE / "panel_errors.log", "a", encoding="utf-8") as f:
             f.write(time.strftime("%Y-%m-%d %H:%M:%S") + " | " + str(txt).rstrip() + "\n")
-    except OSError:
-        pass
+    except OSError as e:
+        # se disco pieno, almeno log su stderr
+        try:
+            print(f"_flog failed: {e}", file=sys.stderr)
+        except Exception:
+            pass
 
 
 def _run_next_queued():
-    if QUEUE:
-        fn, kind, source = QUEUE.popleft()
-        start_job(fn, kind, source)
+    with JOB_LOCK:
+        if QUEUE:
+            fn, kind, source = QUEUE.popleft()
+            start_job(fn, kind, source)
 
 
 def start_job(fn, kind, source):
     """Lancia una generazione in background. Se una è in corso, accoda (max 5).
     Ritorna (started, queued): started=True se partito subito."""
-    if JOB["running"]:
-        if len(QUEUE) >= QUEUE.maxlen:
-            return (False, False)
-        QUEUE.append((fn, kind, source))
-        _log(f"⏳ in coda [{kind}] {source} (posizione {len(QUEUE)})")
-        return (True, True)
-    JOB.update(running=True, kind=kind, source=source, error=None,
-               done_at=None, ok=None, started_at=time.time(), progress="")
+    with JOB_LOCK:
+        if JOB["running"]:
+            if len(QUEUE) >= QUEUE.maxlen:
+                return (False, False)
+            QUEUE.append((fn, kind, source))
+            _log(f"⏳ in coda [{kind}] {source} (posizione {len(QUEUE)})")
+            return (True, True)
+        JOB.update(running=True, kind=kind, source=source, error=None,
+                   done_at=None, ok=None, started_at=time.time(), progress="")
     _log(f"▶ [{kind}] {source}")
 
     def work():
@@ -148,15 +161,23 @@ def start_job(fn, kind, source):
             with contextlib.redirect_stdout(_LogWriter()), \
                     contextlib.redirect_stderr(_LogWriter()):
                 fn()
-            JOB["ok"] = True
+            with JOB_LOCK:
+                JOB["ok"] = True
             _log("✔ JOB COMPLETATO")
         except Exception as e:  # noqa: BLE001
-            JOB["error"] = str(e)
-            JOB["ok"] = False
+            with JOB_LOCK:
+                JOB["error"] = str(e)
+                JOB["ok"] = False
             _log(f"✗ ERRORE: {e}")
+            import traceback as _tb
+            try:
+                _flog(f"JOB {kind} {source} failed: {e}\n{_tb.format_exc()}")
+            except Exception:
+                pass
         finally:
-            JOB["running"] = False
-            JOB["done_at"] = time.time()
+            with JOB_LOCK:
+                JOB["running"] = False
+                JOB["done_at"] = time.time()
             _invalidate_lessons_cache()   # una nuova lezione è (forse) pronta
             _run_next_queued()
 
@@ -417,10 +438,30 @@ class PanelHandler(_RangeHandler):
                     "size": p.stat().st_size})
 
     def _check_lesson(self, name):
-        lesson = BASE / (name or "")
-        if not name or not lesson.is_dir() or not (lesson / "index.html").exists():
+        # anti-traversal: rigetta .., /, \, null byte e nomi non whitelistati
+        if not name or "\x00" in name or "/" in name or "\\" in name or ".." in name:
+            raise ValueError("Lezione non valida")
+        if name not in _allowed_lesson_names() and name not in _allowed_single_names():
+            # fallback strict: verifica comunque il path risolto
+            lesson = (BASE / name).resolve()
+            try:
+                lesson.relative_to(BASE.resolve())
+            except Exception:
+                raise ValueError("Lezione non valida")
+            if not lesson.is_dir() or not (lesson / "index.html").exists():
+                raise ValueError("Lezione non trovata")
+            return lesson
+        lesson = BASE / name
+        if not lesson.is_dir() or not (lesson / "index.html").exists():
             raise ValueError("Lezione non trovata")
-        if lesson.resolve().parent != BASE.resolve():
+        try:
+            # double-check che non sia symlink fuori da BASE
+            lesson.resolve().relative_to(BASE.resolve())
+            if lesson.resolve().parent != BASE.resolve():
+                raise ValueError("Lezione non valida")
+        except ValueError:
+            raise
+        except Exception:
             raise ValueError("Lezione non valida")
         return lesson
 
@@ -652,8 +693,13 @@ class PanelHandler(_RangeHandler):
         dest = BASE / safe
         replaced = dest.exists()
         final_name = safe
-        tmp = dest.with_suffix(dest.suffix + ".tmp")
-        tmp.write_bytes(data)
+        import tempfile as _tf
+        fd, tmp_path = _tf.mkstemp(dir=str(BASE), prefix=".upload-", suffix=".tmp")
+        try:
+            _os.write(fd, data)
+        finally:
+            _os.close(fd)
+        tmp = Path(tmp_path)
         saved = False
         try:
             try:
@@ -718,13 +764,34 @@ class PanelHandler(_RangeHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        first = path.lstrip("/").split("/", 1)[0]
-        # whitelist con TTL breve (2s) + invalidazione su upload/generazione:
-        # le lezioni appena create (o i file unici *_singola.html) diventano
-        # subito disponibili, ma senza fare glob su disco a ogni asset
-        if first not in _allowed_lesson_names() and first not in _allowed_single_names():
+        # anti-traversal: decodifica, blocca .., \ e verifica path risolto dentro BASE
+        try:
+            dec = urllib.parse.unquote(path)
+        except Exception:
             self.send_error(404, "Non disponibile")
             return
+        if "\x00" in dec or "\\" in dec:
+            self.send_error(404, "Non disponibile")
+            return
+        parts = [p for p in dec.strip("/").split("/") if p]
+        if parts and ".." in parts:
+            self.send_error(404, "Non disponibile")
+            return
+        first = parts[0] if parts else ""
+        if first and first not in _allowed_lesson_names() and first not in _allowed_single_names():
+            self.send_error(404, "Non disponibile")
+            return
+        if parts:
+            try:
+                target = (BASE / "/".join(parts)).resolve()
+                # deve restare dentro BASE
+                target.relative_to(BASE.resolve())
+                # se first è una lezione, deve restare dentro BASE/first
+                if first in _allowed_lesson_names():
+                    target.relative_to((BASE / first).resolve())
+            except Exception:
+                self.send_error(404, "Non disponibile")
+                return
         super().do_GET()
 
     def do_POST(self):
@@ -946,6 +1013,8 @@ margin:0 0 14px;color:var(--mut);font-size:13px;cursor:pointer;user-select:none}
 <script>
 const $ = s => document.querySelector(s);
 let busy = false;
+const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+const escAttr = s => esc(s).replace(/`/g,'&#96;');
 
 async function api(path, opts) {
   const r = await fetch('/api/' + path, opts);
@@ -983,29 +1052,29 @@ async function refresh() {
     $('#materials').innerHTML = mats.length ? mats.map(m => {
       const exists = s.lessons.some(l => l.name === m.lesson);
       return `<div class="row">
-        <span class="name">${m.name}</span>
+        <span class="name">${esc(m.name)}</span>
         <span class="meta">${fmtSize(m.size)}</span>
         <span class="badge ${exists ? 'exists' : ''}">${exists ? 'lezione esistente' : 'caricato'}</span>
-        <button class="mini" onclick="gen('${m.name.replace(/'/g, "\\'")}')">Genera</button>
+        <button class="mini" onclick="gen('${escAttr(m.name)}')">Genera</button>
       </div>`;
     }).join('') : '<div class="empty">Nessun file caricato: trascina qui sopra o usa Sfoglia, poi premi «Carica e genera».</div>';
 
     $('#lessons').innerHTML = s.lessons.length ? s.lessons.map(l =>
       `<div class="row">
-        <span class="name">${l.title}</span>
-        <a class="apri" href="/${l.name}/index.html" target="_blank">Apri →</a>
-        <button class="mini ghost" onclick="openEditor('${l.name}')">Modifica</button>
-        <button class="mini ghost" onclick="single('${l.name}')">HTML singolo</button>
-        <button class="mini ghost" onclick="reaudio('${l.name}')">Rigenera audio</button>
+        <span class="name">${esc(l.title)}</span>
+        <a class="apri" href="/${escAttr(l.name)}/index.html" target="_blank">Apri →</a>
+        <button class="mini ghost" onclick="openEditor('${escAttr(l.name)}')">Modifica</button>
+        <button class="mini ghost" onclick="single('${escAttr(l.name)}')">HTML singolo</button>
+        <button class="mini ghost" onclick="reaudio('${escAttr(l.name)}')">Rigenera audio</button>
       </div>`).join('')
       : '<div class="empty">Nessuna lezione generata ancora.</div>';
 
     const singles = s.singles || [];
     $('#singles').innerHTML = singles.length ? singles.map(f =>
       `<div class="row">
-        <span class="name">${f.stem}</span>
+        <span class="name">${esc(f.stem)}</span>
         <span class="meta">${fmtSize(f.size)}</span>
-        <a class="apri" href="/${f.name}" target="_blank" download="${f.name}">Apri / salva →</a>
+        <a class="apri" href="/${escAttr(f.name)}" target="_blank" download="${escAttr(f.name)}">Apri / salva →</a>
       </div>`).join('')
       : '<div class="empty">Nessun file unico: spunta "Genera come file HTML unico" qui sopra la prossima volta.</div>';
   } catch (e) {

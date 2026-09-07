@@ -28,16 +28,23 @@ _FETCH_TIMEOUT = 25
 _FETCH_RETRIES = 3
 
 
-def _http_get(url, timeout=_FETCH_TIMEOUT):
-    """GET con retry + backoff (3 tentativi): le pagine YT/web flakano spesso."""
+def _http_get(url, timeout=_FETCH_TIMEOUT, max_bytes=5 * 1024 * 1024):
+    """GET con retry + backoff (3 tentativi): le pagine YT/web flakano spesso.
+    Limite 5 MB per evitare zip-bomb / pagine giganti."""
     last = None
+    # SSRF: blocca localhost/privato se richiesto da panel (chiamante può validare)
     for attempt in range(_FETCH_RETRIES):
         try:
             req = urllib.request.Request(url, headers=_UA)
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                return r.read(), r.headers.get("Content-Type", "")
+                data = r.read(max_bytes + 1)
+                if len(data) > max_bytes:
+                    raise ValueError(f"Risposta troppo grande (> {max_bytes} byte)")
+                return data, r.headers.get("Content-Type", "")
         except Exception as e:  # noqa: BLE001
             last = e
+            if "troppo grande" in str(e):
+                raise
             if attempt < _FETCH_RETRIES - 1:
                 time.sleep(1.5 * (attempt + 1))
     raise ValueError(f"Download fallito dopo {_FETCH_RETRIES} tentativi ({url}): {last}")

@@ -123,8 +123,16 @@ def export(lesson_name=None):
         if len(lessons) > 1:
             print('Lezioni disponibili: ' + ', '.join(lessons))
             print(f"Uso la prima: {lesson_name} (passa il nome per sceglierne un'altra)")
-    src = BASE / lesson_name
-    if not src.exists():
+    if "\x00" in lesson_name or "/" in lesson_name or "\\" in lesson_name or ".." in lesson_name:
+        print(f'ERRORE: nome lezione non valido: {lesson_name}')
+        return None
+    src = (BASE / lesson_name).resolve()
+    try:
+        src.relative_to(BASE.resolve())
+    except Exception:
+        print(f'ERRORE: percorso lezione fuori da BASE: {lesson_name}')
+        return None
+    if not src.exists() or not src.is_dir():
         print(f'ERRORE: cartella {lesson_name} non trovata')
         return None
     out = BASE / f'{lesson_name}_export.zip'

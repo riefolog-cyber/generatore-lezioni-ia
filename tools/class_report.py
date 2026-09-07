@@ -92,13 +92,14 @@ def _aggregate(reports):
 
 
 def build_html(reports, out_path):
+    esc = lambda s: __import__("html").escape(str(s), quote=True)
     rows = []
     for r in sorted(reports, key=lambda x: -(int(str(x.get("precisione") or "0")
                                                   .replace("%", "") or 0))):
-        rows.append(f"<tr><td>{r.get('studente', '?')}</td>"
-                    f"<td>{r.get('punti', '-')}</td>"
-                    f"<td>{r.get('precisione', '-')}</td>"
-                    f"<td>{r.get('tempo_min', '?')} min</td></tr>")
+        rows.append(f"<tr><td>{esc(r.get('studente', '?'))}</td>"
+                    f"<td>{esc(r.get('punti', '-'))}</td>"
+                    f"<td>{esc(r.get('precisione', '-'))}</td>"
+                    f"<td>{esc(r.get('tempo_min', '?'))} min</td></tr>")
     # punti deboli della classe: tipo di attività con precisione media più bassa
     agg = {}
     for r in reports:
@@ -108,7 +109,7 @@ def build_html(reports, out_path):
     weak = sorted(((tipo, c, t) for tipo, (c, t) in agg.items() if t > 0),
                   key=lambda x: x[1] / x[2])[:3]
     weak_html = ("<ul>" + "".join(
-        f"<li><b>{tipo}</b>: {c}/{t} corrette ({_pct(c, t)}%) — da ripassare</li>"
+        f"<li><b>{esc(tipo)}</b>: {c}/{t} corrette ({_pct(c, t)}%) — da ripassare</li>"
         for tipo, c, t in weak) + "</ul>") if weak else "<p>Nessun dato.</p>"
     precs, tempi = _aggregate(reports)
     if precs:
@@ -120,10 +121,11 @@ def build_html(reports, out_path):
     if tempi:
         stats_html += (f"<p>Tempo: media <b>{statistics.mean(tempi):.1f} min</b> · "
                        f"mediana <b>{statistics.median(tempi):.1f} min</b></p>")
+    esc_lezione = __import__("html").escape(str(reports[0].get('lezione', '?') if reports else '?'), quote=True)
     html = f"""<!DOCTYPE html><html lang="it"><meta charset="utf-8">
 <title>Report di classe</title>
 <body style="font-family:'Segoe UI',sans-serif;max-width:760px;margin:2rem auto;background:#0d1420;color:#eaf1ff">
-<h1>📊 Report di classe — {reports[0].get('lezione', '?') if reports else '?'}</h1>
+<h1>📊 Report di classe — {esc_lezione}</h1>
 <p>{len(reports)} studenti · generato il {__import__('datetime').date.today().isoformat()}</p>
 <h2>Statistiche di classe</h2>
 {stats_html}

@@ -4,58 +4,383 @@
   "meta": {
     "title": "Generatore di lezioni IA — mappa del sistema",
     "quality_profile": "showcase",
+    "locale": "en",
     "repository": {
       "url": "https://github.com/riefolog-cyber/generatore-lezioni-ia",
-      "revision": "26246f33923fe79763b7d8197098f8bd1307bbb5"
+      "revision": "3530b392199164403f85f6b2bf8d59f604d13680"
     },
     "views": [
-      { "id": "main-path", "label": "Percorso principale", "focus": ["user", "panel", "pipeline", "player", "server"], "note": "Dal materiale alla lezione nel browser." },
-      { "id": "content", "label": "Generazione contenuti", "focus": ["pipeline", "sources", "llm"], "note": "Estrazione delle fonti e strutturazione con cache LLM." },
-      { "id": "audio", "label": "Audio e sottotitoli", "focus": ["pipeline", "tts", "storage", "player"], "note": "Voci neurali, cache audio e sincronizzazione." }
-    ]
+      {
+        "id": "main-path",
+        "label": "Percorso principale",
+        "focus": [
+          "user",
+          "panel",
+          "pipeline",
+          "player",
+          "server"
+        ],
+        "note": "Dal materiale alla lezione nel browser."
+      },
+      {
+        "id": "content",
+        "label": "Generazione contenuti",
+        "focus": [
+          "pipeline",
+          "sources",
+          "llm"
+        ],
+        "note": "Estrazione delle fonti e strutturazione con cache LLM."
+      },
+      {
+        "id": "audio",
+        "label": "Audio e sottotitoli",
+        "focus": [
+          "pipeline",
+          "tts",
+          "storage",
+          "player"
+        ],
+        "note": "Voci neurali, cache audio e sincronizzazione."
+      }
+    ],
+    "animation": "trace"
   },
   "components": [
-    { "id": "user", "type": "external", "label": "Docente e classe", "sublabel": "browser · tablet LAN", "pos": [20, 240], "size": [120, 56] },
-    { "id": "panel", "type": "frontend", "label": "Pannello web", "sublabel": "panel.py · upload", "pos": [180, 240], "size": [120, 56], "sources": [{ "path": "panel.py" }] },
-    { "id": "pipeline", "type": "backend", "label": "Pipeline build", "sublabel": "new_lesson.py", "pos": [360, 240], "size": [120, 56], "sources": [{ "path": "new_lesson.py" }] },
-    { "id": "player", "type": "frontend", "label": "Player generato", "sublabel": "player_template.py", "pos": [600, 240], "size": [120, 56], "sources": [{ "path": "tools/player_template.py" }] },
-    { "id": "server", "type": "backend", "label": "Server locale", "sublabel": "start_lesson.py", "pos": [760, 240], "size": [120, 56], "sources": [{ "path": "start_lesson.py" }] },
-    { "id": "llm", "type": "cloud", "label": "9router (LLM)", "sublabel": "struttura + cache", "pos": [400, 60], "size": [130, 56] },
-    { "id": "gui", "type": "frontend", "label": "GUI desktop", "sublabel": "app.py · tkinter", "pos": [180, 440], "size": [120, 56], "sources": [{ "path": "app.py" }] },
-    { "id": "sources", "type": "backend", "label": "Estrazione fonti", "sublabel": "docx · pdf · web · YT", "pos": [340, 440], "size": [120, 56], "sources": [{ "path": "tools/sources.py" }] },
-    { "id": "tts", "type": "external", "label": "edge-tts → Piper", "sublabel": "voci neurali · fallback", "pos": [600, 440], "size": [120, 56] },
-    { "id": "storage", "type": "database", "label": "Lezione e cache", "sublabel": "cartella · cache audio", "pos": [620, 620], "size": [150, 56] }
+    {
+      "id": "user",
+      "type": "external",
+      "label": "Docente e classe",
+      "sublabel": "browser · tablet LAN",
+      "pos": [
+        20,
+        240
+      ],
+      "size": [
+        120,
+        56
+      ]
+    },
+    {
+      "id": "panel",
+      "type": "frontend",
+      "label": "Pannello web",
+      "sublabel": "panel.py · upload",
+      "pos": [
+        180,
+        240
+      ],
+      "size": [
+        120,
+        56
+      ],
+      "sources": [
+        {
+          "path": "panel.py"
+        }
+      ]
+    },
+    {
+      "id": "pipeline",
+      "type": "backend",
+      "label": "Pipeline build",
+      "sublabel": "new_lesson.py",
+      "pos": [
+        360,
+        240
+      ],
+      "size": [
+        120,
+        56
+      ],
+      "sources": [
+        {
+          "path": "new_lesson.py"
+        }
+      ]
+    },
+    {
+      "id": "player",
+      "type": "frontend",
+      "label": "Player generato",
+      "sublabel": "player_template.py",
+      "pos": [
+        600,
+        240
+      ],
+      "size": [
+        120,
+        56
+      ],
+      "sources": [
+        {
+          "path": "tools/player_template.py"
+        }
+      ]
+    },
+    {
+      "id": "server",
+      "type": "backend",
+      "label": "Server locale",
+      "sublabel": "start_lesson.py",
+      "pos": [
+        760,
+        240
+      ],
+      "size": [
+        120,
+        56
+      ],
+      "sources": [
+        {
+          "path": "start_lesson.py"
+        }
+      ]
+    },
+    {
+      "id": "llm",
+      "type": "cloud",
+      "label": "9router (LLM)",
+      "sublabel": "struttura + cache",
+      "pos": [
+        400,
+        60
+      ],
+      "size": [
+        130,
+        56
+      ]
+    },
+    {
+      "id": "gui",
+      "type": "frontend",
+      "label": "GUI desktop",
+      "sublabel": "app.py · tkinter",
+      "pos": [
+        180,
+        440
+      ],
+      "size": [
+        120,
+        56
+      ],
+      "sources": [
+        {
+          "path": "app.py"
+        }
+      ]
+    },
+    {
+      "id": "sources",
+      "type": "backend",
+      "label": "Estrazione fonti",
+      "sublabel": "docx · pdf · web · YT",
+      "pos": [
+        340,
+        440
+      ],
+      "size": [
+        120,
+        56
+      ],
+      "sources": [
+        {
+          "path": "tools/sources.py"
+        }
+      ]
+    },
+    {
+      "id": "tts",
+      "type": "external",
+      "label": "edge-tts → Piper",
+      "sublabel": "voci neurali · fallback",
+      "pos": [
+        600,
+        440
+      ],
+      "size": [
+        120,
+        56
+      ]
+    },
+    {
+      "id": "storage",
+      "type": "database",
+      "label": "Lezione e cache",
+      "sublabel": "cartella · cache audio",
+      "pos": [
+        620,
+        620
+      ],
+      "size": [
+        150,
+        56
+      ]
+    }
   ],
   "boundaries": [
-    { "kind": "region", "label": "Macchina locale — i file restano sul computer", "wraps": ["panel", "pipeline", "player", "server", "gui", "sources", "storage"], "pad": 20 }
+    {
+      "kind": "region",
+      "label": "Macchina locale — i file restano sul computer",
+      "wraps": [
+        "panel",
+        "pipeline",
+        "player",
+        "server",
+        "gui",
+        "sources",
+        "storage"
+      ],
+      "pad": 20
+    }
   ],
   "connections": [
-    { "id": "user-panel", "from": "user", "to": "panel", "label": "browser", "variant": "emphasis" },
-    { "id": "panel-pipeline", "from": "panel", "to": "pipeline", "label": "upload · build", "labelAt": [330, 310] },
-    { "id": "pipeline-player", "from": "pipeline", "to": "player", "label": "player + dati" },
-    { "id": "player-server", "from": "player", "to": "server", "label": "file statici", "labelAt": [740, 310] },
-    { "id": "server-user", "from": "server", "to": "user", "label": "lezione interattiva", "variant": "emphasis", "fromSide": "top", "toSide": "top", "via": [[820, 30], [80, 30]] },
-    { "id": "pipeline-llm", "from": "pipeline", "to": "llm", "label": "struttura JSON", "fromSide": "top", "toSide": "bottom" },
-    { "id": "gui-pipeline", "from": "gui", "to": "pipeline", "label": "build · export", "fromSide": "top", "toSide": "bottom" },
-    { "id": "pipeline-sources", "from": "pipeline", "to": "sources", "label": "extract_source()", "fromSide": "bottom", "toSide": "top", "labelDx": 110 },
-    { "id": "pipeline-tts", "from": "pipeline", "to": "tts", "label": "narrazioni", "fromSide": "bottom", "toSide": "top", "labelAt": [560, 385] },
-    { "id": "tts-storage", "from": "tts", "to": "storage", "label": "mp3 · timing", "fromSide": "bottom", "toSide": "top" },
-    { "id": "storage-player", "from": "storage", "to": "player", "label": "audio + dati", "fromSide": "right", "toSide": "bottom", "via": [[780, 648], [780, 330], [660, 330]] }
+    {
+      "id": "user-panel",
+      "from": "user",
+      "to": "panel",
+      "label": "browser",
+      "variant": "emphasis"
+    },
+    {
+      "id": "panel-pipeline",
+      "from": "panel",
+      "to": "pipeline",
+      "label": "upload · build",
+      "labelAt": [
+        330,
+        310
+      ]
+    },
+    {
+      "id": "pipeline-player",
+      "from": "pipeline",
+      "to": "player",
+      "label": "player + dati"
+    },
+    {
+      "id": "player-server",
+      "from": "player",
+      "to": "server",
+      "label": "file statici",
+      "labelAt": [
+        740,
+        310
+      ]
+    },
+    {
+      "id": "server-user",
+      "from": "server",
+      "to": "user",
+      "label": "lezione interattiva",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "top",
+      "via": [
+        [
+          820,
+          30
+        ],
+        [
+          80,
+          30
+        ]
+      ]
+    },
+    {
+      "id": "pipeline-llm",
+      "from": "pipeline",
+      "to": "llm",
+      "label": "struttura JSON",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "gui-pipeline",
+      "from": "gui",
+      "to": "pipeline",
+      "label": "build · export",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "pipeline-sources",
+      "from": "pipeline",
+      "to": "sources",
+      "label": "extract_source()",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDx": 110
+    },
+    {
+      "id": "pipeline-tts",
+      "from": "pipeline",
+      "to": "tts",
+      "label": "narrazioni",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        560,
+        385
+      ]
+    },
+    {
+      "id": "tts-storage",
+      "from": "tts",
+      "to": "storage",
+      "label": "mp3 · timing",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "storage-player",
+      "from": "storage",
+      "to": "player",
+      "label": "audio + dati",
+      "fromSide": "right",
+      "toSide": "bottom",
+      "via": [
+        [
+          780,
+          648
+        ],
+        [
+          780,
+          330
+        ],
+        [
+          660,
+          330
+        ]
+      ]
+    }
   ],
   "cards": [
-    { "dot": "emerald", "title": "Un solo comando", "items": [
-      "AVVIA.bat apre il pannello e genera le lezioni mancanti",
-      "python new_lesson.py build <fonte> dalla riga di comando"
-    ] },
-    { "dot": "cyan", "title": "C'è sempre un risultato", "items": [
-      "9router attivo → lezione completa con quiz",
-      "senza LLM → bozza strutturata dal documento",
-      "senza rete → voce Piper locale o silenzio"
-    ] },
-    { "dot": "violet", "title": "Pronta da condividere e verificare", "items": [
-      "ZIP autonomo con avvio incluso (tools/export_zip.py)",
-      "HTML unico con audio incorporato (tools/export_single.py)",
-      "QA automatico: python tools/selftest.py"
-    ] }
+    {
+      "dot": "emerald",
+      "title": "Un solo comando",
+      "items": [
+        "AVVIA.bat apre il pannello e genera le lezioni mancanti",
+        "python new_lesson.py build <fonte> dalla riga di comando"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "C'è sempre un risultato",
+      "items": [
+        "9router attivo → lezione completa con quiz (4-7 moduli, validato)",
+        "senza LLM → bozza strutturata dal documento",
+        "senza rete → voce Piper locale o silenzio"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Pronta da condividere · hardening 2026-09",
+      "items": [
+        "ZIP autonomo + HTML unico con audio (export_zip/single) · QA 25 test",
+        "Sicurezza: anti-traversal (resolve+whitelist) + XSS (html.escape/esc JS)",
+        "Stabilità: lock O_EXCL + tmp mkstemp + cache TTL + audio tryPlay"
+      ]
+    }
   ]
 }
