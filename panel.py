@@ -56,6 +56,35 @@ JOB = {"running": False, "kind": None, "source": None, "error": None,
 QUEUE = collections.deque(maxlen=5)  # coda FIFO: (fn, kind, source)
 JOB_LOCK = threading.RLock()
 LOG_LOCK = threading.RLock()
+HISTORY_FILE = BASE / "job_history.json"
+
+# rate-limit build: max 20 build/ora per IP (rete scolastica / click multipli)
+_RATE = {}
+RATE_MAX = 20
+RATE_WINDOW = 3600
+
+
+def _rate_ok(ip):
+    now = time.time()
+    lst = [t for t in _RATE.get(ip, []) if now - t < RATE_WINDOW]
+    if len(lst) >= RATE_MAX:
+        _RATE[ip] = lst
+        return False
+    lst.append(now)
+    _RATE[ip] = lst
+    return True
+
+
+def _history_append(kind, source, ok, secs):
+    try:
+        hist = []
+        if HISTORY_FILE.exists():
+            hist = json.loads(HISTORY_FILE.read_text(encoding="utf-8") or "[]")
+        hist.append({"t": time.strftime("%Y-%m-%d %H:%M:%S"), "kind": kind,
+                     "source": str(source)[:160], "ok": bool(ok), "secs": round(secs or 0, 1)})
+        HISTORY_FILE.write_text(json.dumps(hist[-100:], ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
 
 
 class _UploadTooBig(Exception):
@@ -178,6 +207,11 @@ def start_job(fn, kind, source):
             with JOB_LOCK:
                 JOB["running"] = False
                 JOB["done_at"] = time.time()
+            try:
+                _history_append(JOB.get("kind"), JOB.get("source"), JOB.get("ok"),
+                                (JOB.get("done_at") or time.time()) - (JOB.get("started_at") or time.time()))
+            except Exception:
+                pass
             _invalidate_lessons_cache()   # una nuova lezione è (forse) pronta
             _run_next_queued()
 
@@ -348,6 +382,17 @@ class PanelHandler(_RangeHandler):
             return self._start_reaudio(query)
         if path == "/api/export_single":
             return self._export_single(query)
+        if path == "/api/export_scorm":
+            return self._export_scorm(query)
+        if path == "/api/handout":
+            return self._handout(query)
+        if path == "/api/progress":
+            return self._progress()
+        if path == "/api/history":
+            return self._history()
+        if path == "/api/lan":
+            return self._json({"lan_ip": lan_ip(), "port": DEFAULT_PORT,
+                               "url": f"http://{lan_ip()}:{DEFAULT_PORT}/" if lan_ip() else None})
         if path == "/api/voices":
             return self._json({"voices": _edge_voices_live(),
                                "current": CONFIG.get("edge_voice")})
@@ -408,6 +453,51 @@ class PanelHandler(_RangeHandler):
             return
         self._json({"started": True, "queued": queued})
 
+    def _start_text(self):
+        import new_lesson
+        from common import normalize_profilo
+        data = self._read_json_body()
+        text = str(data.get("text") or "")
+        title = str(data.get("title") or "Materiale incollato")[:80]
+        if len(text.strip()) < 50:
+            raise ValueError("Testo troppo corto (min 50 caratteri).")
+        force = bool(data.get("force"))
+        bozza = bool(data.get("bozza"))
+        single = bool(data.get("single"))
+        profilo = normalize_profilo(data.get("profilo") or {})
+        started, queued = start_job(
+            lambda: new_lesson.build_from_text(text, title=title, force=force,
+                                               bozza=bozza, single=single, profilo=profilo),
+            "testo incollato", title)
+        if not started:
+            self._json({"started": False, "reason": "Coda piena (5 job): attendi la fine."}, 409)
+            return
+        self._json({"started": True, "queued": queued})
+
+    def _move_slide(self):
+        data = self._read_json_body()
+        import new_lesson
+        lesson = self._check_lesson(str(data.get("lesson") or ""))
+        n = new_lesson.move_slide(str(lesson), int(data.get("from", -1)), int(data.get("to", -1)))
+        _invalidate_lessons_cache()
+        self._json({"ok": True, "slides": n})
+
+    def _add_slide(self):
+        data = self._read_json_body()
+        import new_lesson
+        lesson = self._check_lesson(str(data.get("lesson") or ""))
+        pos = new_lesson.add_slide(str(lesson), data.get("title"), data.get("narration"))
+        _invalidate_lessons_cache()
+        self._json({"ok": True, "pos": pos})
+
+    def _delete_slide(self):
+        data = self._read_json_body()
+        import new_lesson
+        lesson = self._check_lesson(str(data.get("lesson") or ""))
+        n = new_lesson.delete_slide(str(lesson), int(data.get("index", -1)))
+        _invalidate_lessons_cache()
+        self._json({"ok": True, "slides": n})
+
     def _start_reaudio(self, query):
         name = query.get("lesson", [None])[0] or ""
         lesson = BASE / name
@@ -436,6 +526,49 @@ class PanelHandler(_RangeHandler):
             return
         self._json({"url": f"/{lesson.name}/{p.name}",
                     "size": p.stat().st_size})
+
+    def _progress(self):
+        try:
+            data = json.loads((BASE / ".progress.json").read_text(encoding="utf-8"))
+        except Exception:
+            data = {"fase": "inattiva", "pct": 0}
+        data["job_running"] = JOB["running"]
+        return self._json(data)
+
+    def _history(self):
+        try:
+            hist = json.loads(HISTORY_FILE.read_text(encoding="utf-8") or "[]")
+        except Exception:
+            hist = []
+        return self._json({"history": hist[-20:]})
+
+    def _export_scorm(self, query):
+        name = query.get("lesson", [None])[0] or ""
+        lesson = BASE / name
+        if not name or not lesson.is_dir() or not (lesson / "index.html").exists():
+            self.send_error(400, "Lezione non trovata")
+            return
+        try:
+            from export_scorm import export_scorm
+            p = export_scorm(lesson)
+        except Exception as e:  # noqa: BLE001
+            self._json({"error": str(e)}, 500)
+            return
+        self._json({"url": f"/{lesson.name}/{p.name}", "size": p.stat().st_size})
+
+    def _handout(self, query):
+        name = query.get("lesson", [None])[0] or ""
+        lesson = BASE / name
+        if not name or not lesson.is_dir() or not (lesson / "index.html").exists():
+            self.send_error(400, "Lezione non trovata")
+            return
+        try:
+            from export_handout import export_handout
+            p = export_handout(lesson)
+        except Exception as e:  # noqa: BLE001
+            self._json({"error": str(e)}, 500)
+            return
+        self._json({"url": f"/{p.name}", "size": p.stat().st_size})
 
     def _check_lesson(self, name):
         # anti-traversal: rigetta .., /, \, null byte e nomi non whitelistati
@@ -800,10 +933,36 @@ class PanelHandler(_RangeHandler):
             return
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/build":
+            if not _rate_ok(self.client_address[0]):
+                self._json({"started": False, "reason": "Troppe richieste: riprova tra un po'."}, 429)
+                return
             try:
                 self._start(self._parse_build())
             except Exception as e:  # noqa: BLE001
                 self._json({"started": False, "reason": str(e)}, 400)
+        elif parsed.path == "/api/build_text":
+            if not _rate_ok(self.client_address[0]):
+                self._json({"started": False, "reason": "Troppe richieste: riprova tra un po'."}, 429)
+                return
+            try:
+                self._start_text()
+            except Exception as e:  # noqa: BLE001
+                self._json({"started": False, "reason": str(e)}, 400)
+        elif parsed.path == "/api/move_slide":
+            try:
+                self._move_slide()
+            except Exception as e:  # noqa: BLE001
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/add_slide":
+            try:
+                self._add_slide()
+            except Exception as e:  # noqa: BLE001
+                self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/delete_slide":
+            try:
+                self._delete_slide()
+            except Exception as e:  # noqa: BLE001
+                self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/reaudio":
             try:
                 self._start_reaudio(urllib.parse.parse_qs(parsed.query))
@@ -856,6 +1015,7 @@ PANEL_HTML = r"""<!DOCTYPE html>
 :root{--bg:#0d1220;--card:#161d33;--line:#2a3554;--txt:#eef2ff;--mut:#93a0c4;
 --acc:#5b7bd5;--ok:#3ecf8e;--err:#ff6b6b;--warn:#ffd166}
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--txt);
 margin:0;padding:26px 18px 60px}
 .wrap{max-width:960px;margin:0 auto}
@@ -863,7 +1023,21 @@ h1{font-size:22px;margin:0 0 4px}
 .sub{color:var(--mut);font-size:13px;margin-bottom:20px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;
 padding:16px 18px;margin-bottom:16px}
-.card h2{font-size:15px;margin:0 0 12px;color:#c8d4f5}
+.card h2{font-size:15px;margin:0 0 12px;color:#c8d4f5;display:flex;align-items:center;gap:10px}
+.step{flex:0 0 auto;width:26px;height:26px;border-radius:50%;font-size:13px;font-weight:800;
+display:inline-flex;align-items:center;justify-content:center;color:#fff;
+background:linear-gradient(135deg,var(--acc),#8a6ff0);box-shadow:0 2px 10px rgba(91,123,213,.5)}
+button.primary{background:linear-gradient(135deg,var(--acc),#8a6ff0);font-size:14px;padding:10px 22px;
+box-shadow:0 4px 16px rgba(91,123,213,.45)}
+button.primary:hover{filter:brightness(1.12);transform:translateY(-1px)}
+details.adv{margin-top:12px;font-size:13px;color:var(--mut)}
+details.adv summary{cursor:pointer;padding:6px 0;user-select:none}
+details.adv summary:hover{color:var(--txt)}
+details.adv .opts{margin-top:6px}
+.urlrow{flex-wrap:wrap}
+#lanQr{width:140px;height:140px;border-radius:12px;border:1px solid var(--line);background:#fff;padding:6px}
+.lanrow{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+.lanrow .grow{flex:1;min-width:200px}
 .chips{display:flex;flex-wrap:wrap;gap:8px}
 .chip{padding:5px 11px;border-radius:20px;font-size:12px;border:1px solid var(--line);
 background:#10172a;color:var(--mut)}
@@ -890,14 +1064,18 @@ border-radius:9px;padding:9px 12px;font-size:13px}
 .opts{display:flex;flex-wrap:wrap;gap:14px;margin-top:12px;font-size:13px;color:var(--mut)}
 .opts label{display:flex;gap:6px;align-items:center;cursor:pointer}
 pre{background:#0a0f1c;border:1px solid var(--line);border-radius:10px;padding:12px;
-height:230px;overflow:auto;font:12px/1.55 Consolas,'Cascadia Mono',monospace;margin:0;
+height:160px;overflow:auto;font:12px/1.55 Consolas,'Cascadia Mono',monospace;margin:0;
 white-space:pre-wrap;word-break:break-word}
 #lan{color:var(--warn)}
 a.apri{text-decoration:none;color:#8ecaff;font-weight:700}
 .empty{color:var(--mut);font-size:13px;padding:8px 0}
-.upzone{border:1px dashed var(--line);border-radius:12px;padding:15px 18px;
-margin:0 0 14px;color:var(--mut);font-size:13px;cursor:pointer;user-select:none}
+.upzone{border:2px dashed var(--line);border-radius:14px;padding:26px 22px;
+margin:0 0 14px;color:var(--mut);font-size:14px;cursor:pointer;user-select:none;text-align:center;
+transition:border-color .2s,background .2s}
 .upzone:hover,.upzone.drag{border-color:var(--acc);background:#18233f;color:#c8d8ff}
+.upzone .big{font-size:15px;font-weight:700;color:var(--txt);display:block;margin-bottom:4px}
+.upzone .sub2{font-size:12.5px}
+#uprow{justify-content:center;margin-top:12px}
 .uprow{display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap}
 .upmsg{font-size:12px;margin:6px 0 0}
 .upmsg.ok{color:var(--ok)}.upmsg.err{color:var(--err)}
@@ -914,15 +1092,16 @@ margin:0 0 14px;color:var(--mut);font-size:13px;cursor:pointer;user-select:none}
   </div>
 
   <div class="card">
-    <h2>1. Carica il materiale e genera</h2>
+    <h2><span class="step">1</span> Carica il materiale e genera</h2>
     <div class="upzone" id="upzone" role="button" tabindex="0"
          title="Carica un file (trascinalo qui sopra o clicca per sceglierlo)">
       <input type="file" id="upfile" accept=".docx,.pdf,.txt,.md,.html,.htm" hidden>
-      <span id="uptxt">📄 Trascina qui il materiale (.docx, .pdf, .txt, .md, .html) — oppure clicca per sceglierlo (max 100 MB)</span>
+      <span class="big">📄 Trascina qui il materiale</span>
+      <span class="sub2" id="uptxt">.docx, .pdf, .txt, .md, .html — oppure clicca per sceglierlo (max 100 MB)</span>
       <div class="uprow" id="uprow" hidden>
         <span class="name" id="upname"></span>
         <span class="meta" id="upsize"></span>
-        <button class="mini" id="btnUpGen" type="button">Carica e genera</button>
+        <button class="primary" id="btnUpGen" type="button">Carica e genera</button>
         <button class="mini ghost" id="btnUp" type="button" title="Solo carica, senza generare">Solo carica</button>
         <button class="mini ghost" id="btnUpX" type="button" title="Annulla">✕</button>
       </div>
@@ -946,10 +1125,15 @@ margin:0 0 14px;color:var(--mut);font-size:13px;cursor:pointer;user-select:none}
         <option value="applicazione">Applicazione</option>
         <option value="analisi">Analisi</option>
       </select></label>
-      <label><input type="checkbox" id="forceAll"> Rigenera anche le lezioni già esistenti (--force)</label>
-      <label><input type="checkbox" id="bozzaAll"> Bozza senza LLM (struttura dal testo, --bozza)</label>
-      <label><input type="checkbox" id="singleAll"> Genera come file HTML unico, senza cartella</label>
     </div>
+    <details class="adv">
+      <summary>⚙ Opzioni avanzate (rigenera, bozza, file unico)</summary>
+      <div class="opts">
+        <label><input type="checkbox" id="forceAll"> Rigenera anche le lezioni già esistenti</label>
+        <label><input type="checkbox" id="bozzaAll"> Bozza veloce senza IA (solo struttura dal testo)</label>
+        <label><input type="checkbox" id="singleAll"> Genera come file HTML unico, senza cartella</label>
+      </div>
+    </details>
   </div>
 
   <div class="card">
@@ -972,15 +1156,25 @@ margin:0 0 14px;color:var(--mut);font-size:13px;cursor:pointer;user-select:none}
   </div>
 
   <div class="card">
-    <h2>2. Oppure genera da un link</h2>
+    <h2><span class="step">2</span> Oppure genera da un link</h2>
     <div class="urlrow">
       <input id="url" placeholder="https://it.wikipedia.org/wiki/…  oppure  https://www.youtube.com/watch?v=…">
-      <button id="btnUrl">Genera da link</button>
+      <button id="btnUrl" class="primary">Genera da link</button>
     </div>
   </div>
 
   <div class="card">
-    <h2>3. Lezioni generate</h2>
+    <h2><span class="step">2</span> Oppure incolla il testo <span style="color:var(--mut);font-weight:400;font-size:12px">(appunti, dispense)</span></h2>
+    <div class="urlrow"><input id="txtTitle" placeholder="Titolo lezione (es. Il sistema solare)" maxlength="80"></div>
+    <div class="urlrow" style="margin-top:8px">
+      <textarea id="txtBody" rows="4" style="flex:1;background:#0d1220;border:1px solid var(--line);color:var(--txt);border-radius:9px;padding:9px"
+        placeholder="Incolla qui il testo (min 50 caratteri)…"></textarea>
+    </div>
+    <div class="uprow"><button class="primary" id="btnText" type="button">Genera da testo</button></div>
+  </div>
+
+  <div class="card">
+    <h2><span class="step">3</span> Lezioni generate</h2>
     <div id="lessons"></div>
     <h2 style="margin-top:16px">File unici (HTML singolo)</h2>
     <div id="singles"></div>
@@ -999,6 +1193,10 @@ margin:0 0 14px;color:var(--mut);font-size:13px;cursor:pointer;user-select:none}
     <div class="uprow">
       <button class="mini" onclick="saveEditor(false)" type="button">Salva testo/quiz</button>
       <button class="mini" onclick="saveEditor(true)" type="button" title="Salva e rigenera l'audio di questa slide">Salva + rigenera audio</button>
+      <button class="mini ghost" onclick="moveEditor(-1)" type="button" title="Sposta slide indietro">← Sposta</button>
+      <button class="mini ghost" onclick="moveEditor(1)" type="button" title="Sposta slide avanti">Sposta →</button>
+      <button class="mini ghost" onclick="addEditor()" type="button" title="Aggiungi slide contenuto">+ Aggiungi</button>
+      <button class="mini ghost" onclick="delEditor()" type="button" title="Elimina questa slide">✕ Elimina</button>
     </div>
     <div class="upmsg" id="edMsg" hidden></div>
   </div>
@@ -1006,7 +1204,23 @@ margin:0 0 14px;color:var(--mut);font-size:13px;cursor:pointer;user-select:none}
   <div class="card">
     <h2>Log di generazione <span id="jobinfo" style="color:var(--mut);font-weight:400;font-size:12px"></span>
       <button class="mini ghost" id="btnCancelQ" type="button" hidden>Svuota coda</button></h2>
-    <pre id="log"></pre>
+    <div class="urlrow" style="margin-bottom:8px"><span id="progTxt" style="color:var(--warn);font-size:12px"></span></div>
+    <pre id="log">Il log apparirà qui durante la generazione…</pre>
+  </div>
+
+  <div class="card">
+    <h2><span class="step">4</span> Condividi in classe <span style="color:var(--mut);font-weight:400;font-size:12px">(stessa Wi-Fi)</span></h2>
+    <div class="lanrow">
+      <img id="lanQr" hidden alt="QR per aprire la lezione dal telefono">
+      <div class="grow">
+        <div class="urlrow"><input id="lanUrl" readonly placeholder="Caricamento indirizzo…">
+          <button class="mini" id="btnLanCopy" type="button">📋 Copia link</button>
+          <button class="mini ghost" id="btnLan" type="button" title="Ricarica indirizzo e cronologia">↻</button></div>
+        <div class="upmsg" style="font-size:12px">Gli studenti vedono solo l'indice delle lezioni, non questo pannello.</div>
+      </div>
+    </div>
+    <h2 style="margin-top:14px">Cronologia generazioni</h2>
+    <div id="hist" style="margin-top:8px;font-size:12px;color:var(--mut)"><div>Nessun job ancora.</div></div>
   </div>
 </div>
 
@@ -1044,8 +1258,8 @@ function depChips(d) {
 async function refresh() {
   try {
     const s = await api('state');
-    $('#statusline').textContent =
-      `Porta ${s.port} · server locale` + (s.lan_ip ? ` · da tablet/telefono: <span id="lan">http://${s.lan_ip}:${s.port}/</span>` : '');
+    $('#statusline').innerHTML =
+      `Porta ${esc(s.port)} · server locale` + (s.lan_ip ? ` · da tablet/telefono: <span id="lan">http://${esc(s.lan_ip)}:${esc(s.port)}/</span>` : '');
     $('#deps').innerHTML = depChips(s.deps);
 
     const mats = s.materials;
@@ -1065,6 +1279,8 @@ async function refresh() {
         <a class="apri" href="/${escAttr(l.name)}/index.html" target="_blank">Apri →</a>
         <button class="mini ghost" onclick="openEditor('${escAttr(l.name)}')">Modifica</button>
         <button class="mini ghost" onclick="single('${escAttr(l.name)}')">HTML singolo</button>
+        <button class="mini ghost" onclick="scorm('${escAttr(l.name)}')">SCORM</button>
+        <button class="mini ghost" onclick="handout('${escAttr(l.name)}')">Dispensa</button>
         <button class="mini ghost" onclick="reaudio('${escAttr(l.name)}')">Rigenera audio</button>
       </div>`).join('')
       : '<div class="empty">Nessuna lezione generata ancora.</div>';
@@ -1152,6 +1368,65 @@ async function single(lesson) {
         'Puoi salvarlo e usarlo anche senza server (pendrive/email).');
   window.open(j.url, '_blank');
 }
+
+async function scorm(lesson) {
+  const r = await fetch('/api/export_scorm?lesson=' + encodeURIComponent(lesson));
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { alert('Export SCORM fallito: ' + (j.error || r.status)); return; }
+  alert('Pacchetto SCORM pronto: caricalo su Moodle come "Pacchetto SCORM".');
+  window.open(j.url, '_blank');
+}
+
+async function handout(lesson) {
+  const r = await fetch('/api/handout?lesson=' + encodeURIComponent(lesson));
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { alert('Dispensa fallita: ' + (j.error || r.status)); return; }
+  window.open(j.url, '_blank');
+}
+
+async function refreshProg() {
+  try {
+    const p = await api('progress');
+    if (p && p.pct) $('#progTxt').textContent = 'Fase: ' + (p.fase || '') + ' — ' + p.pct + '% ' + (p.extra || '');
+  } catch (e) { /* ignora */ }
+}
+setInterval(() => { if (busy) refreshProg(); }, 2000);
+
+$('#btnText').onclick = () => {
+  const t = $('#txtBody').value.trim();
+  if (t.length < 50) { alert('Incolla almeno 50 caratteri di testo.'); return; }
+  startJob('build_text', { text: t, title: $('#txtTitle').value.trim() || 'Materiale incollato',
+    force: $('#forceAll').checked, bozza: $('#bozzaAll').checked,
+    single: $('#singleAll').checked, profilo: profilo() });
+};
+
+async function loadLan() {
+  try {
+    const j = await api('lan');
+    const url = j.url || '';
+    $('#lanUrl').value = url || 'LAN non disponibile (stessa Wi-Fi del PC?)';
+    const qr = $('#lanQr');
+    if (url) {
+      qr.src = 'https://api.qrserver.com/v1/create-qr-code/?size=140x140&data=' + encodeURIComponent(url);
+      qr.hidden = false;
+      qr.onerror = () => { qr.hidden = true; };  // offline: niente QR, resta il link
+    } else { qr.hidden = true; }
+  } catch (e) { $('#lanUrl').value = 'LAN non disponibile'; }
+  try {
+    const h = await api('history');
+    $('#hist').innerHTML = (h.history || []).slice(-8).reverse().map(x =>
+      `<div>${esc(x.t)} · ${esc(x.kind)} · ${esc(x.source)} — ${x.ok ? '✓' : '✗'} (${x.secs}s)</div>`).join('')
+      || '<div>Nessun job ancora.</div>';
+  } catch (e) { /* resta il placeholder */ }
+}
+$('#btnLan').onclick = loadLan;
+$('#btnLanCopy').onclick = async () => {
+  const v = $('#lanUrl').value;
+  if (!v || v.startsWith('LAN')) return;
+  try { await navigator.clipboard.writeText(v); $('#btnLanCopy').textContent = '✓ Copiato'; }
+  catch (e) { $('#lanUrl').select(); document.execCommand('copy'); }
+  setTimeout(() => { $('#btnLanCopy').textContent = '📋 Copia link'; }, 1600);
+};
 
 // ---------------------------------------------------- upload materiale
 const upZone = $('#upzone'), upFile = $('#upfile');
@@ -1319,9 +1594,35 @@ async function saveEditor(reaudio) {
     }
   } catch (e) { msg.textContent = '✗ ' + e.message; msg.className = 'upmsg err'; }
 }
+async function moveEditor(d) {
+  const to = ED.idx + d;
+  if (to < 0 || to >= ED.slides.length) return;
+  const r = await fetch('/api/move_slide', { method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ lesson: ED.lesson, from: ED.idx, to }) });
+  if (!r.ok) { alert('Spostamento fallito'); return; }
+  ED.idx = to; openEditor(ED.lesson);
+}
+async function addEditor() {
+  const t = prompt('Titolo nuova slide:'); if (t === null) return;
+  const n = prompt('Narrazione (voce legge questo testo):') || '';
+  const r = await fetch('/api/add_slide', { method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ lesson: ED.lesson, title: t, narration: n }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) { alert('Aggiunta fallita: ' + (j.error || r.status)); return; }
+  ED.idx = j.pos || 0; openEditor(ED.lesson);
+}
+async function delEditor() {
+  if (!confirm('Eliminare la slide ' + (ED.idx + 1) + '?')) return;
+  const r = await fetch('/api/delete_slide', { method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ lesson: ED.lesson, index: ED.idx }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j.ok) { alert('Eliminazione fallita: ' + (j.error || r.status)); return; }
+  ED.idx = 0; openEditor(ED.lesson);
+}
 loadVoices();
 
 refresh();
+loadLan();
 setInterval(() => { if (!busy) refresh(); }, 4000);
 </script>
 </body>

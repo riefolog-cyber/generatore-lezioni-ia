@@ -37,7 +37,7 @@ class App:
         self.root = root
         self.running = False
         self.actions = {}          # nome -> bottone (per abilitarli/disabilitarli)
-        root.title("Simulatore Mindsmith — genera lezioni")
+        root.title("Simulatore Mindsmith — GUI classica (usa il pannello web: python panel.py)")
         root.geometry("780x640")
 
         Label(root, text="1. Documento Word (.docx)").pack(anchor="w", padx=8)
@@ -65,6 +65,8 @@ class App:
         self._build_bar()
 
         self.refresh()
+        self.put("NOTA: GUI classica — il pannello web (python panel.py) ha più funzioni "
+                 "(profilo, voce, editor, HTML unico, SCORM, dispensa).\n")
         self.put("Pronto. 1) Verifica ambiente  2) Anteprima  3) Genera  4) Apri lezione.\n")
 
     # ------------------------------------------------------------ UI

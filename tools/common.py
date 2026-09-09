@@ -177,7 +177,7 @@ def validate_lesson(out_dir, slides):
         errs.append("index.html mancante (player non generato)")
     if not (out_dir / "lesson-data.js").exists():
         errs.append("lesson-data.js mancante")
-    quiz = matching = vf = seq = compila = scenario = errore = flashcards = 0
+    quiz = matching = vf = seq = compila = scenario = errore = flashcards = glossario = 0
     seen_audio = set()
     for i, s in enumerate(slides):
         for b in s.get("blocks", []):
@@ -231,6 +231,22 @@ def validate_lesson(out_dir, slides):
                     if not isinstance(c, dict) or not c.get("t") or not c.get("d"):
                         errs.append(f"slide {i + 1}: carta flashcards malformata")
                         break
+            if "glossario" in b:
+                gl = b["glossario"]
+                groups = gl.get("groups", []) if isinstance(gl, dict) else []
+                nterms = sum(len(gr.get("terms", [])) for gr in groups
+                             if isinstance(gr, dict))
+                glossario += nterms
+                if nterms < 3:
+                    errs.append(f"slide {i + 1}: glossario con meno di 3 termini")
+                for gr in groups:
+                    if not isinstance(gr, dict) or not gr.get("terms"):
+                        errs.append(f"slide {i + 1}: gruppo glossario vuoto o malformato")
+                        break
+                    for t in gr["terms"]:
+                        if not isinstance(t, dict) or not t.get("t") or not t.get("d"):
+                            errs.append(f"slide {i + 1}: voce di glossario malformata")
+                            break
         if s.get("audio") is None:
             errs.append(f"slide {i + 1}: audio mancante")
         else:
@@ -267,6 +283,7 @@ def validate_lesson(out_dir, slides):
         "scenario": scenario,
         "errore": errore,
         "flashcards": flashcards,
+        "glossario": glossario,
         "matching": matching,
         "audio": len(seen_audio),
     }

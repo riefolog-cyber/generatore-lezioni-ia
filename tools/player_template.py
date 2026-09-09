@@ -127,6 +127,7 @@ header .logo {
 header h1 {
   font-size: 15px; font-weight: 700; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis; letter-spacing: .01em;
+  min-width: 0; flex: 1 1 auto;
 }
 header .spacer { flex: 1; }
 .hchip {
@@ -147,6 +148,26 @@ header .spacer { flex: 1; }
 }
 .hbtn:hover { border-color: var(--accent); transform: translateY(-1px);
   box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 22%, transparent); }
+.hbtn .hbtntxt { font-size: 12.5px; font-weight: 700; margin-left: 2px; }
+#hmenu { position: relative; flex: 0 0 auto; }
+#hdrop {
+  position: absolute; right: 0; top: calc(100% + 10px); z-index: 80;
+  min-width: 230px; display: flex; flex-direction: column; gap: 4px;
+  padding: 8px; border-radius: 14px; border: 1px solid var(--line);
+  background: var(--card); box-shadow: 0 18px 50px rgba(0, 0, 0, .45);
+  animation: rise .18s both;
+}
+#hdrop[hidden] { display: none; }
+#hdrop > button {
+  display: flex; align-items: center; gap: 11px; width: 100%;
+  background: transparent; border: none; border-radius: 10px;
+  color: var(--text); font: inherit; font-size: 14px; font-weight: 600;
+  padding: 10px 12px; cursor: pointer; text-align: left;
+}
+#hdrop > button:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+#hdrop > button .ic { font-size: 16px; flex: 0 0 auto; }
+#hdrop #accMenu { position: static; flex-direction: row; gap: 8px;
+  border-top: 1px solid var(--line); padding-top: 8px; margin-top: 4px; }
 #pbar { position: relative; z-index: 5; height: 4px; background: color-mix(in srgb, var(--line) 55%, transparent); }
 #pfill {
   height: 100%; width: 0%; border-radius: 0 4px 4px 0;
@@ -163,7 +184,8 @@ header .spacer { flex: 1; }
 
 /* ------------------------------------------------ stage + slide card */
 main { position: relative; z-index: 1; flex: 1; display: flex; min-height: 0; }
-#stage { flex: 1; display: flex; align-items: center; justify-content: center; padding: 22px; overflow: auto; }
+#stage { flex: 1; display: flex; align-items: flex-start; justify-content: center; padding: 22px; overflow: auto; }
+#stage #slide { margin: auto; }
 #slide {
   position: relative; overflow: hidden;
   width: min(940px, 100%);
@@ -243,7 +265,8 @@ main { position: relative; z-index: 1; flex: 1; display: flex; min-height: 0; }
 }
 
 /* ------------------------------------------------ quiz + scenario (opzioni) */
-.quiz q { display: block; font-size: 19px; font-weight: 700; line-height: 1.5; margin-bottom: 16px; }
+.quiz q { display: block; font-size: clamp(18px, 2.4vw, 22px); font-weight: 800;
+  line-height: 1.45; margin-bottom: 16px; letter-spacing: -.01em; }
 .opt {
   display: flex; gap: 12px; align-items: center; width: 100%; text-align: left;
   background: var(--card2); border: 1px solid var(--line); color: var(--text);
@@ -271,6 +294,10 @@ main { position: relative; z-index: 1; flex: 1; display: flex; min-height: 0; }
   line-height: 1.6; border: 1px solid transparent; }
 .fb.ok { display: block; background: color-mix(in srgb, var(--ok) 10%, transparent);
   border-color: color-mix(in srgb, var(--ok) 35%, transparent); }
+.adapt { margin-top: 10px; padding: 11px 15px; border-radius: 12px; font-size: 14px;
+  line-height: 1.55; border: 1px dashed var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.adapt button { margin-left: 8px; }
 .fb.ko { display: block; background: color-mix(in srgb, var(--ko) 9%, transparent);
   border-color: color-mix(in srgb, var(--ko) 35%, transparent); }
 .fb .verdict { font-weight: 800; font-size: 15px; margin-bottom: 4px; }
@@ -387,6 +414,29 @@ main { position: relative; z-index: 1; flex: 1; display: flex; min-height: 0; }
 .fcrow > .fcterm { margin: 0; font-size: 14px; }
 .fcrowopts { display: flex; gap: 7px; flex-wrap: wrap; }
 .opt.small { font-size: 12px; padding: 7px 11px; border-radius: 9px; text-align: left; }
+
+/* ------------------------------------------------ glossario strutturato */
+.glos > p { font-weight: 600; }
+.glosearch { width: 100%; margin: 12px 0 4px; padding: 11px 15px; border-radius: 12px;
+  border: 1px solid var(--line); background: var(--card2); color: var(--text);
+  font: inherit; font-size: 14.5px; }
+.glosearch:focus { outline: none; border-color: var(--accent); }
+.glocount { font-size: 12.5px; color: var(--muted); margin: 2px 0 10px; }
+.glogroup { margin: 12px 0 4px; font-size: 13px; font-weight: 800; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--accent); }
+.gloterm { border: 1px solid var(--line); border-radius: 12px; margin: 7px 0;
+  background: var(--card2); overflow: hidden; }
+.gloterm > button { width: 100%; display: flex; justify-content: space-between; align-items: center;
+  gap: 10px; background: none; border: none; color: var(--text); font: inherit;
+  font-weight: 700; font-size: 15px; padding: 12px 15px; cursor: pointer; text-align: left; }
+.gloterm > button .arrow { color: var(--accent); font-size: 12px; transition: transform .2s; }
+.gloterm.open > button .arrow { transform: rotate(90deg); }
+.glodef { display: none; padding: 0 15px 13px; font-size: 14px; line-height: 1.6; color: var(--text); }
+.gloterm.open .glodef { display: block; }
+.glomod { display: inline-block; margin-top: 8px; font-size: 12.5px; font-weight: 700;
+  color: var(--accent); background: none; border: none; cursor: pointer; padding: 0; font-family: inherit; }
+.glomod:hover { text-decoration: underline; }
+.gloempty { color: var(--muted); font-style: italic; padding: 12px 4px; }
 
 /* ------------------------------------------------ compila il vuoto */
 .cmp { display: flex; flex-direction: column; gap: 16px; margin-top: 8px; }
@@ -532,7 +582,10 @@ main { position: relative; z-index: 1; flex: 1; display: flex; min-height: 0; }
 #cap { min-height: 22px; font-size: 14px; color: var(--muted); font-weight: 600;
   text-align: center; flex: 1; }
 @media (max-width: 760px) { #cap { display: none; } }
-#audioErr { color: var(--ko); font-size: 12.5px; font-weight: 700; flex: 0 0 auto; }
+#audioErr { color: var(--warn, #ffd166); font-size: 12px; font-weight: 600; flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, var(--warn, #ffd166) 40%, transparent);
+  border-radius: 999px; padding: 3px 10px;
+  background: color-mix(in srgb, var(--warn, #ffd166) 10%, transparent); }
 #audioUnlock { display: flex; align-items: center; gap: 8px; padding: 7px 12px; border-radius: 10px; flex: 0 0 auto;
   background: color-mix(in srgb, var(--warn, #ffd166) 16%, transparent);
   border: 1px solid color-mix(in srgb, var(--warn, #ffd166) 40%, transparent); font-size: 13px; font-weight: 700; }
@@ -642,7 +695,9 @@ nav button:disabled { opacity: .35; cursor: default; transform: none !important;
 button:active:not(:disabled) { transform: scale(.96); }
 #dots { display: flex; gap: 7px; flex-wrap: wrap; justify-content: center; align-items: center; }
 #dots span { position: relative;
-  width: 10px; height: 10px; border-radius: 50%; background: var(--line);
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--line); background-clip: padding-box;
+  border: 5px solid transparent; /* area di tocco allargata, pallino invariato */
   cursor: pointer; transition: background .2s, transform .2s, box-shadow .2s;
 }
 #dots span:hover { transform: scale(1.3); }
@@ -773,7 +828,20 @@ button:active:not(:disabled) { transform: scale(.96); }
   #slide li { padding-left: 22px; }
   .match .pairs { grid-template-columns: 1fr; }
   .vfrow { grid-template-columns: 1fr; }
+  /* header compatto: resta solo il contatore, il resto va nel menu */
+  header { gap: 8px; padding: 9px 12px; }
+  header .spacer { display: none; }
   header .hchip { display: none; }
+  header #prog.hchip { display: inline-block; }
+  header h1 { font-size: 13.5px; }
+  .hbtn .hbtntxt { display: none; }
+  .hbtn { padding: 6px 10px; }
+  /* nav su due righe: dots sopra, pulsanti sotto a tutta larghezza */
+  nav { flex-wrap: wrap; gap: 9px; padding: 10px 12px; }
+  #dots { order: -1; flex: 1 1 100%; gap: 9px; }
+  nav button { flex: 1 1 0; padding: 11px 8px; font-size: 13.5px; white-space: nowrap; }
+  #audioBar { gap: 8px; padding: 8px 12px; }
+  #tt { min-width: 0; }
 }
 """
     )
@@ -879,7 +947,7 @@ const btnTheme = _safe('btnTheme') || el('div');
 function applyTheme(tt) {
   document.documentElement.dataset.theme = tt;
   try { localStorage.setItem('lesson-theme', tt); } catch (e) {}
-  if (btnTheme) btnTheme.textContent = tt === 'dark' ? '☀️' : '🌙';
+  if (btnTheme) { const _ic = btnTheme.querySelector('.ic'); if (_ic) _ic.textContent = tt === 'dark' ? '☀️' : '🌙'; }
 }
 let startTheme = 'dark';
 try { startTheme = localStorage.getItem('lesson-theme') || 'dark'; } catch (e) {}
@@ -1384,6 +1452,7 @@ function renderBlock(b, idx) {
   if (b.errore) return blockErrore(b.errore, idx);
   if (b.match) return blockMatch(b.match, idx);
   if (b.flashcards) return blockFlashcards(b.flashcards, idx);
+  if (b.glossario) return blockGlossario(b.glossario, idx);
   return document.createTextNode('');
 }
 
@@ -1423,6 +1492,13 @@ function blockQuiz(q, idx) {
       }
       fb.innerHTML = '';
       fb.appendChild(answerFeedback(good, q.ok, q.ko, opt.fb || ''));
+      if (!good) {
+        const ad = el('div', 'adapt', '💡 Difficoltà? Torna alla slide del modulo per rileggere il passaggio, poi riprova al prossimo giro.');
+        const back = el('button', 'abar', '← Rileggi il modulo');
+        back.onclick = (e) => { e.stopPropagation(); try { go(Math.max(0, (typeof cur !== 'undefined' ? cur : 1) - 1)); } catch (_) {} };
+        ad.appendChild(back);
+        w.appendChild(ad);
+      }
       results[idx] = results[idx] || {};
       results[idx].quiz = good;
       paintDots();
@@ -1458,6 +1534,10 @@ function blockScenario(s, idx) {
       }
       fb.innerHTML = '';
       fb.appendChild(answerFeedback(good, 'Ottima scelta.', 'Non la migliore.', btn.dataset.fb || ''));
+      if (!good) {
+        const ad = el('div', 'adapt', '💡 Suggerimento: rileggi la situazione e la conclusione qui sotto prima di continuare.');
+        m.appendChild(ad);
+      }
       if (s.conclusione) m.appendChild(el('div', 'expl', '💡 ' + s.conclusione));
       results[idx] = results[idx] || {};
       results[idx].scenario = good;
@@ -1725,6 +1805,61 @@ function blockFlashcards(f, idx) {
     v.appendChild(row);
   });
   m.appendChild(v);
+  return m;
+}
+
+function blockGlossario(g, idx) {
+  const m = el('div', 'glos');
+  m.appendChild(el('p', null, g.instr || 'Cerca un termine o sfoglia per modulo.'));
+  const groups = (g.groups || []).filter(gr => gr && (gr.terms || []).length);
+  const total = groups.reduce((n, gr) => n + gr.terms.length, 0);
+  const search = el('input', 'glosearch');
+  search.type = 'search';
+  search.placeholder = '🔍 Cerca tra ' + total + ' termini…';
+  search.setAttribute('aria-label', 'Cerca nel glossario');
+  const count = el('div', 'glocount', total + ' termini · ' + groups.length + ' moduli');
+  const list = el('div', 'glolist');
+  m.appendChild(search); m.appendChild(count); m.appendChild(list);
+  function paint(filter) {
+    list.innerHTML = '';
+    const f = (filter || '').trim().toLowerCase();
+    let shown = 0, shownGroups = 0;
+    groups.forEach(gr => {
+      const terms = gr.terms.filter(t =>
+        !f || (t.t || '').toLowerCase().includes(f) || (t.d || '').toLowerCase().includes(f));
+      if (!terms.length) return;
+      shownGroups++;
+      list.appendChild(el('div', 'glogroup', '📖 ' + (gr.modulo || 'Modulo')));
+      terms.forEach(t => {
+        shown++;
+        const row = el('div', 'gloterm');
+        const btn = el('button');
+        btn.appendChild(el('span', null, t.t));
+        btn.appendChild(el('span', 'arrow', '▶'));
+        btn.onclick = () => row.classList.toggle('open');
+        row.appendChild(btn);
+        const def = el('div', 'glodef', t.d);
+        if (gr.slide !== null && gr.slide !== undefined && gr.modulo) {
+          const link = el('button', 'glomod', '→ Vedi: ' + gr.modulo);
+          link.onclick = (e) => { e.stopPropagation(); try { go(gr.slide); } catch (_) {} };
+          def.appendChild(el('br'));
+          def.appendChild(link);
+        }
+        row.appendChild(def);
+        list.appendChild(row);
+      });
+    });
+    if (!shown) list.appendChild(el('div', 'gloempty', 'Nessun termine trovato.'));
+    count.textContent = f
+      ? shown + ' risultati · ' + shownGroups + ' moduli'
+      : total + ' termini · ' + groups.length + ' moduli';
+  }
+  let deb = null;
+  search.addEventListener('input', () => {
+    clearTimeout(deb);
+    deb = setTimeout(() => paint(search.value), 140);
+  });
+  paint('');
   return m;
 }
 
@@ -2036,6 +2171,21 @@ if (btnAcc && accMenu) {
     if (!accMenu.hidden && !accMenu.contains(e.target) && e.target !== btnAcc) accMenu.hidden = true;
   });
 }
+// menu header (Stampa / Tema / Accessibilità con etichette)
+(function headerMenu() {
+  const btn = _btn('btnMenu'), drop = _btn('hdrop');
+  if (!btn || !drop) return;
+  btn.onclick = e => { e.stopPropagation(); drop.hidden = !drop.hidden; };
+  document.addEventListener('click', e => {
+    if (!drop.hidden && !drop.contains(e.target) && e.target !== btn) drop.hidden = true;
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !drop.hidden) drop.hidden = true;
+  });
+  drop.querySelectorAll('button').forEach(b => {
+    if (b.id !== 'btnAcc') b.addEventListener('click', () => { drop.hidden = true; });
+  });
+})();
 
 // ---------------------------------------------------------------- nav
 function go(i) {
@@ -2087,6 +2237,8 @@ $('#sinput').addEventListener('input', e => {
       ['p', 'h1', 'h2', 'quote', 'callout'].forEach(k => { if (b[k]) texts.push(b[k]); });
       if (b.list) texts.push(b.list.join(' '));
       if (b.quiz) texts.push(b.quiz.q + ' ' + b.quiz.opts.map(o => o.t).join(' '));
+      if (b.glossario) (b.glossario.groups || []).forEach(gr =>
+        (gr.terms || []).forEach(t => texts.push(t.t + ' ' + t.d)));
     });
     if ((s.title || '').toLowerCase().includes(q) ||
         texts.some(t => t.toLowerCase().includes(q))) {
@@ -2121,6 +2273,9 @@ function printLesson() {
       else if (b.seq) body += '<p><b>Sequenza:</b> ' + esc((b.seq.passi || []).join(' → ')) + '</p>';
       else if (b.flashcards) body += '<p><b>Flashcards:</b></p><ul>'
         + (b.flashcards.cards || []).map(c2 => '<li><b>' + esc(c2.t) + '</b>: ' + esc(c2.d) + '</li>').join('') + '</ul>';
+      else if (b.glossario) body += '<p><b>Glossario:</b></p>' + (b.glossario.groups || []).map(gr =>
+        '<p><i>' + esc(gr.modulo || 'Modulo') + '</i></p><ul>'
+        + ((gr.terms || []).map(t2 => '<li><b>' + esc(t2.t) + '</b>: ' + esc(t2.d) + '</li>').join('')) + '</ul>').join('');
     });
     body += '</div>';
   });
@@ -2245,12 +2400,17 @@ def write_player(out_dir: Path, titolo: str, tema: str = 'dark'):
   <span id="score" class="hchip" hidden>⭐ 0/0</span>
   <span id="streak" class="hchip streak" hidden>🔥</span>
   <span id="rvw" class="hchip" hidden>🔖</span>
-  <button id="btnSearch" class="hbtn" title="Cerca nella lezione (F)">🔍</button>
-  <button id="btnPrint" class="hbtn" title="Stampa / PDF della lezione intera">🖨</button>
-  <button id="btnTheme" class="hbtn" title="Tema chiaro / scuro">☀️</button>
-  <button id="btnAcc" class="hbtn" title="Accessibilità: testo più grande, alto contrasto (Ctrl+Alt+T)">♿</button>
-  <div id="accMenu" hidden>
-    <button id="btnZoom" class="abar" title="Dimensione testo">A</button>
+  <button id="btnSearch" class="hbtn" title="Cerca nella lezione (F)">🔍<span class="hbtntxt">Cerca</span></button>
+  <div id="hmenu">
+    <button id="btnMenu" class="hbtn" title="Altre azioni: stampa, tema, accessibilità">☰<span class="hbtntxt">Menu</span></button>
+    <div id="hdrop" hidden>
+      <button id="btnPrint" title="Stampa / PDF della lezione intera"><span class="ic">🖨</span><span>Stampa / PDF</span></button>
+      <button id="btnTheme" title="Tema chiaro / scuro"><span class="ic">☀️</span><span>Tema chiaro / scuro</span></button>
+      <button id="btnAcc" title="Accessibilità: testo più grande, alto contrasto (Ctrl+Alt+T)"><span class="ic">♿</span><span>Accessibilità</span></button>
+      <div id="accMenu" hidden>
+        <button id="btnZoom" class="abar" title="Dimensione testo">A</button>
+      </div>
+    </div>
   </div>
 </header>
 <div id="sbox">
@@ -2303,6 +2463,21 @@ def write_player(out_dir: Path, titolo: str, tema: str = 'dark'):
     (out_dir / 'index.html').write_text(html, encoding='utf-8')
     (out_dir / 'main.css').write_text(_css(t), encoding='utf-8')
     (out_dir / 'main.js').write_text(_js(), encoding='utf-8')
+    # PWA offline: manifest + service worker (cachizza la lezione aperta)
+    try:
+        (out_dir / 'manifest.json').write_text(
+            '{"name": %s, "short_name": %s, "display": "standalone", '
+            '"start_url": "./index.html", "background_color": "#0b111d"}'
+            % (__import__('json').dumps(titolo), __import__('json').dumps(titolo[:12])),
+            encoding='utf-8')
+        (out_dir / 'sw.js').write_text(
+            "const C='lesson-v1';\n"
+            "self.addEventListener('install',e=>{e.waitUntil(caches.open(C).then(c=>c.addAll("
+            "['./index.html','./main.css','./main.js','./lesson-data.js']).catch(()=>{})));});\n"
+            "self.addEventListener('fetch',e=>{e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request).catch(()=>r)));});\n",
+            encoding='utf-8')
+    except OSError:
+        pass
 
 
 def bust_cache(out_dir: Path):

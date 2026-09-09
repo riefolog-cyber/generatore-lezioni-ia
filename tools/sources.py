@@ -351,6 +351,17 @@ def extract_youtube(url):
         raise ValueError(f"Trascrizione non disponibile e descrizione assente: {e}")
 
 
+# ------------------------------------------------------------------ testo incollato
+def extract_text_raw(text, title=None):
+    """Fonte 'incolla-testo' dal pannello: niente file, solo stringa."""
+    text = (text or "").strip()
+    if len(text) < 50:
+        raise ValueError("Testo troppo corto (min 50 caratteri).")
+    if len(text) > 200000:
+        raise ValueError("Testo troppo lungo (max 200.000 caratteri).")
+    return _split_into_sections(text, title=title or "Materiale incollato")
+
+
 # ------------------------------------------------------------------ dispatch
 def extract_source(source):
     """Punto d'ingresso unico: accetta un percorso file oppure un URL."""

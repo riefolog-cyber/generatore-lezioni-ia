@@ -61,7 +61,7 @@ class _QuietHandler(http.server.SimpleHTTPRequestHandler):
         # con contenuto fresco. Hanno già Last-Modified/If-Modified-Since via
         # SimpleHTTPRequestHandler.send_head(). Il resto (html/js/css/dati)
         # resta no-store: la pagina non può mai arrivare "stantia".
-        if self.path.lower().endswith(".mp3"):
+        if getattr(self, "path", "").lower().endswith(".mp3"):
             self.send_header("Cache-Control", "private, no-cache")
         else:
             self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")

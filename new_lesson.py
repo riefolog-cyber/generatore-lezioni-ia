@@ -365,6 +365,12 @@ def llm_structure(ext, use_cache=True, profilo=None):
                         struct["titolo"] = ext["title"]
                     _check_struct(struct)
                     nm = len(struct.get("moduli", []))
+                    if nm < nmin and nm > 0:
+                        try:
+                            struct = _complete_modules(testo, struct, nmin, profilo)
+                            nm = len(struct.get("moduli", []))
+                        except Exception:
+                            pass
                     if nm < nmin or nm > nmax + 1:
                         raise ValueError(f"moduli insufficienti: {nm} < {nmin} richiesti (o > {nmax}) — risposta scartata")
                     if nm < MIN_MODULI and len(testo) >= 3500:
@@ -630,8 +636,104 @@ ICONS = {
     "scenario": "🎬",
     "flash": "🃏",
     "errore": "🔍",
+    "gloss": "📖",
+    "exam": "🎓",
     "end": "🏁",
 }
+
+
+def _define_keyword(kw, m):
+    """Definizione REALE di una keyword: la prima frase di testo/punti/narrazione
+    del modulo che la contiene (niente definizioni inventate). Ritorna None se
+    il modulo non la definisce davvero."""
+    import re as _re
+    kwl = kw.lower()
+    if len(kw) < 3:
+        return None
+    corpus = [m.get("testo") or "", m.get("narrazione") or ""] + list(m.get("punti") or [])
+    for para in corpus:
+        for sent in _re.split(r"(?<=[.!?])\s+", str(para)):
+            s = sent.strip()
+            if len(s) >= 40 and kwl in s.lower():
+                return s[:180]
+    return None
+
+
+def build_glossary(moduli):
+    """Glossario strutturato per modulo: [{"modulo": titolo, "slide": None,
+    "terms": [{"t": termine, "d": definizione}, ...]}, ...].
+
+    Priorità definizioni: flashcards/abbinamenti dell'LLM, poi frase reale del
+    modulo che contiene la keyword. Le keyword senza definizione vera vengono
+    SCARTATE (meglio un glossario corto e affidabile che voci inventate).
+    Termini ordinati alfabeticamente dentro ogni gruppo."""
+    groups = []
+    seen = set()
+    for i, m in enumerate(moduli):
+        title = (m.get("titolo") or f"Modulo {i + 1}")[:80]
+        terms, local = [], set()
+        for fc in (m.get("flashcards") or [])[:3]:
+            if isinstance(fc, dict) and fc.get("termine") and fc.get("definizione"):
+                k = str(fc["termine"]).strip()
+                if k and k.lower() not in seen and k.lower() not in local:
+                    seen.add(k.lower()); local.add(k.lower())
+                    terms.append({"t": k, "d": str(fc["definizione"])[:180]})
+        for ab in (m.get("abbinamenti") or [])[:2]:
+            if isinstance(ab, dict) and ab.get("termine") and ab.get("definizione"):
+                k = str(ab["termine"]).strip()
+                if k and k.lower() not in seen and k.lower() not in local:
+                    seen.add(k.lower()); local.add(k.lower())
+                    terms.append({"t": k, "d": str(ab["definizione"])[:180]})
+        for kw in (m.get("keywords") or [])[:4]:
+            k = str(kw).strip().strip(",;.")
+            if not k or k.lower() in seen or k.lower() in local:
+                continue
+            d = _define_keyword(k, m)
+            if d:
+                seen.add(k.lower()); local.add(k.lower())
+                terms.append({"t": k, "d": d})
+        if terms:
+            terms.sort(key=lambda t: t["t"].lower())
+            groups.append({"modulo": title, "slide": None, "terms": terms[:6]})
+    return groups[:8]
+
+
+def glossary_term_count(groups):
+    return sum(len(g.get("terms", [])) for g in groups)
+
+
+def build_final_exam(moduli, max_q=5):
+    """Esame finale: un quiz per modulo (round-robin), max `max_q` domande."""
+    out = []
+    for i, m in enumerate(moduli):
+        q = m.get("quiz")
+        if isinstance(q, dict) and q.get("domanda") and isinstance(q.get("opzioni"), list):
+            opts = [o for o in q["opzioni"] if isinstance(o, dict) and o.get("testo")]
+            if len(opts) >= 2:
+                out.append({"modulo": m.get("titolo") or f"Modulo {i + 1}",
+                            "domanda": str(q["domanda"]),
+                            "opzioni": [{"t": str(o["testo"])[:300],
+                                         "ok": bool(o.get("corretta")),
+                                         "fb": str(o.get("feedback") or "")} for o in opts[:4]],
+                            "ok": str(q.get("ok") or "Esatto!"),
+                            "ko": str(q.get("ko") or "Rileggi il modulo e riprova.")})
+        if len(out) >= max_q:
+            break
+    return out
+
+
+def bloom_rubric_text(profilo, stats):
+    """Riga di rubrica Bloom per il report docente: obiettivo vs attività prodotte."""
+    if not isinstance(profilo, dict):
+        return ""
+    ob = profilo.get("obiettivo", "?")
+    return (f"Rubrica Bloom — obiettivo «{ob}»: quiz {stats.get('quiz', 0)}, "
+            f"V/F {stats.get('vf', 0)}, sequenze {stats.get('seq', 0)}, "
+            f"compila {stats.get('compila', 0)}, scenari {stats.get('scenario', 0)}, "
+            f"errori {stats.get('errore', 0)}, flashcards {stats.get('flashcards', 0)}, "
+            f"glossario {stats.get('glossario', 0)} termini, "
+            f"abbinamenti {stats.get('matching', 0)}. "
+            f"Profilo: {profilo.get('durata', '?')}/{profilo.get('livello', '?')}/{ob}.")
 
 # Rotazione: ogni modulo ha SEMPRE il quiz, più 2 attività prese a giro
 # da queste, così i tipi si alternano da un modulo all'altro.
@@ -680,7 +782,9 @@ def build_slides(struct, draft=False):
         if m.get("punti"):
             blocks.append({"list": [p for p in m["punti"] if p]})
         if m.get("keywords"):
-            blocks.append({"callout": " • ".join(m["keywords"][:3])})
+            kws = [str(k).strip().strip(",;.") for k in m["keywords"][:4] if str(k).strip()]
+            if kws:
+                blocks.append({"callout": "🔑 Parole chiave: " + " • ".join(kws)})
         add(f"Modulo {i + 1} – {tit}", blocks,
             narr or f"Parliamo di {tit}.", ICONS["mod"][i % len(ICONS["mod"])])
 
@@ -790,6 +894,37 @@ def build_slides(struct, draft=False):
                         "pairs": pairs}}],
             "Mettiti alla prova: abbina ogni concetto alla definizione corretta.",
             ICONS["match"])
+
+    # glossario riepilogativo: gruppi per modulo con link alla slide del modulo
+    gloss = build_glossary(moduli)
+    if glossary_term_count(gloss) >= 3:
+        mod_slide_idx = {}
+        for si, s in enumerate(slides):
+            for i in range(len(moduli)):
+                if s["title"].startswith(f"Modulo {i + 1} –"):
+                    mod_slide_idx[i] = si
+        for i, g in enumerate(gloss):
+            if i < len(moduli) and i in mod_slide_idx:
+                g["slide"] = mod_slide_idx[i]
+        add("Glossario — parole chiave",
+            [{"callout": f"Glossario ({glossary_term_count(gloss)} termini)"},
+             {"glossario": {"instr": "Cerca un termine o sfoglia per modulo: "
+                                     "clicca per vedere la definizione.",
+                            "groups": gloss}}],
+            "Prima di concludere, ripassiamo le parole chiave della lezione, "
+            "raggruppate per modulo.",
+            ICONS["gloss"])
+
+    # esame finale riepilogativo (un quiz per modulo, soglia 70% nel report)
+    exam = build_final_exam(moduli)
+    for j, eq in enumerate(exam):
+        add(f"Esame finale {j + 1}/{len(exam)}",
+            [{"callout": f"Esame finale — domanda {j + 1} di {len(exam)} (soglia 70%)"},
+             {"quiz": {"q": f"[{eq['modulo'][:50]}] {eq['domanda']}",
+                       "opts": eq["opzioni"], "ok": eq["ok"], "ko": eq["ko"],
+                       "exam": True}}],
+            f"Domanda {j + 1} dell'esame finale, dal modulo {eq['modulo'][:60]}.",
+            ICONS["exam"])
 
     # conclusione
     add("Conclusione",
@@ -1343,6 +1478,61 @@ def build_from_docx(path, force=False, bozza=False, no_cache=False,
         _unlock_build()
 
 
+PROGRESS_FILE = BASE / ".progress.json"
+
+
+def _set_progress(fase, pct, extra=""):
+    """Progress % reale della build (letto dal pannello via /api/log)."""
+    try:
+        PROGRESS_FILE.write_text(json.dumps(
+            {"fase": fase, "pct": pct, "extra": extra, "t": time.time()},
+            ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _complete_modules(testo, struct, nmin, profilo):
+    """Retry parziale LLM: se mancano moduli, ne chiede solo la differenza
+    invece di scartare tutta la risposta (risparmia minuti)."""
+    have = len(struct.get("moduli", []))
+    need = max(0, nmin - have)
+    if need <= 0:
+        return struct
+    print(f"  retry parziale: ho {have} moduli, ne chiedo altri {need}…", flush=True)
+    mini_prompt = (
+        "Aggiungi ESATTAMENTE {need} moduli didattici sullo stesso materiale, "
+        "stesso schema JSON dei moduli "
+        "(titolo/testo/punti/keywords/narrazione/quiz_narrazione/quiz/abbinamenti/"
+        "vero_falso/sequenza/compila/scenari/errori/flashcards). "
+        "Rispondi SOLO con un JSON {\"moduli\": [...]}.\n\nMATERIALE:\n{testo}"
+    ).format(need=need, testo=testo[:FLATTEN_LIMIT])
+    headers = {"Content-Type": "application/json"}
+    if LLM_API_KEY:
+        headers["Authorization"] = f"Bearer {LLM_API_KEY}"
+    for model in ([LLM_MODEL or pick_model(), "comboact"]):
+        if not model:
+            continue
+        try:
+            req = urllib.request.Request(
+                f"{LLM_URL}/chat/completions",
+                data=json.dumps({"model": model, "temperature": 0.3,
+                                 "max_tokens": 4000,
+                                 "messages": [{"role": "user", "content": mini_prompt}]}).encode(),
+                headers=headers)
+            with urllib.request.urlopen(req, timeout=LLM_REQUEST_TIMEOUT) as r:
+                out = _extract_api_body(r.read().decode("utf-8"))
+            add = parse_json(out["choices"][0]["message"]["content"])
+            for m in add.get("moduli", [])[:need]:
+                if isinstance(m, dict) and m.get("titolo"):
+                    struct.setdefault("moduli", []).append(m)
+            _check_struct(struct)
+            print(f"  retry parziale ok: ora {len(struct['moduli'])} moduli", flush=True)
+            return struct
+        except Exception as e:  # noqa: BLE001
+            print(f"  retry parziale fallito su {model}: {str(e)[:80]}", flush=True)
+    return struct
+
+
 def _build_impl(source, force=False, bozza=False, no_cache=False,
                 single=False, keep_folder=False, profilo=None):
     log = setup_logging()
@@ -1350,9 +1540,11 @@ def _build_impl(source, force=False, bozza=False, no_cache=False,
     display = src if is_url(src) else Path(src).name
 
     t0 = time.time()
+    _times = {}
     msg = f"=== GENERO LA LEZIONE DA: {display} ==="
     print(f"\n{msg}")
     log.info(msg)
+    _set_progress("avvio", 2, display)
     try:
         from common import normalize_profilo as _np
         _cfg_prof = {"durata": CONFIG.get("profilo_durata"),
@@ -1361,7 +1553,10 @@ def _build_impl(source, force=False, bozza=False, no_cache=False,
         profilo = _np({**_cfg_prof, **(profilo or {})})
     except Exception:
         profilo = {"durata": "standard", "livello": "intermedio", "obiettivo": "comprensione"}
+    _set_progress("lettura materiale", 5, display)
+    t_read = time.time()
     ext = extract_source(src)
+    _times["lettura"] = round(time.time() - t_read, 1)
     print(f'[1/6] Materiale letto ({len(ext["sections"])} sezioni), '
           f'titolo: {ext["title"][:60]}')
 
@@ -1371,6 +1566,8 @@ def _build_impl(source, force=False, bozza=False, no_cache=False,
         print(f"  → {out_dir.name} esiste già, salto (usa --force per rigenerare)")
         return out_dir, False
 
+    _set_progress("strutturazione LLM", 15)
+    t_llm = time.time()
     if bozza:
         print("[2/6] Modalità BOZZA: salto LLM, struttura dal docx (senza quiz).")
         struct, via_llm = fallback_structure(ext), False
@@ -1387,6 +1584,7 @@ def _build_impl(source, force=False, bozza=False, no_cache=False,
     else:
         print(f"[2/6] ⚠ 9router non raggiungibile ({LLM_URL}). Uso struttura ridotta (senza quiz).")
         struct, via_llm = fallback_structure(ext), False
+    _times["llm"] = round(time.time() - t_llm, 1)
 
     moduli = struct.get("moduli", [])
     n_quiz = sum(1 for m in moduli if m.get("quiz"))
@@ -1401,8 +1599,11 @@ def _build_impl(source, force=False, bozza=False, no_cache=False,
           f"Compila: {n_cp} | Scenari: {n_sc} | Errori: {n_er} | Abbinamenti: {n_ab} | "
           f"Flashcards: {n_fc}")
 
+    _set_progress("costruzione slide", 55)
     print("[3/6] Costruisco le slide (narrazione dentro ogni passaggio)…")
+    t_sl = time.time()
     slides = build_slides(struct, draft=not via_llm)
+    _times["slide"] = round(time.time() - t_sl, 1)
 
     if out_dir.exists():
         shutil.rmtree(out_dir)
@@ -1412,9 +1613,12 @@ def _build_impl(source, force=False, bozza=False, no_cache=False,
     print(f"[4/6] Player autogenerato (tema {tema}, si adatta al titolo)…")
     write_player(out_dir, struct["titolo"], tema=tema)
 
+    _set_progress("audio neurale", 70, f"{len(slides)} slide")
     print("[5/6] Audio neurale edge-tts per ogni slide (cache) + sottotitoli sincronizzati…")
+    t_au = time.time()
     cached, measured = generate_audio(out_dir, slides)
     write_vtt(out_dir, slides)
+    _times["audio"] = round(time.time() - t_au, 1)
     audio_probs = _validate_audio(out_dir, slides, measured)
     print(f"  cache audio: {cached}/{len(slides)} tracce riusate")
 
@@ -1437,15 +1641,21 @@ def _build_impl(source, force=False, bozza=False, no_cache=False,
             print(" -", e)
     else:
         print("VALIDAZIONE OK")
+    _set_progress("validazione", 95)
     try:
         extra = None
         if not via_llm:
             extra = "BOZZA senza quiz: avvia 9router e rigenera per la versione completa."
+        rub = bloom_rubric_text(profilo, stats)
+        tempi = "Tempi fasi (s): " + ", ".join(f"{k}={v}" for k, v in _times.items())
+        extra = ((extra + " ") if extra else "") + rub + " " + tempi
         write_report(out_dir, errs, stats, extra)
         print(f"  report scritto in {out_dir.name}/report.html")
+        print(f"  {tempi}")
     except Exception:
         pass
     print(f"→ LEZIONE PRONTA: {out_dir}  ({time.time() - t0:.0f}s)\n")
+    _set_progress("completata", 100, out_dir.name)
     if not ok:
         print("⚠ La lezione è stata generata ma la validazione ha segnalato problemi.\n")
 
@@ -1469,6 +1679,23 @@ def _build_impl(source, force=False, bozza=False, no_cache=False,
                   flush=True)
             return out_dir, ok
     return out_dir, ok
+
+
+def build_from_text(text, title=None, force=False, bozza=False, no_cache=False,
+                    single=False, keep_folder=False, profilo=None):
+    """Genera da testo incollato (pannello): scrive un .txt temporaneo e riusa la build."""
+    from sources import extract_text_raw
+    ext = extract_text_raw(text, title=title)
+    tmp = BASE / f"_incollato_{sanitize_stem(ext['title'])}.txt"
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        return build_from_docx(str(tmp), force=force, bozza=bozza, no_cache=no_cache,
+                               single=single, keep_folder=keep_folder, profilo=profilo)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def preview_from_docx(path, out_name=None, no_cache=False):
@@ -1719,6 +1946,49 @@ def validate_slide_edit(index, patch):
     if not clean:
         raise ValueError("Nessuna modifica valida")
     return clean
+
+
+def move_slide(lesson_dir, frm, to):
+    """Sposta la slide `frm` in posizione `to` (riordino docente)."""
+    out, payload = load_lesson(lesson_dir)
+    slides = payload["slides"]
+    if not (0 <= frm < len(slides)) or not (0 <= to < len(slides)):
+        raise ValueError("Indice slide fuori range")
+    s = slides.pop(frm)
+    slides.insert(to, s)
+    save_lesson(str(out), payload)
+    return len(slides)
+
+
+def delete_slide(lesson_dir, index):
+    """Elimina una slide (min 3 slide restanti)."""
+    out, payload = load_lesson(lesson_dir)
+    slides = payload["slides"]
+    if len(slides) <= 3:
+        raise ValueError("Minimo 3 slide: impossibile eliminare")
+    if not (0 <= index < len(slides)):
+        raise ValueError("Indice slide fuori range")
+    slides.pop(index)
+    save_lesson(str(out), payload)
+    return len(slides)
+
+
+def add_slide(lesson_dir, title, narration):
+    """Aggiunge una slide contenuto in fondo (prima di glossario/esame/conclusione)."""
+    out, payload = load_lesson(lesson_dir)
+    slides = payload["slides"]
+    t = str(title or "").strip()[:200] or "Nuova slide"
+    n = str(narration or "").strip()[:3000] or "Nuovo contenuto della lezione."
+    # inserisci prima delle slide speciali finali (glossario/esame/conclusione)
+    pos = len(slides) - 1
+    for i, s in enumerate(slides):
+        if str(s.get("title", "")).startswith(("Glossario", "Esame finale", "Conclusione")):
+            pos = i
+            break
+    slides.insert(pos, {"title": t, "blocks": [{"h1": t}, {"p": n}], "narration": n,
+                        "audio": None, "duration": 0})
+    save_lesson(str(out), payload)
+    return pos
 
 
 def regen_slide_audio(lesson_dir, index):
