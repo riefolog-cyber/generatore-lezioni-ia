@@ -30,6 +30,8 @@ Flusso di build:
 
 Configurazione (config.json): llm_url, llm_model, voice, theme, porta.
 """
+from concurrent.futures import ThreadPoolExecutor
+
 import hashlib
 import json
 import os
@@ -63,7 +65,7 @@ LLM_API_KEY = CONFIG.get("llm_api_key") or ""
 
 MIN_MODULI = int(CONFIG.get("num_moduli_min", 4))
 MAX_MODULI = int(CONFIG.get("num_moduli_max", 7))
-CACHE_VERSION = "v3"  # bump: invalida cache del bug 1-modulo (groq/gpt-oss-120b ha risposto con 1 modulo)
+CACHE_VERSION = "v4"  # bump: lettura streaming/SSE + fallback su reasoning (v3: bug 1-modulo)
 _FFMPEG_OK = None
 AUDIO_DUAL_PASS = bool(CONFIG.get("audio_loudnorm_dual", False))
 
@@ -240,6 +242,18 @@ def profilo_moduli(profilo):
     return (MIN_MODULI, MAX_MODULI)
 
 
+def _accetta_moduli(nm, nmin, nmax):
+    """Accetta la struttura LLM se il numero di moduli rientra nel range del
+    profilo richiesto (tolleranza +1 sul massimo). Il vecchio controllo
+    `nm < MIN_MODULI globale su materiale lungo` è stato rimosso: con profilo
+    "breve" (3-4) scartava strutture CORRETTE da 3 moduli perché il config
+    aveva num_moduli_min=4, e la lezione finiva nel fallback degradato."""
+    try:
+        return int(nmin) <= int(nm) <= int(nmax) + 1
+    except (TypeError, ValueError):
+        return False
+
+
 def _regole_adattive(nchars, profilo=None):
     """Regole per l'LLM proporzionate alla quantità di materiale: con poco
     testo chiediamo meno attività (e MAI inventare), con molto tutto il
@@ -283,20 +297,395 @@ def parse_json(content):
     return json.loads(content[start:end + 1])
 
 
+def _sse_answer(body):
+    """Accumula una risposta in streaming.
+
+    Il router (9router) risponde a chunk `data: {...}` per alcune rotte anche
+    senza `stream: true`: senza accumulare i delta si perde tutto il contenuto
+    e una risposta valida verrebbe scartata."""
+    contenuto, ragionamento = [], []
+    finish, uso = None, None
+    for riga in body.splitlines():
+        riga = riga.strip()
+        if not riga.startswith("data:"):
+            continue
+        pezzo = riga[5:].strip()
+        if pezzo in ("", "[DONE]"):
+            continue
+        try:
+            obj = json.loads(pezzo)
+        except ValueError:
+            continue
+        for ch in obj.get("choices") or []:
+            delta = ch.get("delta") or {}
+            msg = ch.get("message") or {}
+            for campo, dest in (("content", contenuto), ("reasoning", ragionamento)):
+                for testo in (delta.get(campo), msg.get(campo)):
+                    if isinstance(testo, str) and testo:
+                        dest.append(testo)
+            if ch.get("finish_reason"):
+                finish = ch["finish_reason"]
+        if obj.get("usage"):
+            uso = obj["usage"]
+    return {"id": "sse", "usage": uso or {},
+            "choices": [{"index": 0, "finish_reason": finish,
+                         "message": {"role": "assistant",
+                                     "content": "".join(contenuto),
+                                     "reasoning": "".join(ragionamento)}}]}
+
+
 def _extract_api_body(body):
-    """Estrae l'oggetto JSON da una risposta API che può avere coda SSE."""
+    """Estrae la risposta API: oggetto JSON intero oppure streaming SSE accumulato."""
+    if not body or not body.strip():
+        raise ValueError("risposta vuota dal router")
+    prima = next((r.strip() for r in body.splitlines() if r.strip()), "")
+    if prima.startswith("data:"):
+        out = _sse_answer(body)
+        if not _risposta_testo(out):
+            raise ValueError("streaming senza contenuto utile")
+        return out
     start = body.find("{")
-    idx = body.find("data:")
-    end = body.rfind("}")
-    if idx > start and idx < end:
-        end = idx
-    if start < 0 or end < start:
+    if start < 0:
         raise ValueError("JSON non trovato nel body della risposta")
-    return json.loads(body[start:end + 1])
+    # `raw_decode` legge un solo oggetto JSON e ignora quel che segue: il router
+    # può accodare chunk `data: {...}` dopo il JSON intero (prima il taglio al
+    # primo "data:" includeva anche la "d" e la risposta veniva scartata).
+    try:
+        obj, _fine = json.JSONDecoder().raw_decode(body[start:])
+        return obj
+    except ValueError:
+        end = body.rfind("}")
+        if end > start:
+            return json.loads(body[start:end + 1])
+        raise ValueError("JSON non valido nel body della risposta")
 
 
-LLM_REQUEST_TIMEOUT = 150   # secondi per singola richiesta
-LLM_TOTAL_DEADLINE = 420    # secondi totali per tutta la fase LLM (poi fallback)
+def _risposta_testo(out):
+    """Testo utile della risposta. I modelli reasoning (gpt-oss via router)
+    possono lasciare "content" vuoto e scrivere tutto in "reasoning": lì dentro
+    c'è il JSON, quindi va letto anche quello."""
+    try:
+        msg = out["choices"][0].get("message") or {}
+    except (KeyError, IndexError, TypeError):
+        return ""
+    for campo in ("content", "reasoning"):
+        txt = msg.get(campo)
+        if isinstance(txt, str) and txt.strip():
+            return txt
+    return ""
+
+
+def _dettagli_risposta(out):
+    """(finish_reason, token di uscita) per log e diagnosi."""
+    try:
+        ch = out["choices"][0]
+    except (KeyError, IndexError, TypeError):
+        return None, None
+    return ch.get("finish_reason"), (out.get("usage") or {}).get("completion_tokens")
+
+
+def _ripara_json(txt):
+    """Ripara un JSON tagliato a metà (finish_reason="length"): scarta l'ultima
+    voce incompleta e chiude stringhe, array e oggetti rimasti aperti. Su rotte
+    con tetto di token basso capita spesso: riparare evita di buttare tutto.
+
+    Le risposte troncate sono sempre un PREFISSO valido di JSON; se invece la
+    risposta è corrotta (chiusura non combaciante) ci si ferma all'ultimo punto
+    sicuro: il risultato è sempre JSON parsabile o ValueError, mai un oggetto
+    semi-valido."""
+    testo = txt.strip()
+    inizio = testo.find("{")
+    if inizio < 0:
+        raise ValueError("JSON non trovato nella risposta LLM")
+    testo = testo[inizio:]
+    pila, in_str, esc = [], False, False
+    ultimo_completo = 0
+    for i, c in enumerate(testo):
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c in "{[":
+            pila.append(c)
+        elif c in "}]":
+            # chiusura che non combacia con l'apertura = risposta corrotta
+            # (non solo troncata): niente pop cieco, altrimenti un `}` finirebbe
+            # a chiudere un array e il prodotto non parserebbe. Ci si ferma
+            # all'ultimo punto sicuro.
+            if not pila or (c == "}" and pila[-1] != "{") or (c == "]" and pila[-1] != "["):
+                break
+            pila.pop()
+            ultimo_completo = i + 1
+            if not pila:
+                break
+        elif c == "," and len(pila) <= 1:
+            ultimo_completo = i
+    troncato = testo[:ultimo_completo].rstrip().rstrip(",")
+    if "{" not in troncato:
+        raise ValueError("JSON troncato: nulla di recuperabile")
+    aperti, in_str, esc = [], False, False
+    for c in troncato:
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c in "{[":
+            aperti.append(c)
+        elif c in "}]" and aperti:
+            if ((c == "}" and aperti[-1] != "{")
+                    or (c == "]" and aperti[-1] != "[")):
+                break
+            aperti.pop()
+    coda = '"' if in_str else ""
+    for a in reversed(aperti):
+        coda += "}" if a == "{" else "]"
+    obj = json.loads(troncato + coda)
+    if not isinstance(obj, dict) or not obj.get("moduli"):
+        raise ValueError("JSON troncato senza moduli recuperabili")
+    return obj
+
+
+# Parametri LLM tarati sulle rotte gratuite del router: una richiesta enorme
+# (prompt lungo + tetto output alto) viene rifiutata con 503/429 e la fase LLM
+# finisce in timeout. Sovrascrivibili da config.json.
+LLM_REQUEST_TIMEOUT = int(CONFIG.get("llm_timeout", 120))    # secondi per singola richiesta
+LLM_TOTAL_DEADLINE = int(CONFIG.get("llm_deadline", 240))    # secondi totali per la fase LLM
+LLM_MAX_TOKENS = int(CONFIG.get("llm_max_tokens", 8000))     # tetto output per richiesta
+LLM_PARALLEL = max(1, int(CONFIG.get("llm_parallel", 4)))    # attività generate in parallelo
+# "due_fasi" = scheletro + attività modulo per modulo (regge i tetti di token
+# delle rotte gratuite); "unica" = una sola richiesta con il pacchetto completo.
+LLM_MODO = str(CONFIG.get("llm_modo", "due_fasi")).lower()
+
+# Rotte risultate non disponibili (cooldown/quota) durante la build corrente:
+# ritentarle a ogni modulo costa minuti di attesa senza possibilità di riuscita.
+_LLM_MORTE = set()
+
+
+def _llm_headers():
+    h = {"Content-Type": "application/json"}
+    if LLM_API_KEY:
+        h["Authorization"] = f"Bearer {LLM_API_KEY}"
+    return h
+
+
+def _llm_richiesta(payload, timeout=None):
+    """POST a /chat/completions con lettura della risposta (JSON o streaming)."""
+    req = urllib.request.Request(
+        f"{LLM_URL}/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers=_llm_headers())
+    with urllib.request.urlopen(req, timeout=timeout or LLM_REQUEST_TIMEOUT) as r:
+        return _extract_api_body(r.read().decode("utf-8", "replace"))
+
+
+def _rotta_morta(msg):
+    """Errore della rotta, non della richiesta: modello inesistente o non
+    autorizzato, quota/rate limit esaurito. Ritentarla nella stessa build è
+    tempo perso (il cooldown del router dura minuti)."""
+    m = str(msg).lower()
+    return any(k in m for k in ("503", "502", "504", "404", "429", "service unavailable",
+                                "rate limit", "does not exist", "do not have access",
+                                "insufficient_quota", "unavailable", "quota"))
+
+
+def _errore_trasporto(msg):
+    """Errore di rete/HTTP: ritentare subito senza response_format non cambia
+    nulla e costa un altro timeout intero."""
+    m = str(msg).lower()
+    return any(k in m for k in ("timed out", "timeout", "urlopen error", "connection",
+                                "refused", "reset", "http error", "risposta vuota",
+                                "json non trovato nel body", "streaming senza contenuto"))
+
+
+SCHEMA_SCHELETRO = """{
+  "titolo": "Titolo della lezione (dal documento)",
+  "sottotitolo": "Una frase che introduce il percorso",
+  "intro": "Narrazione di apertura, 2 frasi, tono naturale e parlato",
+  "outro": "Narrazione di conclusione, 2 frasi",
+  "citazione": "Una frase memorabile dal documento, breve",
+  "moduli": [
+    {
+      "titolo": "Titolo del modulo (max 60 caratteri)",
+      "testo": "2-3 frasi che spiegano il concetto chiave, fedeli al documento",
+      "punti": ["elenco puntato 1", "elenco puntato 2", "elenco puntato 3"],
+      "keywords": ["parola1", "parola2", "parola3"],
+      "narrazione": "1-2 frasi parlate per la slide del modulo"
+    }
+  ]
+}"""
+
+PROMPT_SCHELETRO = """Sei un esperto di instructional design. Trasforma il materiale qui sotto
+nella STRUTTURA di una lezione interattiva: titolo, testi e scaletta dei moduli.
+Le attività di verifica (quiz, vero/falso, flashcards…) NON servono adesso:
+vengono generate dopo, modulo per modulo. Regole:
+- Dividi il materiale in {nmin}-{nmax} moduli logici e coesi (mai meno di {nmin}).
+- RISPOSTA COMPATTA: "testo" max 2 frasi, "punti" max 3, "narrazione" 1-2 frasi.
+{regole}
+{profilo_istruzioni}
+- Sii fedele al documento: nessuna invenzione.
+- Rispondi SOLO con il JSON dello schema, nessun testo fuori dal JSON.
+
+SCHEMA JSON (esatto, rispetta i nomi dei campi):
+{schema}
+
+MATERIALE DIDATTICO:
+{testo}"""
+
+SCHEMA_MODULO = """{
+  "quiz_narrazione": "1 frase parlata che introduce il quiz",
+  "quiz": {
+    "domanda": "domanda a scelta multipla sul modulo",
+    "opzioni": [
+      {"testo": "risposta corretta", "corretta": true, "feedback": "perché è giusta"},
+      {"testo": "distrattore", "corretta": false, "feedback": "perché è sbagliata"}
+    ],
+    "ok": "feedback quando la risposta è corretta",
+    "ko": "feedback quando la risposta è errata"
+  },
+  "abbinamenti": [{"termine": "concetto", "definizione": "definizione corretta"}],
+  "vero_falso": [{"affermazione": "frase da giudicare Vero o Falso", "vero": true,
+                  "spiegazione": "perché è vero/falso, 1 frase"}],
+  "sequenza": {"istruzione": "Metti in ordine i passaggi di…",
+               "passi": ["passo 1", "passo 2", "passo 3"]},
+  "compila": [{"frase": "frase con una ___ al posto della parola chiave",
+               "risposta": "parola corretta", "aiuto": ["distrattore", "distrattore"]}],
+  "scenari": [{"situazione": "caso concreto breve da risolvere",
+               "opzioni": [{"testo": "azione più corretta", "corretta": true,
+                            "conseguenza": "cosa succede e perché"}],
+               "conclusione": "morale del caso, 1 frase"}],
+  "errori": [{"brano": "frase di 15-25 parole con UN errore concettuale",
+              "errore": "esatta parte sbagliata del brano",
+              "correzione": "versione corretta di quella parte",
+              "spiegazione": "perché è un errore, 1 frase"}],
+  "flashcards": [{"termine": "concetto chiave", "definizione": "spiegazione in max 15 parole"}]
+}"""
+
+PROMPT_ATTIVITA = """Sei un esperto di instructional design. Genera le ATTIVITÀ DI VERIFICA
+per UN SOLO modulo (il {indice} di {totale}) della lezione.
+
+MODULO:
+{modulo}
+{profilo_istruzioni}
+{regole}
+- Ogni attività deve riferirsi SOLO al contenuto del modulo qui sopra.
+- Rispondi SOLO con il JSON dello schema, nessun testo fuori dal JSON.
+
+SCHEMA JSON DELLE ATTIVITÀ (esatto, rispetta i nomi dei campi):
+{schema_modulo}
+
+MATERIALE DI RIFERIMENTO (solo per il lessico: non aggiungere contenuti nuovi):
+{contesto}"""
+
+
+def _llm_json(prompt, models, max_tokens=None, timeout=None):
+    """Chiama i modelli in catena finché una risposta è un JSON valido.
+
+    Salta le rotte già risultate non disponibili (cooldown del router: minuti)
+    e, dopo un errore di rete/HTTP, non ritenta la stessa rotta senza
+    response_format: raddoppierebbe l'attesa senza cambiare l'esito."""
+    ultimo = None
+    t0 = time.time()
+    attempt = 0
+    while time.time() - t0 < LLM_TOTAL_DEADLINE:
+        attempt += 1
+        for model in models:
+            if model in _LLM_MORTE:
+                continue
+            if time.time() - t0 > LLM_TOTAL_DEADLINE:
+                break
+            print(f"  LLM tentativo {attempt}: modello {model}…", flush=True)
+            payload = {"model": model, "temperature": 0.3,
+                       "max_tokens": max_tokens or LLM_MAX_TOKENS,
+                       "messages": [{"role": "system", "content": "Rispondi SOLO con JSON valido."},
+                                    {"role": "user", "content": prompt}]}
+            for use_rf in ((True, False) if attempt == 1 else (False,)):
+                p = dict(payload)
+                if use_rf:
+                    p["response_format"] = {"type": "json_object"}
+                t_req = time.time()
+                out = None
+                try:
+                    out = _llm_richiesta(p, timeout=timeout)
+                    content = _risposta_testo(out)
+                    if not content.strip():
+                        raise ValueError("risposta senza contenuto (content e reasoning vuoti)")
+                    try:
+                        return parse_json(content), model
+                    except ValueError:
+                        # tetto di token raggiunto: si recupera il recuperabile
+                        obj = _ripara_json(content)
+                        print("  JSON troncato: riparato e accettato", flush=True)
+                        return obj, model
+                except Exception as e:  # noqa: BLE001
+                    ultimo = e
+                    fin, tok = _dettagli_risposta(out) if out else (None, None)
+                    extra = f", finish={fin}" if fin else ""
+                    if tok:
+                        extra += f", tok={tok}"
+                    print(f"  scarto {model} in {time.time() - t_req:.0f}s{extra}: "
+                          f"{str(e)[:110]}", flush=True)
+                    if not isinstance(e, ValueError) and _rotta_morta(str(e)):
+                        _LLM_MORTE.add(model)
+                        print(f"  rotta {model} non disponibile: la salto nei tentativi successivi",
+                              flush=True)
+                        break
+                    if _errore_trasporto(str(e)) or not _is_retryable(str(e)):
+                        break
+        if _LLM_MORTE and len(_LLM_MORTE) >= len(models):
+            raise RuntimeError("tutte le rotte LLM non disponibili o in cooldown "
+                               f"({', '.join(sorted(_LLM_MORTE))}): {ultimo}")
+        if time.time() - t0 < LLM_TOTAL_DEADLINE:
+            _jitter_sleep(min(2 * attempt, 10))
+    raise RuntimeError(f"LLM non disponibile entro {LLM_TOTAL_DEADLINE}s: {ultimo}")
+
+
+def _llm_attivita_moduli(struct, testo, regole, profilo, models):
+    """Genera le attività modulo per modulo, in parallelo.
+
+    Una richiesta unica con tutti i moduli e tutte le attività supera il tetto
+    di token di molte rotte gratuite: il modello risponde troncato (o con un
+    solo modulo) e la risposta va buttata. Chiedendo le attività di UN modulo
+    per volta ogni risposta resta piccola e completa; le chiamate viaggiano in
+    parallelo, quindi il tempo complessivo non cresce. Se un modulo fallisce,
+    la lezione resta valida senza quelle attività."""
+    moduli = [m for m in struct.get("moduli", []) if isinstance(m, dict)]
+    if not moduli:
+        return
+    campi = ("quiz_narrazione", "quiz", "abbinamenti", "vero_falso", "sequenza",
+             "compila", "scenari", "errori", "flashcards")
+
+    def una(posizione, modulo):
+        prompt = PROMPT_ATTIVITA.format(
+            indice=posizione + 1, totale=len(moduli),
+            modulo=json.dumps({k: modulo.get(k) for k in ("titolo", "testo", "punti", "keywords")},
+                              ensure_ascii=False),
+            regole=regole, schema_modulo=SCHEMA_MODULO,
+            profilo_istruzioni=profilo_istruzioni(profilo), contesto=testo[:1500])
+        try:
+            att, _m = _llm_json(prompt, models, max_tokens=min(LLM_MAX_TOKENS, 4000))
+        except Exception as e:  # noqa: BLE001
+            print(f"  attività modulo {posizione + 1} non generate: {str(e)[:80]}", flush=True)
+            return
+        for campo in campi:
+            if att.get(campo) not in (None, [], ""):
+                modulo[campo] = att[campo]
+
+    with ThreadPoolExecutor(max_workers=LLM_PARALLEL) as pool:
+        list(pool.map(lambda p: una(*p), list(enumerate(moduli))))
+    print(f"  attività per {len(moduli)} moduli "
+          f"(quiz: {sum(1 for m in moduli if m.get('quiz'))})", flush=True)
 
 
 def llm_structure(ext, use_cache=True, profilo=None):
@@ -320,75 +709,51 @@ def llm_structure(ext, use_cache=True, profilo=None):
     print(f"  profilo: {((profilo or {}).get('durata', '?'))}/"
           f"{((profilo or {}).get('livello', '?'))}/"
           f"{((profilo or {}).get('obiettivo', '?'))} -> moduli {nmin}-{nmax}", flush=True)
-    prompt = PROMPT_TMPL.format(nmin=nmin, nmax=nmax, regole=regole,
-                                profilo_istruzioni=profilo_istruzioni(profilo),
-                                schema=SCHEMA, testo=testo)
+    catena = CONFIG.get("llm_modelli_fallback")
+    if not isinstance(catena, list) or not catena:
+        catena = ["groq/openai/gpt-oss-120b", "comboact"]
     models = []
-    for m in (LLM_MODEL or pick_model(), "comboact", "openrouter/openrouter/free"):
+    for m in [LLM_MODEL or pick_model(), *catena]:
         if m and m not in models:
             models.append(m)
-    last = None
-    t0 = time.time()
-    attempt = 0
-    while time.time() - t0 < LLM_TOTAL_DEADLINE:
-        attempt += 1
-        for model in models:
-            if time.time() - t0 > LLM_TOTAL_DEADLINE:
-                break
-            print(f"  LLM tentativo {attempt}: modello {model}…", flush=True)
-            payload = {
-                "model": model, "temperature": 0.3, "max_tokens": 8000,
-                "messages": [
-                    {"role": "system", "content": "Rispondi SOLO con JSON valido."},
-                    {"role": "user", "content": prompt},
-                ],
-            }
-            # primo giro con response_format json_object, poi senza (compatibilità)
-            for use_rf in ((True, False) if attempt == 1 else (False,)):
-                p = dict(payload)
-                if use_rf:
-                    p["response_format"] = {"type": "json_object"}
-                try:
-                    headers = {"Content-Type": "application/json"}
-                    if LLM_API_KEY:
-                        headers["Authorization"] = f"Bearer {LLM_API_KEY}"
-                    req = urllib.request.Request(
-                        f"{LLM_URL}/chat/completions",
-                        data=json.dumps(p).encode("utf-8"),
-                        headers=headers)
-                    with urllib.request.urlopen(req, timeout=LLM_REQUEST_TIMEOUT) as r:
-                        out = _extract_api_body(r.read().decode("utf-8"))
-                    content = out["choices"][0]["message"]["content"]
-                    struct = parse_json(content)
-                    struct.setdefault("moduli", [])
-                    if not struct.get("titolo"):
-                        struct["titolo"] = ext["title"]
-                    _check_struct(struct)
-                    nm = len(struct.get("moduli", []))
-                    if nm < nmin and nm > 0:
-                        try:
-                            struct = _complete_modules(testo, struct, nmin, profilo)
-                            nm = len(struct.get("moduli", []))
-                        except Exception:
-                            pass
-                    if nm < nmin or nm > nmax + 1:
-                        raise ValueError(f"moduli insufficienti: {nm} < {nmin} richiesti (o > {nmax}) — risposta scartata")
-                    if nm < MIN_MODULI and len(testo) >= 3500:
-                        raise ValueError(f"moduli {nm} < MIN_MODULI {MIN_MODULI} su materiale lungo — scarto")
-                    if key:
-                        _llm_cache_put(key, struct)
-                    return struct, "llm"
-                except Exception as e:  # noqa: BLE001
-                    last = e
-                    msg = str(e)[:100]
-                    print(f"  scarto risposta {model}: {msg}", flush=True)
-                    if not _is_retryable(str(e)):
-                        print(f"  errore non retryable su {model}, passo oltre", flush=True)
-                        continue
-            # backoff con jitter tra round completi (evita hammering su 429/5xx)
-            if time.time() - t0 < LLM_TOTAL_DEADLINE:
-                _jitter_sleep(min(2 * attempt, 10))
-    raise RuntimeError(f"LLM non disponibile entro {LLM_TOTAL_DEADLINE}s: {last}")
+    _LLM_MORTE.clear()
+    if LLM_MODO == "unica":
+        # una sola richiesta con tutte le attività: regge solo con modelli che
+        # completano output lunghi (le rotte gratuite spesso li troncano)
+        prompt = PROMPT_TMPL.format(nmin=nmin, nmax=nmax, regole=regole,
+                                    profilo_istruzioni=profilo_istruzioni(profilo),
+                                    schema=SCHEMA, testo=testo)
+    else:
+        # PRIMA FASE: scheletro (titolo, testi, scaletta dei moduli). Richiesta
+        # piccola: anche le rotte con tetto di token basso la completano.
+        prompt = PROMPT_SCHELETRO.format(nmin=nmin, nmax=nmax, regole=regole,
+                                         profilo_istruzioni=profilo_istruzioni(profilo),
+                                         schema=SCHEMA_SCHELETRO, testo=testo)
+    struct, modello = _llm_json(prompt, models)
+    struct.setdefault("moduli", [])
+    if not struct.get("titolo"):
+        struct["titolo"] = ext["title"]
+    _check_struct(struct)
+    nm = len(struct.get("moduli", []))
+    if nm < nmin:
+        try:
+            struct = _complete_modules(testo, struct, nmin, profilo)
+            nm = len(struct.get("moduli", []))
+        except Exception:  # noqa: BLE001
+            pass
+    # L'autorità è il range del PROFILO richiesto: il minimo globale
+    # (config num_moduli_min) vale per il profilo standard ma NON deve
+    # scartare una risposta conforme a "breve" (3-4 moduli) o "approfondita".
+    if not _accetta_moduli(nm, nmin, nmax):
+        raise RuntimeError(f"struttura scartata: {nm} moduli (ne servono {nmin}-{nmax})")
+    print(f"  struttura da {modello}: {nm} moduli", flush=True)
+    if LLM_MODO != "unica":
+        # SECONDA FASE: attività di verifica, un modulo per chiamata (in parallelo)
+        _llm_attivita_moduli(struct, testo, regole, profilo, models)
+        _check_struct(struct)
+    if key:
+        _llm_cache_put(key, struct)
+    return struct, "llm"
 
 
 def _norm_opts(raw, maxn=4):
@@ -1506,22 +1871,18 @@ def _complete_modules(testo, struct, nmin, profilo):
         "vero_falso/sequenza/compila/scenari/errori/flashcards). "
         "Rispondi SOLO con un JSON {\"moduli\": [...]}.\n\nMATERIALE:\n{testo}"
     ).format(need=need, testo=testo[:FLATTEN_LIMIT])
-    headers = {"Content-Type": "application/json"}
-    if LLM_API_KEY:
-        headers["Authorization"] = f"Bearer {LLM_API_KEY}"
     for model in ([LLM_MODEL or pick_model(), "comboact"]):
         if not model:
             continue
         try:
-            req = urllib.request.Request(
-                f"{LLM_URL}/chat/completions",
-                data=json.dumps({"model": model, "temperature": 0.3,
-                                 "max_tokens": 4000,
-                                 "messages": [{"role": "user", "content": mini_prompt}]}).encode(),
-                headers=headers)
-            with urllib.request.urlopen(req, timeout=LLM_REQUEST_TIMEOUT) as r:
-                out = _extract_api_body(r.read().decode("utf-8"))
-            add = parse_json(out["choices"][0]["message"]["content"])
+            out = _llm_richiesta({"model": model, "temperature": 0.3,
+                                  "max_tokens": LLM_MAX_TOKENS,
+                                  "messages": [{"role": "user", "content": mini_prompt}]})
+            testo_risposta = _risposta_testo(out)
+            try:
+                add = parse_json(testo_risposta)
+            except ValueError:
+                add = _ripara_json(testo_risposta)
             for m in add.get("moduli", [])[:need]:
                 if isinstance(m, dict) and m.get("titolo"):
                     struct.setdefault("moduli", []).append(m)

@@ -61,10 +61,81 @@ def is_youtube(url):
                     "www.youtube-nocookie.com")
 
 
+# Un PDF con encoding a due byte può arrivare con un byte di riempimento fra i
+# caratteri ("\x00l\x00a" invece di "la"), e in generale il testo estratto può
+# contenere caratteri di controllo: in LLM e nella voce si sentirebbero come
+# pause e parole spezzate, e il titolo diventerebbe un residuo ("\x00È").
+_CONTROLLI = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _resa_testo(s):
+    """Quanto un testo "sembra" prosa: lettere/segni in proporzione, NUL esclusi."""
+    if not s:
+        return -1.0
+    buoni = sum(1 for c in s if c.isalnum() or c in " \n\t.,;:!?'\"()-")
+    return buoni / len(s)
+
+
+def _senza_nul(text):
+    """Toglie i NUL; se il risultato resta illeggibile (due byte per carattere,
+    es. UTF-16 decodificato byte per byte) prova a ricomporre il testo."""
+    base = text.replace("\x00", "")
+    if _resa_testo(base) >= 0.6:
+        return base
+    try:
+        grezzo = text.encode("latin-1", errors="ignore")
+    except UnicodeEncodeError:
+        return base
+    candidati = [base]
+    for codec in ("utf-16-le", "utf-16-be"):
+        try:
+            candidati.append(grezzo.decode(codec, errors="ignore"))
+        except Exception:  # noqa: BLE001
+            pass
+    return max(candidati, key=_resa_testo)
+
+
+def _ripara_testo(text):
+    """Ripulisce il testo di una fonte: via i byte di riempimento e i caratteri
+    di controllo, spazi e righe ripetute normalizzati."""
+    if not text:
+        return text
+    if "\x00" in text:
+        text = _senza_nul(text)
+    text = _CONTROLLI.sub("", text)
+    text = re.sub(r"[ \t]{2,}", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip("\n")
+
+
+def _pulisci_estratto(ext):
+    """Applica la pulizia a titolo, intestazioni e paragrafi di una fonte."""
+    if not isinstance(ext, dict):
+        return ext
+    titolo = _ripara_testo(ext.get("title") or "")
+    ext["title"] = titolo or ext.get("title")
+    sezioni = []
+    for s in ext.get("sections") or []:
+        if not isinstance(s, dict):
+            continue
+        if s.get("heading"):
+            s["heading"] = _ripara_testo(str(s["heading"])) or None
+        s["paras"] = [p for p in (_ripara_testo(str(p)) for p in (s.get("paras") or [])) if p]
+        if s["paras"] or s.get("heading"):
+            sezioni.append(s)
+    ext["sections"] = sezioni
+    return ext
+
+
 def _split_into_sections(text, title=None):
     """Trasforma testo piatto in sezioni: intestazioni brevi (non frasi)
     diventano heading, il resto paragrafi."""
-    title = title or (text.strip().splitlines()[0].strip()[:80] if text.strip() else "Materiale")
+    text = _ripara_testo(text)
+    if not title:
+        righe = [r.strip() for r in (text or "").splitlines() if r.strip()]
+        # capita che la prima riga sia un residuo di estrazione (es. "È"): il
+        # titolo si prende dalla prima riga sensata
+        title = next((r for r in righe if len(r) >= 12), righe[0] if righe else "Materiale")[:80]
     sections = []
     cur = {"heading": None, "paras": []}
     head_re = re.compile(r"^\d+[\.\)]\s*|^(?:capitolo|sezione|modulo|lezione|parte)\b",

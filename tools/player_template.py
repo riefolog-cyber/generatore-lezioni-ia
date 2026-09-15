@@ -877,7 +877,18 @@ if (!slides.length) {
     + '🔄 Ricarica la pagina</button></div>';
   throw new Error('lesson-data.js vuoto o non valido');
 }
-const DATA_KEY = 'lesson-' + (data.titolo || 'lezione');
+// Impronta del contenuto DENTRO la chiave di ripresa: se la lezione viene
+// rigenerata (stesso titolo, slide diverse) la posizione salvata della
+// versione precedente non deve essere riapplicata — altrimenti il player
+// riparte da metà percorso e la prima pagina "non si vede".
+function _fingerprint(s2) {
+  let hh = 5381;
+  for (let j = 0; j < s2.length; j++) hh = ((hh << 5) + hh + s2.charCodeAt(j)) | 0;
+  return (hh >>> 0).toString(36);
+}
+const DATA_KEY = 'lesson-' + (data.titolo || 'lezione') + '-'
+  + slides.length + 's-'
+  + _fingerprint(slides.map(s2 => s2.narration || '').join('|'));
 // nome dello studente per il report del docente (una sola volta, poi salvato)
 let studentName = '';
 try { studentName = localStorage.getItem(DATA_KEY + '-nome') || ''; } catch (e) {}
@@ -2082,7 +2093,15 @@ if (_btnRestart) _btnRestart.onclick = () => {
 const _btnRate = _safe('btnRate');
 if (_btnRate) _btnRate.onclick = () => {
   const rates = [0.8, 1, 1.25, 1.5];
-  const ri = rates.indexOf(audio.playbackRate);
+  // la velocità può arrivare anche da fuori: un'estensione del browser (es.
+  // "Global Speed") o una scorciatoia possono imporre un valore non in lista,
+  // e indexOf darebbe -1 (il ciclo ripartirebbe sempre dalla prima voce). Si
+  // aggancia quindi il valore corrente e si passa al successivo disponibile.
+  const cur = audio.playbackRate;
+  let ri = -1;
+  for (let k = 0; k < rates.length; k++) {
+    if (rates[k] <= cur + 0.01) ri = k;
+  }
   rate = rates[(ri + 1) % rates.length] || 1;
   audio.playbackRate = rate;
   _btnRate.textContent = rate + '×';
@@ -2370,6 +2389,28 @@ document.addEventListener('keydown', e => {
   }
 });
 render(cur);   // parte dalla posizione salvata (riprendi da dove eri)
+if (cur > 0) {
+  // Ripresa a metà percorso: avviso chiaro e revocabile, così la prima
+  // pagina resta sempre raggiungibile con un clic (e non sembra "sparita").
+  const rip = document.createElement('div');
+  rip.style.cssText = 'position:fixed;bottom:74px;left:50%;transform:translateX(-50%);'
+    + 'z-index:60;background:#1d2b45;color:#eaf1ff;border:1px solid #3a4c6b;'
+    + 'border-radius:10px;padding:10px 14px;font-size:14px;display:flex;gap:10px;'
+    + 'align-items:center;box-shadow:0 6px 20px rgba(0,0,0,.35)';
+  const lbl = document.createElement('span');
+  lbl.textContent = '⏵ Ripresa dalla slide ' + (cur + 1) + ' di ' + slides.length;
+  const daCapo = document.createElement('button');
+  daCapo.className = 'primary';
+  daCapo.textContent = '⏮ Ricomincia dall\'inizio';
+  daCapo.onclick = () => { go(0); rip.remove(); };
+  const chiudi = document.createElement('button');
+  chiudi.textContent = '✕';
+  chiudi.setAttribute('aria-label', 'Chiudi avviso di ripresa');
+  chiudi.onclick = () => rip.remove();
+  rip.appendChild(lbl); rip.appendChild(daCapo); rip.appendChild(chiudi);
+  document.body.appendChild(rip);
+  setTimeout(() => { if (rip.parentNode) rip.remove(); }, 10000);
+}
 """
 
 

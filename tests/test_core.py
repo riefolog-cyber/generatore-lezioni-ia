@@ -11,9 +11,10 @@ sys.path.insert(0, str(BASE / "tools"))
 sys.path.insert(0, str(BASE))
 
 import new_lesson  # noqa: E402
-from new_lesson import (_check_struct, _norm_opts, _regole_adattive,  # noqa: E402
-                        _tts_text, _weighted_words, build_slides,
-                        fallback_structure, parse_json, sanitize_stem)
+from new_lesson import (_accetta_moduli, _check_struct, _norm_opts,  # noqa: E402
+                        _regole_adattive, _tts_text, _weighted_words,
+                        build_slides, fallback_structure, parse_json,
+                        profilo_moduli, sanitize_stem)
 from sources import (SUPPORTED_EXT, is_url, is_youtube,  # noqa: E402
                      extract_source, parse_html)
 
@@ -22,6 +23,40 @@ from sources import (SUPPORTED_EXT, is_url, is_youtube,  # noqa: E402
 def test_tts_abbreviazioni():
     t = _tts_text("Vedi es. l'art. 5, pag. 3.")
     assert "esempio" in t and "articolo" in t and "pagina" in t
+
+
+# ------------------------------------------------------- _accetta_moduli (profilo)
+def test_accetta_moduli_profilo_breve():
+    """Regressione: con profilo "breve" (3-4 moduli) una risposta da 3 moduli
+    è CORRETTA e non deve essere scartata dal minimo globale (num_moduli_min).
+    Prima del fix la build finiva nel fallback degradata (3 slide, 0 quiz)."""
+    nmin, nmax = profilo_moduli({"durata": "breve"})
+    assert (nmin, nmax) == (3, 4)
+    assert _accetta_moduli(3, nmin, nmax) is True      # il caso delle 17:28
+    assert _accetta_moduli(4, nmin, nmax) is True
+    assert _accetta_moduli(5, nmin, nmax) is True      # tolleranza +1
+    assert _accetta_moduli(2, nmin, nmax) is False     # troppo pochi
+    assert _accetta_moduli(6, nmin, nmax) is False     # troppi
+    # profilo standard: il range resta quello di config
+    nmin_s, nmax_s = profilo_moduli(None)
+    assert _accetta_moduli(nmin_s, nmin_s, nmax_s) is True
+    assert _accetta_moduli(nmin_s - 1, nmin_s, nmax_s) is False
+
+
+def test_accetta_moduli_valori_anomali():
+    assert _accetta_moduli(None, 3, 4) is False
+    assert _accetta_moduli(3, None, 4) is False
+
+
+# ---------------------------------------------------------------- player ripresa
+def test_player_chiave_ripresa_con_impronta():
+    """Il main.js del player deve calcolare DATA_KEY con l'impronta del
+    contenuto (n° slide + narrazioni): una lezione rigenerata non deve
+    riapplicare la posizione salvata della versione precedente."""
+    src = (BASE / "tools" / "player_template.py").read_text(encoding="utf-8")
+    assert "_fingerprint" in src
+    assert "slides.length + 's-'" in src
+
 
 
 def test_tts_simboli():
@@ -41,6 +76,70 @@ def test_parse_json_con_fence():
 
 def test_parse_json_con_testo_attorno():
     assert parse_json('Ecco: {"a": [1, 2]} fine') == {"a": [1, 2]}
+
+
+# ------------------------------------------- LLM: streaming, reasoning, troncamento
+def test_extract_api_body_accumula_i_delta_streaming():
+    body = ('data: {"choices":[{"delta":{"content":"{\\"a\\": 1"}}]}\n\n'
+            'data: {"choices":[{"delta":{"content":", \\"b\\": 2}"}}]}\n\n'
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'
+            '"usage":{"completion_tokens":7}}\n\n'
+            'data: [DONE]\n')
+    out = new_lesson._extract_api_body(body)
+    assert new_lesson._risposta_testo(out) == '{"a": 1, "b": 2}'
+    assert new_lesson._dettagli_risposta(out) == ("stop", 7)
+
+
+def test_extract_api_body_json_con_coda_streaming():
+    body = ('{"choices":[{"message":{"content":"{\\"ok\\":true}"},'
+            '"finish_reason":"stop"}]}\n'
+            'data: {"choices":[{"delta":{"content":"ignorami"}}]}\n')
+    out = new_lesson._extract_api_body(body)
+    assert new_lesson._risposta_testo(out) == '{"ok":true}'
+
+
+def test_extract_api_body_vuoto_solleva():
+    for body in ("", "   ", "data: [DONE]\n"):
+        try:
+            new_lesson._extract_api_body(body)
+        except ValueError:
+            continue
+        raise AssertionError(f"atteso ValueError per body={body!r}")
+
+
+def test_risposta_testo_usa_reasoning_se_content_e_vuoto():
+    out = {"choices": [{"message": {"content": "", "reasoning": '{"moduli":[{"titolo":"A"}]}'}}]}
+    assert new_lesson._risposta_testo(out).startswith('{"moduli"')
+
+
+def test_ripara_json_troncato_tiene_i_moduli_completi():
+    troncato = '{"titolo":"T","moduli":[{"titolo":"A","quiz":null},{"titolo":"B","te'
+    obj = new_lesson._ripara_json(troncato)
+    assert obj["titolo"] == "T"
+    assert [m["titolo"] for m in obj["moduli"]] == ["A"]
+
+
+def test_ripara_json_troncato_dentro_una_stringa():
+    troncato = '{"moduli":[{"titolo":"A"},{"titolo":"B","testo":"frase interro'
+    obj = new_lesson._ripara_json(troncato)
+    assert [m["titolo"] for m in obj["moduli"]] == ["A"]
+
+
+def test_ripara_json_lascia_intatto_un_json_valido():
+    valido = '{"titolo":"T","moduli":[{"titolo":"A"}]}'
+    assert new_lesson._ripara_json(valido)["moduli"] == [{"titolo": "A"}]
+
+
+def test_rotta_morta_e_errore_trasporto_classificano_i_guasti():
+    # rotta in cooldown/quota: inutile ritentarla
+    assert new_lesson._rotta_morta("HTTP Error 503: Service Unavailable")
+    assert new_lesson._rotta_morta("HTTP Error 404: The model `x` does not exist")
+    assert new_lesson._rotta_morta("Rate limit exceeded")
+    # errore di rete: ritentare senza response_format non cambia nulla
+    assert new_lesson._errore_trasporto("timed out")
+    assert new_lesson._errore_trasporto("<urlopen error [WinError 10061]>")
+    # risposta scartata per contenuto: non è un problema di rotta
+    assert not new_lesson._rotta_morta("moduli insufficienti: 1 < 6 richiesti")
 
 
 # ---------------------------------------------------------------- sanitize_stem

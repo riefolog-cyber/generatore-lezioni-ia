@@ -49,6 +49,27 @@ DEFAULT_PORT = int(CONFIG.get("porta", 8341))
 MAX_UPLOAD_MB = 100        # limite per i file caricati dal pannello
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
+# Il pannello importa new_lesson UNA volta: i moduli restano in memoria anche
+# se i file cambiano su disco (es. aggiornamenti del codice). Se uno dei file
+# della pipeline cambia dopo l'avvio, il codice caricato è "stantio": /api/state
+# lo segnala e l'interfaccia mostra l'avviso di riavvio, così una generazione
+# non parte mai silenziosamente con il codice vecchio.
+_PIPELINE_FILES = ("new_lesson.py", Path("tools") / "sources.py",
+                   Path("tools") / "common.py", Path("tools") / "player_template.py")
+
+
+def _pipeline_mtime():
+    tot = 0.0
+    for rel in _PIPELINE_FILES:
+        try:
+            tot += (BASE / rel).stat().st_mtime
+        except OSError:
+            pass
+    return tot
+
+
+_PIPELINE_MTIME_START = _pipeline_mtime()
+
 # ------------------------------------------------------------------ job runner
 LOG = collections.deque(maxlen=500)
 JOB = {"running": False, "kind": None, "source": None, "error": None,
@@ -312,6 +333,7 @@ def _state():
         "deps": _deps(),
         "lan_ip": lan_ip(),
         "port": DEFAULT_PORT,
+        "pipeline_stantia": _pipeline_mtime() != _PIPELINE_MTIME_START,
         "config": {k: CONFIG.get(k) for k in
                    ("theme", "voice", "edge_voice", "edge_rate",
                     "llm_model", "num_moduli_min", "num_moduli_max",
@@ -1085,6 +1107,12 @@ transition:border-color .2s,background .2s}
 <div class="wrap">
   <h1>🎛 Pannello di controllo — Generatore lezioni</h1>
   <div class="sub" id="statusline">…</div>
+  <div id="stale" style="display:none;margin:10px 0;padding:10px 14px;border:1px solid #ffb020;
+       background:#2a2205;color:#ffd27a;border-radius:8px;font-size:14px">
+    ⚠ <b>Il codice di generazione è cambiato</b> da quando il pannello è stato avviato:
+    le generazioni userebbero il codice vecchio. Chiudi il pannello e riavvialo
+    (<b>AVVIA.bat</b>) per attivare gli aggiornamenti.
+  </div>
 
   <div class="card">
     <h2>Ambiente</h2>
@@ -1258,6 +1286,7 @@ function depChips(d) {
 async function refresh() {
   try {
     const s = await api('state');
+    if (s.pipeline_stantia) $('#stale').style.display = 'block';
     $('#statusline').innerHTML =
       `Porta ${esc(s.port)} · server locale` + (s.lan_ip ? ` · da tablet/telefono: <span id="lan">http://${esc(s.lan_ip)}:${esc(s.port)}/</span>` : '');
     $('#deps').innerHTML = depChips(s.deps);

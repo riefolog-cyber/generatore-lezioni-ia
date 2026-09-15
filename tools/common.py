@@ -22,6 +22,13 @@ DEFAULT_CONFIG = {
     "llm_url": "http://localhost:20128/v1",
     "llm_model": "comboact",
     "llm_api_key": "",
+    # catena di riserva se il modello principale è in cooldown/quota esaurita
+    "llm_modelli_fallback": ["groq/openai/gpt-oss-120b", "comboact"],
+    "llm_max_tokens": 8000,
+    "llm_timeout": 120,
+    "llm_deadline": 240,
+    "llm_modo": "due_fasi",
+    "llm_parallel": 4,
     "voice": "it_IT-serena-high",
     "edge_voice": "it-IT-GiuseppeMultilingualNeural",
     "edge_rate": "-4%",

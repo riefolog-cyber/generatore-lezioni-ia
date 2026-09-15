@@ -74,7 +74,10 @@ Dipendenze opzionali per PDF e YouTube: `pip install -r requirements-extra.txt`.
   mostra medaglia/stelle/confetti con riepilogo del percorso, una **Sfida
   lampo** (5 domande miste pescate dalla lezione) e il pulsante "Rigioca".
   **Riprendi da dove eri**: riaprendo la lezione si riparte dalla slide
-  salvata. **Segnalibri "da rivedere"** (tasto S): il dot della slide riceve
+  salvata — ma solo della STESSA versione della lezione: se la lezione viene
+  rigenerata (slide diverse) si riparte sempre dalla prima pagina, e se si
+  riprende a metà percorso compare un avviso con "⏮ Ricomincia dall'inizio".
+  **Segnalibri "da rivedere"** (tasto S): il dot della slide riceve
   un segnalino 🔖 persistente. **Ricerca nella lezione** (tasto F o 🔍):
   salta subito alla slide che contiene il testo cercato. Guida completa
   delle scorciatoie con il tasto **?**. Transizioni animate avanti/indietro.
@@ -124,7 +127,9 @@ check_env.py         controllo ambiente
 config.json          llm_url, llm_model, llm_api_key (opzionale), voice,
                       edge_voice, edge_rate, audio_bitrate, theme,
                       num_moduli_min/max, porta, cache_max_mb,
-                      tts_workers, tts_retries, profilo_durata/livello/obiettivo
+                      tts_workers, tts_retries, profilo_durata/livello/obiettivo,
+                      llm_modo (due_fasi|unica), llm_modelli_fallback,
+                      llm_max_tokens, llm_timeout, llm_deadline, llm_parallel
 generatore-lezioni-mappa.html   mappa interattiva del sistema (Archify):
                      apri nel browser per esplorare componenti e percorsi
 generatore-lezioni-mappa.json   sorgente dell'IR per rigenerare la mappa
@@ -142,6 +147,19 @@ assets/voice/        modello Piper + cache audio
 
 - **9router** viene avviato da solo se non è attivo; senza di lui la lezione
   esce in modalità ridotta (banner BOZZA, senza quiz).
+- **LLM in due fasi** (default `llm_modo: "due_fasi"`): prima la struttura
+  (titolo, testi e scaletta dei moduli), poi le attività **modulo per modulo in
+  parallelo** (`llm_parallel`, default 4). Chiedere tutto in una richiesta sola
+  supera il tetto di token delle rotte gratuite: il modello risponde troncato (o
+  con un solo modulo) e la risposta va buttata — è il caso che faceva finire la
+  fase LLM in timeout con una lezione degradata. Con `"unica"` si torna alla
+  richiesta singola (schema completo), utile solo con modelli che completano
+  output lunghi.
+- **Client LLM tollerante**: legge anche le risposte in streaming (chunk
+  `data:`), usa il campo `reasoning` quando `content` è vuoto (modelli
+  reasoning come gpt-oss), ripara un JSON tagliato a metà conservando i moduli
+  completi. Le rotte in cooldown/quota (503/404/429) vengono marcate e saltate
+  per il resto della build, senza aspettare `llm_deadline` (default 240 s) a vuoto.
 - **Anti-concorrenza**: un blocco (`.generazione.lock`) evita che watch, GUI e
   riga di comando generino due lezioni insieme; un blocco "vecchio" (oltre 30
   minuti) viene considerato abbandonato e sostituito.
