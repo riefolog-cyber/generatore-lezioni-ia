@@ -108,6 +108,22 @@ def _history_append(kind, source, ok, secs):
         pass
 
 
+def _history_clear():
+    """Svuota la cronologia generazioni (pulsante nel pannello)."""
+    try:
+        HISTORY_FILE.write_text("[]", encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _classifica_reset():
+    """Azzera la classifica di classe (pulsante nel pannello)."""
+    try:
+        CLASSIFICA_FILE.write_text("[]", encoding="utf-8")
+    except OSError:
+        pass
+
+
 class _UploadTooBig(Exception):
     """File caricato dal pannello oltre il limite (risponde HTTP 413)."""
 
@@ -1096,6 +1112,12 @@ class PanelHandler(_RangeHandler):
                 self._tts_preview()
             except Exception as e:  # noqa: BLE001
                 self._json({"ok": False, "error": str(e)}, 400)
+        elif parsed.path == "/api/clear_history":
+            _history_clear()
+            self._json({"ok": True})
+        elif parsed.path == "/api/reset_classifica":
+            _classifica_reset()
+            self._json({"ok": True})
         else:
             self.send_error(404, "API sconosciuta")
 
@@ -1330,6 +1352,7 @@ transition:border-color .2s,background .2s}
       <select id="claSel" onchange="loadClassifica()" style="flex:1;background:#0d1220;border:1px solid var(--line);color:var(--txt);border-radius:9px;padding:9px"></select>
       <button class="mini ghost" onclick="loadClassifica()" type="button">🔄 Aggiorna</button>
       <button class="mini ghost" onclick="exportClassifica()" type="button">⬇ CSV</button>
+      <button class="mini ghost" onclick="resetClassifica()" type="button" title="Azzera tutta la classifica di classe">🗑 Svuota</button>
     </div>
     <div class="urlrow" style="margin-top:8px">
       <input id="claAddName" placeholder="Nome studente (per aggiungere a mano un risultato)">
@@ -1378,7 +1401,8 @@ transition:border-color .2s,background .2s}
         <div class="upmsg" style="font-size:12px">Gli studenti vedono solo l'indice delle lezioni, non questo pannello.</div>
       </div>
     </div>
-    <h2 style="margin-top:14px">Cronologia generazioni</h2>
+    <h2 style="margin-top:14px">Cronologia generazioni
+      <button class="mini ghost" onclick="clearHistory()" type="button" title="Cancella la cronologia generazioni">🗑 Svuota</button></h2>
     <div id="hist" style="margin-top:8px;font-size:12px;color:var(--mut)"><div>Nessun job ancora.</div></div>
   </div>
 </div>
@@ -1446,6 +1470,12 @@ function exportClassifica() {
   a.href = '/api/classifica_export?lesson=' + encodeURIComponent(lesson);
   a.download = 'classifica-' + lesson.replace(/_lesson$/, '') + '.csv';
   document.body.appendChild(a); a.click(); a.remove();
+}
+async function resetClassifica() {
+  if (!confirm('Azzerare TUTTA la classifica di classe? I risultati degli studenti andranno persi.')) return;
+  const r = await fetch('/api/reset_classifica', { method: 'POST' });
+  if (!r.ok) { alert('Svuotamento fallito.'); return; }
+  loadClassifica();
 }
 async function addManuale() {
   const lesson = $('#claSel').value;
@@ -1605,6 +1635,11 @@ async function refreshProg() {
     const p = await api('progress');
     if (p && p.pct) $('#progTxt').textContent = 'Fase: ' + (p.fase || '') + ' — ' + p.pct + '% ' + (p.extra || '');
   } catch (e) { /* ignora */ }
+}
+async function clearHistory() {
+  if (!confirm('Cancellare la cronologia generazioni?')) return;
+  await fetch('/api/clear_history', { method: 'POST' });
+  loadLan();
 }
 setInterval(() => { if (busy) refreshProg(); }, 2000);
 

@@ -339,3 +339,17 @@ def test_classifica_add_and_view(tmp_path, monkeypatch):
     assert [r["studente"] for r in by["X_lesson"]] == ["Alice", "Bob"]
     assert by["X_lesson"][0]["punti"] == 9
     assert len(by["Y_lesson"]) == 1
+
+
+def test_classifica_reset_and_history_clear(tmp_path, monkeypatch):
+    import panel
+    monkeypatch.setattr(panel, "CLASSIFICA_FILE", tmp_path / "classifica.json")
+    monkeypatch.setattr(panel, "HISTORY_FILE", tmp_path / "job_history.json")
+    panel._classifica_add("X_lesson", "Alice", 8, 10, True, 4)
+    panel._history_append("generazione", "prova", True, 1.5)
+    assert panel._classifica_view()["classifiche"]
+    panel._classifica_reset()
+    panel._history_clear()
+    assert panel._classifica_view() == {"classifiche": []}
+    import json as _j
+    assert _j.loads((tmp_path / "job_history.json").read_text(encoding="utf-8")) == []
