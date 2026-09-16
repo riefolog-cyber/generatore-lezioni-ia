@@ -46,6 +46,10 @@ DEFAULT_CONFIG = {
     "profilo_durata": "standard",
     "profilo_livello": "intermedio",
     "profilo_obiettivo": "comprensione",
+    # IP fisso mostrato come indirizzo LAN in classe (es. "192.168.0.2"):
+    # utile con router senza internet, dove l'auto-rilevamento fallisce.
+    # Vuoto = rilevamento automatico.
+    "lan_ip_fisso": "",
 }
 
 PROFILO_DURATE = ("breve", "standard", "approfondita")

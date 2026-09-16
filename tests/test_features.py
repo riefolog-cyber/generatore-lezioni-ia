@@ -311,6 +311,22 @@ def test_player_contains_new_features(tmp_path):
     assert "reportProgress" in js
 
 
+def test_player_lesson_dir_is_valid_js(tmp_path):
+    """Regressione: lo script inline window.LESSON_DIR non deve contenere
+    entità HTML (&quot;/&amp;): dentro <script> le entità NON vengono
+    decodificate e il browser solleva `Uncaught SyntaxError:
+    Unexpected token '&'` (visto come about:srcdoc)."""
+    from player_template import write_player
+    out = tmp_path / "La_Repubblica_14_Settembre_2026_lesson"
+    out.mkdir()
+    write_player(out, "Prova & Titolo con 'apostrofo'")
+    html = (out / "index.html").read_text(encoding="utf-8")
+    line = next(l for l in html.splitlines() if "LESSON_DIR" in l)
+    assert "&quot;" not in line and "&amp;" not in line and "&#x27;" not in line
+    assert line.strip() == \
+        '<script>window.LESSON_DIR = "La_Repubblica_14_Settembre_2026_lesson";</script>'
+
+
 def test_classifica_add_and_view(tmp_path, monkeypatch):
     import panel
     monkeypatch.setattr(panel, "CLASSIFICA_FILE", tmp_path / "classifica.json")

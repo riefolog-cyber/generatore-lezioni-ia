@@ -307,6 +307,14 @@ def cancel_queue():
 
 # ------------------------------------------------------------------ helpers
 def lan_ip():
+    # IP fisso da config (rete di classe senza internet: l'auto-rilevamento
+    # via 8.8.8.8 fallisce e mostrerebbe "LAN non disponibile").
+    try:
+        fisso = str(CONFIG.get("lan_ip_fisso") or "").strip()
+        if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", fisso):
+            return fisso
+    except Exception:
+        pass
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))

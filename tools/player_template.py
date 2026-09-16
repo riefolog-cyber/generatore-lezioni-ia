@@ -998,7 +998,8 @@ function logAnswer(slideIdx, tipo, esito) {
              tempo: Math.round((now - (lastAnswerAt || slideEnteredAt)) / 1000) });
   lastAnswerAt = now;
 }
-let animDir = 'init', autoNext = false, celebrated = false, rate = 1;
+let animDir = 'init', celebrated = false;
+const rate = 1;   // velocità fissa: il selettore 1× è stato rimosso
 var RIPASSO = [], RIPASSO_POS = 0;   // percorso di ripasso sulle slide segnalate 🔖
 let lastSlideTime = null;            // per il tempo per slide del report docente
 const slideTimes = {};               // slide (0-based) -> ms trascorsi
@@ -1014,11 +1015,10 @@ function saveReview() {
     if (saved && Number.isInteger(saved.slide) && saved.slide >= 0 && saved.slide < slides.length) {
       cur = saved.slide;
     }
-    if (saved && saved.rate) rate = saved.rate;
   } catch (e) {}
 })();
 function savePos() {
-  try { localStorage.setItem(DATA_KEY, JSON.stringify({ slide: cur, rate })); } catch (e) {}
+  try { localStorage.setItem(DATA_KEY, JSON.stringify({ slide: cur })); } catch (e) {}
 }
 const ACT_TYPES = ['quiz', 'match', 'vf', 'seq', 'compila', 'scenario', 'errore', 'classifica'];
 const activeIdx = slides.map((s, i) =>
@@ -2342,7 +2342,7 @@ function showAudioUnlock() { const u = _btn('audioUnlock'); if (u) u.hidden = fa
 function hideAudioUnlock() { const u = _btn('audioUnlock'); if (u) u.hidden = true; }
 if (IS_LOCAL_FILE) showAudioUnlock();
 function tryPlay() {
-  if (!audio.src) return Promise.resolve();
+  if (!audio.src || audioMuted) return Promise.resolve();
   return audio.play().then(() => { audioUnlocked = true; hideAudioUnlock(); pendingAutoplay = false; }).catch(err => {
     const blocked = err && (err.name === 'NotAllowedError' || /not allowed|gesture|interaction/i.test(err.message || ''));
     if (blocked) { pendingAutoplay = true; showAudioUnlock(); }
@@ -2365,6 +2365,7 @@ function loadAudio(i, autoplay) {
   audio.pause();
   audio.src = s.audio || '';
   audio.playbackRate = rate;
+  audio.muted = audioMuted;
   dur = s.duration || 0;
   wordTimings = s.words || [];
   chunks = buildChunks(wordTimings);
@@ -2420,39 +2421,36 @@ function setPlayIcon() {
 const _btnPlay = _safe('btnPlay');
 if (_btnPlay) _btnPlay.onclick = () => {
   if (!audio.src) return;
+  if (audioMuted) { applyMute(false); return; }
   if (audio.paused) { tryPlay(); } else { audio.pause(); }
 };
 const _btnRestart = _safe('btnRestart');
 if (_btnRestart) _btnRestart.onclick = () => {
   if (!audio.src) return;
+  if (audioMuted) applyMute(false);
   audio.currentTime = 0;
   tryPlay();
 };
-const _btnRate = _safe('btnRate');
-if (_btnRate) _btnRate.onclick = () => {
-  const rates = [0.8, 1, 1.25, 1.5];
-  // la velocità può arrivare anche da fuori: un'estensione del browser (es.
-  // "Global Speed") o una scorciatoia possono imporre un valore non in lista,
-  // e indexOf darebbe -1 (il ciclo ripartirebbe sempre dalla prima voce). Si
-  // aggancia quindi il valore corrente e si passa al successivo disponibile.
-  const cur = audio.playbackRate;
-  let ri = -1;
-  for (let k = 0; k < rates.length; k++) {
-    if (rates[k] <= cur + 0.01) ri = k;
+// ------------------------------------------------------------ audio globale ON/OFF
+// Un solo interruttore nell'header: vale per tutta la lezione (persistito).
+let audioMuted = false;
+try { audioMuted = localStorage.getItem(DATA_KEY + '-muted') === '1'; } catch (e) {}
+function applyMute(m) {
+  audioMuted = !!m;
+  try { localStorage.setItem(DATA_KEY + '-muted', audioMuted ? '1' : '0'); } catch (e) {}
+  const b = _btn('btnMute');
+  if (b) {
+    b.setAttribute('aria-pressed', audioMuted ? 'true' : 'false');
+    b.title = audioMuted ? 'Audio disattivato: riattiva la voce' : 'Disattiva la voce per tutta la lezione';
+    const ic = b.querySelector('.hbtnico');
+    if (ic) ic.textContent = audioMuted ? '🔇' : '🔊';
   }
-  rate = rates[(ri + 1) % rates.length] || 1;
-  audio.playbackRate = rate;
-  _btnRate.textContent = rate + '×';
-  savePos();
-};
-const _btnAuto = _safe('btnAuto');
-if (_btnAuto) _btnAuto.onclick = () => {
-  autoNext = !autoNext;
-  _btnAuto.classList.toggle('active', autoNext);
-  $('#btnAuto').title = autoNext
-    ? 'Riproduzione continua ON (a fine audio vai avanti)'
-    : 'Riproduzione continua: a fine audio vai alla slide successiva';
-};
+  if (audioMuted) { try { audio.pause(); } catch (e) {} hideAudioUnlock(); }
+  else if (audio.src && audio.paused) { tryPlay(); }
+}
+const _btnMute = _safe('btnMute');
+if (_btnMute) _btnMute.onclick = () => applyMute(!audioMuted);
+applyMute(audioMuted);
 
 function tick() {
   const t = audio.currentTime || 0;
@@ -2482,7 +2480,6 @@ function unmarkReview(i) {
 }
 audio.onended = () => {
   setPlayIcon();
-  if (autoNext && cur < LAST) setTimeout(() => go(cur + 1), 550);
 };
 const _seek = _safe('seek');
 if (_seek) _seek.onclick = e => {
@@ -2662,7 +2659,7 @@ if (_bPrnt) _bPrnt.onclick = printLesson;
 const _bPrev = _safe('btnPrev');
 if (_bPrev) _bPrev.onclick = () => go(cur - 1);
 const _bNext = _safe('btnNext');
-if (_bNext) _bNext.onclick = () => { if (cur < LAST) go(cur + 1); };
+if (_bNext) _bNext.onclick = () => { if (cur < LAST) go(cur + 1); else { const f = document.querySelector('#slide .fin') || document.querySelector('.fin'); if (f) f.scrollIntoView({ behavior: 'smooth', block: 'start' }); } };
 document.addEventListener('keydown', e => {
   const tag = (e.target && e.target.tagName) || '';
   const inField = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
@@ -2777,7 +2774,7 @@ def write_player(out_dir: Path, titolo: str, tema: str = 'dark'):
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_esc(titolo)}</title>
 <link rel="stylesheet" href="main.css?v=4">
-<script>window.LESSON_DIR = {_esc(__import__('json').dumps(out_dir.name))};</script>
+<script>window.LESSON_DIR = {__import__('json').dumps(out_dir.name)};</script>
 </head>
 <body>
 <header>
@@ -2789,6 +2786,7 @@ def write_player(out_dir: Path, titolo: str, tema: str = 'dark'):
   <span id="score" class="hchip" hidden>⭐ 0/0</span>
   <span id="streak" class="hchip streak" hidden>🔥</span>
   <span id="rvw" class="hchip" hidden>🔖</span>
+  <button id="btnMute" class="hbtn" title="Disattiva la voce per tutta la lezione" aria-pressed="false"><span class="hbtnico">🔊</span><span class="hbtntxt">Audio</span></button>
   <button id="btnSearch" class="hbtn" title="Cerca nella lezione (F)">🔍<span class="hbtntxt">Cerca</span></button>
   <div id="hmenu">
     <button id="btnMenu" class="hbtn" title="Altre azioni: stampa, tema, accessibilità">☰<span class="hbtntxt">Menu</span></button>
@@ -2823,8 +2821,6 @@ def write_player(out_dir: Path, titolo: str, tema: str = 'dark'):
   <span id="cap"></span>
   <span id="audioErr" hidden title="Traccia audio non disponibile per questa slide">⚠ audio</span>
   <span id="audioUnlock" hidden><button id="audioUnlockBtn" title="Attiva l'audio (richiesto dal browser)">🔊 Attiva audio</button></span>
-  <button id="btnRate" class="abar" title="Velocità di lettura">1×</button>
-  <button id="btnAuto" class="abar" title="Riproduzione continua: a fine audio vai alla slide successiva">⏭</button>
 </div>
 <nav>
   <button id="btnPrev">← Indietro</button>
