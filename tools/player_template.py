@@ -787,6 +787,80 @@ button:active:not(:disabled) { transform: scale(.96); }
   margin: 2px 0 6px; }
 .chal .fb { margin-top: 4px; }
 
+/* ------------------------------------------------ classifica (smista) */
+.classify .clzones { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-top: 10px; }
+.clzone { border: 2px dashed var(--line); border-radius: 14px; padding: 10px; min-height: 110px;
+  background: color-mix(in srgb, var(--card2) 55%, transparent); cursor: pointer;
+  transition: border-color .2s, background .2s; }
+.clzone:hover, .clzone.over { border-color: var(--accent); }
+.clzone.done { border-style: solid; border-color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 10%, transparent); cursor: default; }
+.clzname { font-weight: 800; font-size: 14.5px; margin-bottom: 8px; color: var(--text); }
+.clzlist { display: flex; flex-direction: column; gap: 6px; min-height: 30px; }
+.clpool { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 4px; min-height: 40px; }
+.clpill { border: 1.5px solid var(--line); background: var(--card); color: var(--text);
+  border-radius: 999px; padding: 8px 14px; cursor: grab; font-size: 13.5px; font-weight: 600;
+  font-family: inherit; transition: border-color .15s, opacity .2s; }
+.clpill:hover { border-color: var(--accent); }
+.clpill.sel { border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent); }
+.clpill.in { opacity: .92; cursor: default;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+.clhint { font-size: 12.5px; color: var(--muted); }
+.clmsg { margin-top: 10px; font-weight: 800; color: var(--ok); animation: rise .3s both; }
+@keyframes shakeX { 0%,100% { transform: translateX(0); } 25% { transform: translateX(-5px); } 75% { transform: translateX(5px); } }
+.clpill.shake { animation: shakeX .35s; border-color: var(--ko); }
+
+/* ------------------------------------------------ mappa del percorso */
+#map { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-start; justify-content: center;
+  padding: 10px 18px 6px; }
+#map:empty { display: none; }
+#map .st { display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 74px; cursor: pointer; }
+#map .stico { width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center;
+  justify-content: center; font-size: 16px; border: 2px solid var(--line); background: var(--card);
+  transition: border-color .2s, box-shadow .2s, transform .2s; }
+#map .stlab { font-size: 10.5px; color: var(--muted); font-weight: 700; text-align: center; max-width: 100px; }
+#map .st.reached .stico { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 16%, transparent); }
+#map .st.now .stico { border-color: var(--accent); transform: scale(1.1);
+  animation: pulseS 1.6s ease-in-out infinite alternate; }
+#map .st.now .stlab { color: var(--text); }
+@keyframes pulseS {
+  from { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent); }
+  to   { box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 45%, transparent); }
+}
+
+/* ------------------------------------------------ badge */
+.badge-toast { position: fixed; z-index: 95; bottom: 84px; right: 16px; display: flex; gap: 10px;
+  align-items: center; padding: 12px 16px; border-radius: 14px; background: var(--card);
+  border: 1px solid var(--accent); box-shadow: 0 14px 40px rgba(0,0,0,.4); animation: rise .3s both;
+  max-width: 300px; }
+.badge-toast .bicon { font-size: 26px; }
+.badge-toast .btit { font-weight: 800; font-size: 13.5px; }
+.badge-toast .bdesc { font-size: 12px; color: var(--muted); }
+.badgerow { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; justify-content: center; }
+.badgerow .badgelab { font-size: 12px; font-weight: 800; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .06em; }
+.badge { border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent); border-radius: 999px;
+  padding: 5px 12px; font-size: 12.5px; font-weight: 700; }
+.bdov { position: fixed; inset: 0; z-index: 90; background: rgba(0,0,0,.55); display: flex;
+  align-items: center; justify-content: center; padding: 20px; }
+.bdbox { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 22px;
+  max-width: 560px; width: 100%; max-height: 86vh; overflow: auto;
+  box-shadow: 0 24px 70px rgba(0,0,0,.5); }
+.bdbox h2 { margin: 0 0 14px; }
+.bdgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.bdcard { border: 1px solid var(--line); border-radius: 12px; padding: 12px 8px; text-align: center; opacity: .55; }
+.bdcard.got { opacity: 1; border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.bdcard .bdico { font-size: 26px; }
+.bdcard .bdnome { font-weight: 800; font-size: 13px; margin-top: 4px; }
+.bdcard .bddesc { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.bdbox button.primary { border: none; color: #fff; border-radius: 10px; padding: 9px 18px;
+  cursor: pointer; font-weight: 800; font-family: inherit;
+  background: linear-gradient(135deg, var(--accent), var(--accent2)); }
+
 /* ------------------------------------------------ confetti */
 .confetti {
   position: fixed; top: -14px; z-index: 99; pointer-events: none;
@@ -842,6 +916,11 @@ button:active:not(:disabled) { transform: scale(.96); }
   nav button { flex: 1 1 0; padding: 11px 8px; font-size: 13.5px; white-space: nowrap; }
   #audioBar { gap: 8px; padding: 8px 12px; }
   #tt { min-width: 0; }
+  .clzones { grid-template-columns: 1fr; }
+  #map { gap: 7px; padding: 8px 12px 2px; }
+  #map .stlab { display: none; }
+  #map .stico { width: 28px; height: 28px; font-size: 13px; }
+  .badge-toast { bottom: 130px; }
 }
 """
     )
@@ -889,6 +968,7 @@ function _fingerprint(s2) {
 const DATA_KEY = 'lesson-' + (data.titolo || 'lezione') + '-'
   + slides.length + 's-'
   + _fingerprint(slides.map(s2 => s2.narration || '').join('|'));
+const IS_LOCAL_FILE = location.protocol === 'file:';
 // nome dello studente per il report del docente (una sola volta, poi salvato)
 let studentName = '';
 try { studentName = localStorage.getItem(DATA_KEY + '-nome') || ''; } catch (e) {}
@@ -940,7 +1020,7 @@ function saveReview() {
 function savePos() {
   try { localStorage.setItem(DATA_KEY, JSON.stringify({ slide: cur, rate })); } catch (e) {}
 }
-const ACT_TYPES = ['quiz', 'match', 'vf', 'seq', 'compila', 'scenario', 'errore'];
+const ACT_TYPES = ['quiz', 'match', 'vf', 'seq', 'compila', 'scenario', 'errore', 'classifica'];
 const activeIdx = slides.map((s, i) =>
   (s.blocks || []).some(b => ACT_TYPES.some(k => b[k])) ? i : -1).filter(i => i >= 0);
 // slide di apertura dei moduli: alimentano la barra di navigazione dei moduli
@@ -1018,6 +1098,7 @@ function slideTotal(i) {
   let t = 0;
   for (const b of slides[i].blocks || []) {
     if (b.quiz || b.scenario || b.seq || b.errore || b.match || b.flashcards) t += 1;
+    else if (b.classifica) t += (b.classifica.items || []).length;
     else if (b.vf) t += b.vf.length;
     else if (b.compila) t += b.compila.reduce((n, it) => n + blankCount(it), 0);
   }
@@ -1042,6 +1123,10 @@ function grade(i) {
     else if (b.errore && r.errore === true) { e += 1; log('errore', true); }
     else if (b.match && r.match !== undefined) { e += r.match === true ? 1 : 0; log('abbinamenti', r.match === true); }
     else if (b.flashcards && r.flash !== undefined) { e += r.flash === true ? 1 : 0; log('flashcards', r.flash === true); }
+    else if (b.classifica && r.classifica !== undefined) {
+      e += r.classifica;
+      log('classifica', r.classifica === (b.classifica.items || []).length);
+    }
     else if (b.vf && Array.isArray(r.vf)) {
       const got = r.vf.slice(0, b.vf.length).filter(Boolean).length;
       e += got;
@@ -1055,6 +1140,11 @@ function grade(i) {
   }
   return { e, t: slideTotal(i) };
 }
+// ------------------------------------------------------------ progress hook
+// Punto d'aggancio per l'integrazione LMS (es. pacchetto SCORM): non fa nulla
+// di per sé (reportProgress è un no-op), l'export SCORM lo sostituisce con
+// l'adattatore che parla con l'API dell'LMS. Fuori dall'LMS resta innocuo.
+function reportProgress(_p) { /* sostituito dall'adapter SCORM, se presente */ }
 function paintScore() {
   let e = 0, t = 0;
   for (const i of activeIdx) {
@@ -1065,6 +1155,7 @@ function paintScore() {
   const st = $('#score');
   if (st && t > 0) { st.hidden = false; st.textContent = '⭐ ' + e + '/' + t; }
   else if (st) st.hidden = true;
+  reportProgress(buildProgress());
   // streak: si aggiorna SOLO quando la slide completa è stata corretta (esito
   // affidabile); una slide errata o incompleta azzera la serie
   const sc = _safe('streak');
@@ -1076,6 +1167,7 @@ function paintScore() {
     if (STREAK.cur >= 2) { sc.hidden = false; sc.textContent = '🔥 ' + STREAK.cur + ' di fila'; }
     else sc.hidden = true;
   }
+  checkBadges();
 }
 
 // ------------------------------------------------------------ barra moduli
@@ -1119,6 +1211,123 @@ function confetti() {
   }
 }
 
+// ------------------------------------------------------------ mappa del percorso
+// Le "stazioni" sono le aperture dei moduli (stesse di modnavBar): verde =
+// raggiunta, lampeggiante = dove sei ora. Un tacco su una stazione porta lì.
+function paintMap() {
+  const map = _safe('map');
+  if (!map) return;
+  map.innerHTML = '';
+  if (!MODNAV.length || slides.length < 6) return;   // percorsi brevi: niente mappa
+  MODNAV.forEach(m => {
+    const st = el('div', 'st');
+    const ico = el('div', 'stico', (slides[m.i] && slides[m.i].icon) || '📘');
+    st.appendChild(ico);
+    st.appendChild(el('div', 'stlab', 'M' + m.n + ' · ' + m.label.slice(0, 22)));
+    if (cur >= m.i) st.classList.add('reached');
+    if (cur === m.i) st.classList.add('now');
+    st.onclick = () => go(m.i);
+    st.title = m.label;
+    map.appendChild(st);
+  });
+  const stEnd = el('div', 'st');
+  stEnd.appendChild(el('div', 'stico', '🏁'));
+  stEnd.appendChild(el('div', 'stlab', 'Fine'));
+  if (cur === LAST) stEnd.classList.add('now');
+  else if (doneCount() === activeIdx.length && activeIdx.length) stEnd.classList.add('reached');
+  stEnd.onclick = () => go(LAST);
+  map.appendChild(stEnd);
+}
+
+// ------------------------------------------------------------ badge collezionabili
+// Sbloccati in base a come giochi, persistiti per lezione in localStorage.
+const BADGES = [
+  { id: 'primo',   ico: '🌟', nome: 'Prima risposta',  desc: 'Hai risposto alla prima attività' },
+  { id: 'serie3',  ico: '🔥', nome: 'In serie',        desc: '3 risposte esatte di fila' },
+  { id: 'serie5',  ico: '⚡', nome: 'Fuoco',           desc: '5 risposte esatte di fila' },
+  { id: 'metà',    ico: '🌗', nome: 'A metà',          desc: 'Metà delle attività completate' },
+  { id: 'tutte',   ico: '🎯', nome: 'Tutto svolto',    desc: 'Tutte le attività completate' },
+  { id: 'perfetto',ico: '💎', nome: 'Perfetto',        desc: 'Tutte le attività con punteggio pieno' },
+  { id: 'veloce',  ico: '⏱️', nome: 'Fulmine',         desc: 'Lezione completata in meno di 10 minuti' },
+  { id: 'esploratore', ico: '🧭', nome: 'Esploratore', desc: 'Hai usato la ricerca (F)' },
+  { id: 'ripasso', ico: '🔖', nome: 'Ripassatore',     desc: 'Hai segnato qualcosa da rivedere' },
+  { id: 'sfida',   ico: '⚔️', nome: 'Sfida accettata', desc: 'Hai finito la Sfida lampo' }
+];
+const BD_KEY = DATA_KEY + '-badges';
+let badges = {};
+try { badges = JSON.parse(localStorage.getItem(BD_KEY) || '{}') || {}; } catch (e) {}
+let badgeQueue = [];
+function saveBadges() {
+  try { localStorage.setItem(BD_KEY, JSON.stringify(badges)); } catch (e) {}
+}
+function unlockBadge(id) {
+  if (badges[id] || !BADGES.some(b => b.id === id)) return;
+  badges[id] = true;
+  saveBadges();
+  badgeQueue.push(id);
+  if (badgeQueue.length === 1) showBadgeToast();
+}
+function showBadgeToast() {
+  const b = BADGES.find(x => x.id === badgeQueue[0]);
+  if (!b) { badgeQueue.shift(); if (badgeQueue.length) showBadgeToast(); return; }
+  const t = el('div', 'badge-toast');
+  t.appendChild(el('span', 'bicon', b.ico));
+  const tx = el('div');
+  tx.appendChild(el('div', 'btit', '🏅 Badge sbloccato: ' + b.nome));
+  tx.appendChild(el('div', 'bdesc', b.desc));
+  t.appendChild(tx);
+  document.body.appendChild(t);
+  setTimeout(() => { t.remove(); badgeQueue.shift(); if (badgeQueue.length) showBadgeToast(); }, 3200);
+}
+function badgesGrid() {
+  const g = el('div', 'bdgrid');
+  BADGES.forEach(b => {
+    const c = el('div', 'bdcard' + (badges[b.id] ? ' got' : ''));
+    c.appendChild(el('div', 'bdico', b.ico));
+    c.appendChild(el('div', 'bdnome', b.nome));
+    c.appendChild(el('div', 'bddesc', b.desc));
+    g.appendChild(c);
+  });
+  return g;
+}
+function checkBadges() {
+  const done = activeIdx.filter(i => attempted(i));
+  if (done.length >= 1) unlockBadge('primo');
+  if (STREAK.cur >= 3) unlockBadge('serie3');
+  if (STREAK.cur >= 5) unlockBadge('serie5');
+  if (activeIdx.length && done.length >= Math.ceil(activeIdx.length / 2)) unlockBadge('metà');
+  if (activeIdx.length && done.length === activeIdx.length) {
+    unlockBadge('tutte');
+    if (done.every(i => { const g = grade(i); return g.t > 0 && g.e === g.t; })) unlockBadge('perfetto');
+    const totS = sessMs + (document.hidden ? 0 : Date.now() - sessStart);
+    if (totS < 10 * 60 * 1000) unlockBadge('veloce');
+  }
+}
+function badgesSummary() {
+  const got = BADGES.filter(b => badges[b.id]).length;
+  if (!got) return null;
+  const row = el('div', 'badgerow');
+  row.appendChild(el('span', 'badgelab', '🏅 Badge:'));
+  BADGES.filter(b => badges[b.id]).slice(-4).forEach(b => row.appendChild(el('span', 'badge', b.ico + ' ' + b.nome)));
+  const more = el('button', 'abar', 'Tutti (' + got + '/' + BADGES.length + ')');
+  more.onclick = () => openBadges();
+  row.appendChild(more);
+  return row;
+}
+function openBadges() {
+  const ov = el('div', 'bdov');
+  const box = el('div', 'bdbox');
+  const got = BADGES.filter(b => badges[b.id]).length;
+  box.appendChild(el('h2', null, '🏅 I tuoi badge — ' + got + '/' + BADGES.length));
+  box.appendChild(badgesGrid());
+  const cl = el('button', 'primary', 'Chiudi');
+  cl.onclick = () => ov.remove();
+  ov.onclick = (e) => { if (e.target === ov) ov.remove(); };
+  box.appendChild(cl);
+  ov.appendChild(box);
+  document.body.appendChild(ov);
+}
+
 // ------------------------------------------------------------ sfida lampo
 function challengeWidget() {
   const pool = [];
@@ -1155,6 +1364,7 @@ function challengeWidget() {
       fin.appendChild(stars5(pct >= 0.9 ? 5 : pct >= 0.6 ? 4 : pct >= 0.4 ? 3 : 2));
       const res = pct >= 0.9 ? 'Strepitoso! 🎉' : pct >= 0.6 ? 'Ottimo!' : pct >= 0.4 ? 'Buono, puoi fare meglio!' : 'Riprova per migliorare! 💪';
       fin.appendChild(el('div', 'res', state.score + ' / ' + items.length + ' — ' + res));
+      unlockBadge('sfida');
       const again = el('button', 'start', '🔁 Rigioca la sfida');
       again.onclick = () => { state.k = 0; state.score = 0; state.started = false; state.lock = false; draw(); };
       fin.appendChild(again);
@@ -1216,11 +1426,30 @@ function buildExport() {
            punti: e + '/' + t, precisione: (t ? Math.round(e / t * 100) : 0) + '%',
            streak_record: STREAK.best,
            tempo_min: Math.max(1, Math.round(totMs / 60000)),
+           slide_corrente: cur + 1,
            per_slide: perSlide.map(p2 => {
              const ms = slideTimes[p2.slide - 1];
              return Object.assign(p2, { tempo_s: ms ? Math.round(ms / 1000) : 0 });
            }),
            risposte: LOG };
+}
+// Riepilogo compatto dei progressi: consumato dall'hook reportProgress
+// (adattatore SCORM) per aggiornare il punteggio/stato nell'LMS.
+function buildProgress() {
+  let e = 0, t = 0, done = 0;
+  for (const i of activeIdx) {
+    if (!attempted(i)) continue;
+    done++;
+    const g = grade(i);
+    e += g.e; t += g.t;
+  }
+  const totMs = sessMs + (document.hidden ? 0 : Date.now() - sessStart);
+  return { done: done, total: activeIdx.length, punti: e, totale: t,
+           pct: t ? Math.round(e / t * 100) : 0,
+           completata: done >= activeIdx.length && activeIdx.length > 0,
+           slide: cur + 1, di: slides.length,
+           studente: studentName || 'Studente',
+           tempo_s: Math.round(totMs / 1000) };
 }
 function downloadFile(name, content, mime) {
   const b = new Blob([content], { type: mime });
@@ -1306,6 +1535,8 @@ function finishPanel() {
   const filled = pct >= 90 ? 5 : pct >= 70 ? 4 : pct >= 50 ? 3 : 2;
   for (let i = 0; i < 5; i++) s.appendChild(el('span', i < filled ? '' : 'off', '⭐'));
   wrap.appendChild(s);
+  const bsum = badgesSummary();
+  if (bsum) wrap.appendChild(bsum);
   wrap.appendChild(el('p', null,
     done < activeIdx.length
       ? 'Hai completato ' + done + ' attività su ' + activeIdx.length + ': torna indietro e svolgi le altre per migliorare il risultato.'
@@ -1325,6 +1556,31 @@ function finishPanel() {
     const bPr = el('button', null, '🖨 Stampa'); bPr.onclick = () => exportReport('stampa');
     exp.appendChild(bCsv); exp.appendChild(bJs); exp.appendChild(bPr);
     wrap.appendChild(exp);
+    // classifica di classe: manda il risultato al pannello del docente
+    if (window.LESSON_DIR) {
+      const crow = el('div', 'exprow');
+      const cbtn = el('button', null, '🏆 Invia alla classifica di classe');
+      cbtn.onclick = async () => {
+        const p = buildProgress();
+        if (!p.done) { alert('Prima svolgi almeno un\'attività.'); return; }
+        cbtn.disabled = true; cbtn.textContent = '⏳ Invio…';
+        try {
+          const r = await fetch('/api/classifica', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ lesson: window.LESSON_DIR, studente: p.studente,
+                                   punti: p.punti, totale: p.totale,
+                                   completata: p.completata,
+                                   tempo_min: Math.max(1, Math.round(p.tempo_s / 60)) }) });
+          const j = await r.json().catch(() => ({}));
+          cbtn.textContent = (r.ok && j.ok) ? '✓ Inviato in classifica!' : '✗ Invio fallito (aperto da file? usa il server)';
+        } catch (e) {
+          cbtn.textContent = '✗ Invio fallito (nessun server)';
+        }
+        cbtn.disabled = false;
+      };
+      crow.appendChild(cbtn);
+      wrap.appendChild(crow);
+    }
   }
   if (review.size > 0) {
     const rip = el('button', null, '🎯 Ripassa le slide segnalate (' + review.size + ')');
@@ -1463,6 +1719,7 @@ function renderBlock(b, idx) {
   if (b.errore) return blockErrore(b.errore, idx);
   if (b.match) return blockMatch(b.match, idx);
   if (b.flashcards) return blockFlashcards(b.flashcards, idx);
+  if (b.classifica) return blockClassify(b.classifica, idx);
   if (b.glossario) return blockGlossario(b.glossario, idx);
   return document.createTextNode('');
 }
@@ -1819,6 +2076,86 @@ function blockFlashcards(f, idx) {
   return m;
 }
 
+// ------------------------------------------------ attività: trascina nella categoria
+// Le "classifica" assegnano ogni elemento (pill) alla categoria giusta: click
+// sulla pillola + click sulla zona (o drag & drop su desktop). Punteggio =
+// numero di elementi classificati correttamente al primo collocamento.
+function blockClassify(c, idx) {
+  const items = (c.items || []).slice(0, 10);
+  const cats = (c.cats || []).slice(0, 4);
+  const m = el('div', 'classify');
+  if (!items.length || cats.length < 2) return m;
+  const catNames = cats.map(x => typeof x === 'string' ? x : (x.n || 'Categoria'));
+  m.appendChild(el('p', null, c.instr || 'Trascina (o clicca) ogni elemento nella categoria giusta.'));
+  const pool = el('div', 'clpool');
+  const zones = el('div', 'clzones');
+  const placed = {};        // itemIdx -> catIdx (primo collocamento conta per il punteggio)
+  let solved = 0, sel = -1;
+  const total = items.length;
+  const doneMsg = () => {
+    results[idx] = results[idx] || {};
+    results[idx].classifica = solved;
+    if (Object.keys(placed).length >= total) {
+      m.appendChild(el('div', 'clmsg', solved === total ? 'Classificazione perfetta! ✓' : 'Completata: ' + solved + ' su ' + total + ' al primo collocamento. ✓'));
+      zones.querySelectorAll('.clzone').forEach(z => z.classList.add('done'));
+    }
+    paintDots();
+  };
+  const zoneEls = catNames.map((nome, ci) => {
+    const z = el('div', 'clzone');
+    z.appendChild(el('div', 'clzname', nome));
+    const list = el('div', 'clzlist');
+    z.appendChild(list);
+    const drop = (ii) => {
+      const p = document.querySelector('.clpill[data-i="' + ii + '"]');
+      if (!p || placed[ii] !== undefined) return;
+      placed[ii] = ci;
+      if (+p.dataset.ok === ci) solved++;
+      p.classList.remove('sel');
+      p.classList.add('in');
+      p.draggable = false;
+      list.appendChild(p);
+      doneMsg();
+    };
+    z.onclick = () => { if (sel >= 0) { const p2 = document.querySelector('.clpill[data-i="' + sel + '"]'); sel = -1; if (p2) drop(+p2.dataset.i); } };
+    z.addEventListener('dragover', e => { e.preventDefault(); z.classList.add('over'); });
+    z.addEventListener('dragleave', () => z.classList.remove('over'));
+    z.addEventListener('drop', e => {
+      e.preventDefault(); z.classList.remove('over');
+      try {
+        const ii = parseInt(String(e.dataTransfer.getData('text/plain') || '').replace(/[^0-9]/g, ''), 10);
+        if (!Number.isNaN(ii) && ii >= 0) drop(ii);
+      } catch (err) { /* alcuni browser limitano getData: il click resta disponibile */ }
+    });
+    zones.appendChild(z);
+    return z;
+  });
+  const order = shuffle(items.map((x, k) => k));
+  order.forEach(ii => {
+    const it = items[ii];
+    const p = el('button', 'clpill', String(it.t || ''));
+    p.dataset.i = ii;
+    p.dataset.ok = it.cat;
+    p.onclick = () => {
+      if (placed[ii] !== undefined) return;
+      if (sel === ii) { sel = -1; p.classList.remove('sel'); return; }
+      pool.querySelectorAll('.clpill').forEach(x2 => x2.classList.remove('sel'));
+      sel = ii;
+      p.classList.add('sel');
+    };
+    p.draggable = true;
+    p.addEventListener('dragstart', e => {
+      if (placed[ii] !== undefined) { e.preventDefault(); return; }
+      e.dataTransfer.setData('text/plain', String(ii));
+    });
+    pool.appendChild(p);
+  });
+  m.appendChild(el('div', 'clhint', '💡 Clicca la pillola e poi la categoria (o trascinala sopra).'));
+  m.appendChild(pool);
+  m.appendChild(zones);
+  return m;
+}
+
 function blockGlossario(g, idx) {
   const m = el('div', 'glos');
   m.appendChild(el('p', null, g.instr || 'Cerca un termine o sfoglia per modulo.'));
@@ -2003,6 +2340,7 @@ let audioUnlocked = false;
 let pendingAutoplay = false;
 function showAudioUnlock() { const u = _btn('audioUnlock'); if (u) u.hidden = false; }
 function hideAudioUnlock() { const u = _btn('audioUnlock'); if (u) u.hidden = true; }
+if (IS_LOCAL_FILE) showAudioUnlock();
 function tryPlay() {
   if (!audio.src) return Promise.resolve();
   return audio.play().then(() => { audioUnlocked = true; hideAudioUnlock(); pendingAutoplay = false; }).catch(err => {
@@ -2210,6 +2548,7 @@ if (btnAcc && accMenu) {
 function go(i) {
   const prev = cur;
   cur = Math.max(0, Math.min(LAST, i));
+  paintMap();
   // tempo passato sulla slide appena lasciata (per il report docente)
   if (lastSlideTime !== null) {
     slideTimes[prev] = (slideTimes[prev] || 0) + Date.now() - lastSlideTime;
@@ -2256,6 +2595,7 @@ $('#sinput').addEventListener('input', e => {
       ['p', 'h1', 'h2', 'quote', 'callout'].forEach(k => { if (b[k]) texts.push(b[k]); });
       if (b.list) texts.push(b.list.join(' '));
       if (b.quiz) texts.push(b.quiz.q + ' ' + b.quiz.opts.map(o => o.t).join(' '));
+      if (b.classifica) (b.classifica.items || []).forEach(i2 => texts.push(i2.t));
       if (b.glossario) (b.glossario.groups || []).forEach(gr =>
         (gr.terms || []).forEach(t => texts.push(t.t + ' ' + t.d)));
     });
@@ -2268,6 +2608,7 @@ $('#sinput').addEventListener('input', e => {
     }
   }
   if (!hits) res.appendChild(el('div', 'nores', 'Nessun risultato'));
+  else unlockBadge('esploratore');
 });
 // ------------------------------------------------------------ stampa / PDF
 function printLesson() {
@@ -2289,6 +2630,10 @@ function printLesson() {
       else if (b.vf) body += '<p><b>Vero o falso:</b></p><ul>' + b.vf.map(v2 => '<li>' + esc(v2.t)
         + ' — <i>' + (v2.ok ? 'Vero' : 'Falso') + '</i></li>').join('') + '</ul>';
       else if (b.compila) body += '<p><b>Compila:</b> ' + b.compila.map(c2 => esc(c2.frase).replace(/___/g, '<u>' + esc(c2.risposta || '…') + '</u>')).join(' · ') + '</p>';
+      else if (b.classifica) body += (b.classifica.cats || []).map((cat, ci) =>
+        '<p><b>' + esc(cat) + ':</b> '
+        + (((b.classifica.items || []).filter(i2 => i2.cat === ci).map(i2 => esc(i2.t)).join(', ')) || '-')
+        + '</p>').join('');
       else if (b.seq) body += '<p><b>Sequenza:</b> ' + esc((b.seq.passi || []).join(' → ')) + '</p>';
       else if (b.flashcards) body += '<p><b>Flashcards:</b></p><ul>'
         + (b.flashcards.cards || []).map(c2 => '<li><b>' + esc(c2.t) + '</b>: ' + esc(c2.d) + '</li>').join('') + '</ul>';
@@ -2356,6 +2701,7 @@ document.addEventListener('keydown', e => {
       return;
     }
     review.has(cur) ? unmarkReview(cur) : markReview(cur);
+    if (review.has(cur)) unlockBadge('ripasso');
     const chip = _btn('rvw');
     if (chip) {
       chip.hidden = false;
@@ -2411,6 +2757,7 @@ if (cur > 0) {
   document.body.appendChild(rip);
   setTimeout(() => { if (rip.parentNode) rip.remove(); }, 10000);
 }
+paintMap();    // mappa del percorso alla prima apertura
 """
 
 
@@ -2430,6 +2777,7 @@ def write_player(out_dir: Path, titolo: str, tema: str = 'dark'):
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_esc(titolo)}</title>
 <link rel="stylesheet" href="main.css?v=4">
+<script>window.LESSON_DIR = {_esc(__import__('json').dumps(out_dir.name))};</script>
 </head>
 <body>
 <header>
@@ -2448,6 +2796,7 @@ def write_player(out_dir: Path, titolo: str, tema: str = 'dark'):
       <button id="btnPrint" title="Stampa / PDF della lezione intera"><span class="ic">🖨</span><span>Stampa / PDF</span></button>
       <button id="btnTheme" title="Tema chiaro / scuro"><span class="ic">☀️</span><span>Tema chiaro / scuro</span></button>
       <button id="btnAcc" title="Accessibilità: testo più grande, alto contrasto (Ctrl+Alt+T)"><span class="ic">♿</span><span>Accessibilità</span></button>
+      <button id="btnBadges" title="I tuoi badge collezionabili"><span class="ic">🏅</span><span>Badge</span></button>
       <div id="accMenu" hidden>
         <button id="btnZoom" class="abar" title="Dimensione testo">A</button>
       </div>
@@ -2464,6 +2813,7 @@ def write_player(out_dir: Path, titolo: str, tema: str = 'dark'):
   <button id="nmok">OK</button>
 </div>
 <div id="pbar"><div id="pfill"></div></div>
+<div id="map"></div>
 <main><div id="stage"><div id="slide" aria-live="polite"></div></div></main>
 <div id="audioBar">
   <button id="btnPlay" title="Riproduci / pausa (Spazio)">▶</button>

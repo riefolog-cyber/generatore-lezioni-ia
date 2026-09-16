@@ -125,11 +125,14 @@ start_lesson.py      server locale con porta libera (8341-8350);
                      lezioni apre l'indice per scegliere
 check_env.py         controllo ambiente
 config.json          llm_url, llm_model, llm_api_key (opzionale), voice,
-                      edge_voice, edge_rate, audio_bitrate, theme,
+                      edge_voice, edge_voice_domande (opzionale: voci alternate),
+                      edge_rate, audio_bitrate, theme,
                       num_moduli_min/max, porta, cache_max_mb,
                       tts_workers, tts_retries, profilo_durata/livello/obiettivo,
                       llm_modo (due_fasi|unica), llm_modelli_fallback,
                       llm_max_tokens, llm_timeout, llm_deadline, llm_parallel
+classifica.json      risultati degli studenti per la classifica di classe
+                     (creato dal pannello, ignorato da git)
 generatore-lezioni-mappa.html   mappa interattiva del sistema (Archify):
                      apri nel browser per esplorare componenti e percorsi
 generatore-lezioni-mappa.json   sorgente dell'IR per rigenerare la mappa
@@ -139,6 +142,8 @@ requirements-extra.txt  pypdf (PDF), youtube-transcript-api (YouTube)
 requirements-dev.txt    pytest (test unitari)
 tools/               common, player_template (player autogenerato),
                      sources (fonti di partenza), export_zip,
+                     export_scorm (SCORM 1.2 con tracciamento punteggio/
+                     completamento per Moodle), export_handout (dispensa),
                      selftest (QA automatico)
 assets/voice/        modello Piper + cache audio
 ```
@@ -186,3 +191,23 @@ assets/voice/        modello Piper + cache audio
 - Riaudio/riplayer senza rifare l'LLM (dopo aver cambiato voce o tema in
   config.json): `python new_lesson.py reaudio Nome_Lezione_lesson`.
 - File HTML unico senza cartella: `python new_lesson.py build file.docx --single`.
+- **SCORM con tracciamento reale**: `python tools/export_scorm.py <cartella_lesson>`
+  (o il pulsante SCORM nel pannello) genera un pacchetto SCORM 1.2 che parla
+  con l'LMS: punteggio, stato (completato/superato), posizione e tempo arrivano
+  al registro voti di Moodle. Fuori dall'LMS la lezione resta identica.
+- **Trascina nella categoria**: nuova attività interattiva (l'LLM la crea solo
+  quando il materiale offre categorie nette): elementi da smistare su 2-3
+  colonne con drag & drop o tap; punteggio al primo collocamento. Valida dal
+  validatore, inclusa in dispensa e stampa.
+- **Voci alternate**: imposta `edge_voice_domande` in config.json (es.
+  `it-IT-ElsaNeural`) e le domande/verifiche saranno lette da una seconda voce:
+  la lezione suona come un dialogo. Cache audio distinta per voce.
+- **Mappa del percorso**: sotto la barra di avanzamento le stazioni dei moduli
+  (verde = raggiunta, lampeggiante = dove sei): tap per saltare al modulo.
+- **Badge collezionabili**: 10 badge sbloccati in base a come giochi (serie,
+  precisione, velocità, esplorazione) con toast di sblocco e armadietto nel
+  menu ☰; persistiti per lezione nel browser.
+- **Classifica di classe**: dal pannello finale lo studente invia il risultato
+  con un tap («🏆 Invia alla classifica»); il docente vede la classifica per
+  lezione nella sezione 🏆 del pannello (anche da client LAN), con export CSV
+  e inserimento manuale. Nessun servizio esterno: tutto in `classifica.json`.

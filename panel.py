@@ -112,6 +112,63 @@ class _UploadTooBig(Exception):
     """File caricato dal pannello oltre il limite (risponde HTTP 413)."""
 
 
+# ------------------------------------------------------------------ classifica di classe
+# Gli studenti (anche da tablet sulla LAN) inviano il risultato del percorso;
+# il pannello lo accumula in classifica.json e mostra la classifica per lezione.
+CLASSIFICA_FILE = BASE / "classifica.json"
+_CLASSIFICA_MAX = 500          # righe massime su disco (le più nuove vincono)
+_CLASSIFICA_PANEL = 50         # righe mostrate in classifica per lezione
+
+
+def _classifica_add(lesson, studente, punti, totale, completata, tempo_min):
+    """Aggiunge un risultato (chiamato anche da client LAN: nessun segreto)."""
+    try:
+        rows = []
+        if CLASSIFICA_FILE.exists():
+            rows = json.loads(CLASSIFICA_FILE.read_text(encoding="utf-8") or "[]")
+    except Exception:
+        rows = []
+    pct = round(punti / totale * 100) if totale > 0 else 0
+    rows.append({"t": time.strftime("%Y-%m-%d %H:%M"), "lesson": str(lesson)[:80],
+                 "studente": str(studente)[:40] or "Anonimo",
+                 "punti": punti, "totale": totale, "pct": pct,
+                 "completata": bool(completata), "tempo_min": tempo_min})
+    try:
+        CLASSIFICA_FILE.write_text(json.dumps(rows[-_CLASSIFICA_MAX:], ensure_ascii=False),
+                                   encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _classifica_view():
+    """Classifica per lezione: miglior risultato per studente, ordinato per
+    percentuale (decrescente) e tempo (crescente)."""
+    try:
+        rows = json.loads(CLASSIFICA_FILE.read_text(encoding="utf-8") or "[]") \
+            if CLASSIFICA_FILE.exists() else []
+    except Exception:
+        rows = []
+    by_lesson = {}
+    for r in rows:
+        if isinstance(r, dict) and r.get("lesson"):
+            by_lesson.setdefault(str(r["lesson"]), []).append(r)
+    out = []
+    for lesson in sorted(by_lesson):
+        lst = by_lesson[lesson]
+        best = {}
+        for r in lst:                      # migli risultato per studente
+            k = r.get("studente") or "Anonimo"
+            prev = best.get(k)
+            if (prev is None or r.get("pct", 0) > prev.get("pct", 0)
+                    or (r.get("pct", 0) == prev.get("pct", 0)
+                        and r.get("tempo_min", 9999) < prev.get("tempo_min", 9999))):
+                best[k] = r
+        ranked = sorted(best.values(), key=lambda r: (-r.get("pct", 0),
+                                                      r.get("tempo_min", 9999)))
+        out.append({"lesson": lesson, "rows": ranked[:_CLASSIFICA_PANEL]})
+    return {"classifiche": out}
+
+
 # ------------------------------------------------------------------ cache whitelist lezioni
 # La whitelist delle lezioni viene valutata a ogni richiesta (anche per gli mp3
 # durante la riproduzione). Un piccolo TTL evita glob su disco a ogni asset;
@@ -384,6 +441,10 @@ class PanelHandler(_RangeHandler):
 
     # -- API ------------------------------------------------------------------
     def _api(self, path, query):
+        if path == "/api/classifica":
+            return self._json(_classifica_view())
+        if path == "/api/classifica_export":
+            return self._classifica_export(query)
         if not _loopback(self):
             self.send_error(403, "API riservate a localhost")
             return
@@ -419,6 +480,7 @@ class PanelHandler(_RangeHandler):
             return self._json({"voices": _edge_voices_live(),
                                "current": CONFIG.get("edge_voice")})
         if path == "/api/lesson_data":
+            return self._lesson_data(query)
             return self._lesson_data(query)
         self.send_error(404, "API sconosciuta")
 
@@ -950,10 +1012,14 @@ class PanelHandler(_RangeHandler):
         super().do_GET()
 
     def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/api/classifica":
+            # UNA SOLA API aperta alla LAN: gli studenti inviano il risultato
+            # del percorso (nessun dato sensibile, valori sanitized e limitati)
+            return self._classifica_post()
         if not _loopback(self):
             self.send_error(403, "API riservate a localhost")
             return
-        parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/build":
             if not _rate_ok(self.client_address[0]):
                 self._json({"started": False, "reason": "Troppe richieste: riprova tra un po'."}, 429)
@@ -1024,6 +1090,48 @@ class PanelHandler(_RangeHandler):
                 self._json({"ok": False, "error": str(e)}, 400)
         else:
             self.send_error(404, "API sconosciuta")
+
+    def _classifica_post(self):
+        try:
+            d = self._read_json_body()
+            lesson = self._check_lesson(str(d.get("lesson") or ""))
+            studente = re.sub(r"\s+", " ", str(d.get("studente") or "Anonimo")).strip()[:40] \
+                or "Anonimo"
+            punti = max(0, min(999, int(d.get("punti") or 0)))
+            totale = max(0, min(999, int(d.get("totale") or 0)))
+            tempo_min = max(0, min(600, int(d.get("tempo_min") or 0)))
+            if totale <= 0:
+                raise ValueError("Nessuna attività registrata")
+            _classifica_add(lesson.name, studente, punti, totale,
+                            bool(d.get("completata")), tempo_min)
+            self._json({"ok": True})
+        except Exception as e:  # noqa: BLE001
+            self._json({"ok": False, "error": str(e)}, 400)
+
+    def _classifica_export(self, query):
+        """CSV della classifica di una lezione (stesso ordine della vista)."""
+        name = query.get("lesson", [None])[0] or ""
+        try:
+            lesson = self._check_lesson(name)
+        except Exception as e:  # noqa: BLE001
+            return self._json({"error": str(e)}, 400)
+        view = _classifica_view()
+        entry = next((c for c in view["classifiche"] if c["lesson"] == lesson.name), None)
+        rows = entry["rows"] if entry else []
+        lines = ["posizione;studente;punti;percentuale;completata;tempo_min;quando"]
+        for i, r in enumerate(rows):
+            lines.append(";".join(str(x) for x in (
+                i + 1, r.get("studente", ""), f'{r.get("punti", 0)}/{r.get("totale", 0)}',
+                f'{r.get("pct", 0)}%', "si" if r.get("completata") else "no",
+                r.get("tempo_min", 0), r.get("t", ""))))
+        body = ("\ufeff" + "\n".join(lines)).encode("utf-8")
+        fname = f'classifica-{lesson.name.replace("_lesson", "")}.csv'
+        self.send_response(200)
+        self.send_header("Content-Type", "text/csv; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
 
 # ------------------------------------------------------------------ UI
@@ -1208,6 +1316,21 @@ transition:border-color .2s,background .2s}
     <div id="singles"></div>
   </div>
 
+  <div class="card">
+    <h2><span class="step">🏆</span> Classifica di classe</h2>
+    <div class="urlrow">
+      <select id="claSel" onchange="loadClassifica()" style="flex:1;background:#0d1220;border:1px solid var(--line);color:var(--txt);border-radius:9px;padding:9px"></select>
+      <button class="mini ghost" onclick="loadClassifica()" type="button">🔄 Aggiorna</button>
+      <button class="mini ghost" onclick="exportClassifica()" type="button">⬇ CSV</button>
+    </div>
+    <div class="urlrow" style="margin-top:8px">
+      <input id="claAddName" placeholder="Nome studente (per aggiungere a mano un risultato)">
+      <input id="claAddPts" placeholder="Punti (es. 7/10)" style="max-width:140px">
+      <button class="mini" onclick="addManuale()" type="button">Aggiungi</button>
+    </div>
+    <div id="classifica" style="margin-top:10px"><span class="empty">Nessun risultato ancora: gli studenti lo inviano dal pulsante nel pannello finale della lezione.</span></div>
+  </div>
+
   <div class="card" id="editor" hidden>
     <h2>Modifica slide <span id="edMeta" style="color:var(--mut);font-weight:400;font-size:12px"></span></h2>
     <div class="urlrow">
@@ -1283,6 +1406,55 @@ function depChips(d) {
     `<span class="chip ${d[k] ? 'ok' : 'no'}">${d[k] ? '✓' : '✗'} ${label}</span>`).join('');
 }
 
+// ---------------------------------------------------------------- classifica di classe
+async function loadClassifica() {
+  const box = $('#classifica');
+  if (!box) return;
+  try {
+    const r = await fetch('/api/classifica');
+    const j = await r.json();
+    const lesson = $('#claSel').value;
+    const entry = (j.classifiche || []).find(c => c.lesson === lesson);
+    if (!lesson || !entry || !entry.rows.length) {
+      box.innerHTML = '<span class="empty">Nessun risultato per questa lezione (o nessuna lezione scelta).</span>';
+      return;
+    }
+    const medal = i => i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : (i + 1);
+    box.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:13.5px">'
+      + '<tr style="color:var(--mut);text-align:left"><th style="padding:6px 8px">#</th><th>Studente</th><th>Punti</th><th>%</th><th>Minuti</th><th>Quando</th></tr>'
+      + entry.rows.map((r2, i) => `<tr style="border-top:1px solid var(--line)">
+        <td style="padding:6px 8px">${medal(i)}</td>
+        <td style="font-weight:700">${esc(r2.studente)}${r2.completata ? ' <span style="color:var(--ok)">✓</span>' : ''}</td>
+        <td>${r2.punti}/${r2.totale}</td><td>${r2.pct}%</td><td>${r2.tempo_min}</td><td style="color:var(--mut)">${esc(r2.t)}</td>
+      </tr>`).join('') + '</table>';
+  } catch (e) {
+    box.innerHTML = '<span class="empty">Errore: ' + esc(e.message) + '</span>';
+  }
+}
+function exportClassifica() {
+  const lesson = $('#claSel').value;
+  if (!lesson) { alert('Scegli prima una lezione.'); return; }
+  const a = document.createElement('a');
+  a.href = '/api/classifica_export?lesson=' + encodeURIComponent(lesson);
+  a.download = 'classifica-' + lesson.replace(/_lesson$/, '') + '.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+}
+async function addManuale() {
+  const lesson = $('#claSel').value;
+  const nome = $('#claAddName').value.trim();
+  const pm = ($('#claAddPts').value || '').trim().match(/^\s*(\d+)\s*\/\s*(\d+)\s*$/);
+  if (!lesson || !nome || !pm) {
+    alert('Scegli la lezione, scrivi il nome e i punti nel formato 7/10.');
+    return;
+  }
+  const r = await api('classifica', { method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ lesson, studente: nome, punti: +pm[1], totale: +pm[2], completata: true, tempo_min: 0 }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || j.ok === false) { alert('Errore: ' + (j.error || r.status)); return; }
+  $('#claAddName').value = ''; $('#claAddPts').value = '';
+  loadClassifica();
+}
+
 async function refresh() {
   try {
     const s = await api('state');
@@ -1313,6 +1485,13 @@ async function refresh() {
         <button class="mini ghost" onclick="reaudio('${escAttr(l.name)}')">Rigenera audio</button>
       </div>`).join('')
       : '<div class="empty">Nessuna lezione generata ancora.</div>';
+
+    // classifica: opzioni lezione (mantieni la selezione corrente se c'è ancora)
+    const selC = $('#claSel');
+    const prevC = selC.value;
+    selC.innerHTML = '<option value="">— scegli lezione —</option>' +
+      s.lessons.map(l => `<option value="${escAttr(l.name)}" ${l.name === prevC ? 'selected' : ''}>${esc(l.title)}</option>`).join('');
+    if (prevC && s.lessons.some(l => l.name === prevC)) loadClassifica();
 
     const singles = s.singles || [];
     $('#singles').innerHTML = singles.length ? singles.map(f =>

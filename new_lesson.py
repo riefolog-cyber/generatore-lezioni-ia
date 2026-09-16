@@ -191,7 +191,17 @@ SCHEMA = """{
         {"termine": "concetto chiave", "definizione": "spiegazione chiara in max 15 parole"},
         {"termine": "secondo concetto", "definizione": "spiegazione"},
         {"termine": "terzo concetto", "definizione": "spiegazione"}
-      ]
+      ],
+      "classificazione": {
+        "istruzione": "Assegna ogni elemento alla categoria giusta.",
+        "categorie": ["prima categoria", "seconda categoria"],
+        "elementi": [
+          {"testo": "elemento da classificare", "categoria": "prima categoria"},
+          {"testo": "altro elemento", "categoria": "seconda categoria"},
+          {"testo": "terzo elemento", "categoria": "prima categoria"},
+          {"testo": "quarto elemento", "categoria": "seconda categoria"}
+        ]
+      }
     }
   ]
 }"""
@@ -272,6 +282,10 @@ def _regole_adattive(nchars, profilo=None):
   "errore" riporta ESATTAMENTE le parole sbagliate del brano).
 - Ogni modulo ha ESATTAMENTE 3 "flashcards" termine/definizione sui concetti
   chiave (definizioni brevi, definizioni diverse tra loro).
+- SOLO se il materiale offre concetti raggruppabili in 2-3 CATEGORIE nette
+  (es. cause/effetti, vero/mito, tipi), aggiungi anche "classificazione":
+  2-3 categorie, 4-6 elementi (testo breve max 6 parole, categoria esistente).
+  Se le categorie non sono nette, ometti del tutto "classificazione".
 - MATERIALE SCARSO: se un'attività richiede contenuti che nel documento non
   esistono, omettila o rendila più semplice (3 opzioni, 1 abbinamento, 2
   flashcards) piuttosto che inventare.""", 3, 4)
@@ -285,7 +299,11 @@ def _regole_adattive(nchars, profilo=None):
 - Ogni modulo ha ESATTAMENTE 1 "errore" da trovare (brano 15-25 parole;
   "errore" riporta ESATTAMENTE le parole sbagliate del brano).
 - Ogni modulo ha ESATTAMENTE 3 "flashcards" termine/definizione sui concetti
-  chiave (definizioni brevi, definizioni diverse tra loro).""",
+  chiave (definizioni brevi, definizioni diverse tra loro).
+- SOLO se il materiale offre concetti raggruppabili in 2-3 CATEGORIE nette
+  (es. cause/effetti, vero/mito, tipi), aggiungi anche "classificazione":
+  2-3 categorie, 4-6 elementi (testo breve max 6 parole, categoria esistente).
+  Se le categorie non sono nette, ometti del tutto "classificazione".""",
             *profilo_moduli(profilo))
 
 
@@ -867,6 +885,29 @@ def _check_struct(struct):
                     good_fc.append({"termine": str(f0["termine"]),
                                     "definizione": str(f0["definizione"])})
         m["flashcards"] = good_fc[:3]
+        # classificazione: 2-3 categorie, elementi brevi con categoria esistente
+        cl = m.get("classificazione")
+        m["classificazione"] = None
+        if isinstance(cl, dict):
+            cats_raw = cl.get("categorie") if isinstance(cl.get("categorie"), list) else []
+            cats = [str(x).strip()[:40] for x in cats_raw
+                    if str(x).strip()][:3]
+            items_raw = cl.get("elementi") if isinstance(cl.get("elementi"), list) else []
+            items = []
+            for it in items_raw:
+                if not isinstance(it, dict):
+                    continue
+                t = str(it.get("testo") or "").strip()[:60]
+                cat = str(it.get("categoria") or "").strip()
+                if not t or cat not in cats:
+                    continue
+                items.append({"testo": t, "categoria": cat})
+            # ogni categoria deve avere almeno un elemento, altrimenti è inutile
+            if len(cats) >= 2 and len(items) >= 4 and \
+                    all(any(i["categoria"] == c for i in items) for c in cats):
+                m["classificazione"] = {"istruzione": str(cl.get("istruzione") or
+                                        "Assegna ogni elemento alla categoria giusta."),
+                                        "categorie": cats, "elementi": items[:6]}
         # errori: brano + correzione; "errore" (parte esatta sbagliata) viene
         # propagato come "sbagliato" per la verifica del punto esatto nel player
         er = m.get("errori")
@@ -986,7 +1027,7 @@ def fallback_structure(ext):
             "outro": "Hai completato il percorso: ricorda i concetti principali.",
             "citazione": "La conoscenza cresce quando la condividi e la verifichi.",
             "moduli": [{**m, "vero_falso": [], "sequenza": None, "compila": [],
-                        "scenari": None, "errori": []} for m in moduli]}
+                        "scenari": None, "errori": [], "classificazione": None} for m in moduli]}
 
 
 # ================================================================== 3. slide
@@ -1003,6 +1044,7 @@ ICONS = {
     "errore": "🔍",
     "gloss": "📖",
     "exam": "🎓",
+    "classifica": "🗂️",
     "end": "🏁",
 }
 
@@ -1104,11 +1146,19 @@ def bloom_rubric_text(profilo, stats):
 # da queste, così i tipi si alternano da un modulo all'altro.
 EXTRA_ROTATION = ["vf", "compila", "seq", "scenario", "errore", "flashcards"]
 
+# La classifica (trascina nella categoria) entra nella rotazione dalle slide
+# successive: compare circa ogni 4 moduli (es. al 5°), così il tipo resta una
+# sorpresa e non affolla i primi moduli.
+EXTRA_ROTATION_CLASS = ["vf", "compila", "seq", "classifica", "errore", "flashcards"]
+
 
 def _extra_keys(i):
-    """Le 2 attività extra per il modulo i (rotazione circolare)."""
-    return [EXTRA_ROTATION[(i * 2) % len(EXTRA_ROTATION)],
-            EXTRA_ROTATION[(i * 2 + 1) % len(EXTRA_ROTATION)]]
+    """Le 2 attività extra per il modulo i (rotazione circolare).
+    Dalle slide intermedie la rotazione include anche la classifica (drag &
+    drop su categorie): viene usata solo se l'LLM ha prodotto dati validi."""
+    rot = EXTRA_ROTATION_CLASS if i >= 2 else EXTRA_ROTATION
+    return [rot[(i * 2) % len(rot)],
+            rot[(i * 2 + 1) % len(rot)]]
 
 
 def build_slides(struct, draft=False):
@@ -1243,6 +1293,20 @@ def build_slides(struct, draft=False):
                     "Caccia all'errore: leggi il brano, individua la parte sbagliata e correggila.",
                     ICONS["errore"])
 
+        if "classifica" in extras:
+            cl = m.get("classificazione")
+            if isinstance(cl, dict) and cl.get("categorie") and cl.get("elementi"):
+                items = [{"t": e2["testo"], "cat": cl["categorie"].index(e2["categoria"])}
+                         for e2 in cl["elementi"] if e2.get("categoria") in cl["categorie"]]
+                if len(items) >= 4:
+                    add(f"Trascina nella categoria — modulo {i + 1}",
+                        [{"callout": "Trascina nella categoria"},
+                         {"classifica": {"instr": cl.get("istruzione") or
+                                         "Trascina ogni elemento nella categoria giusta.",
+                                         "cats": cl["categorie"], "items": items}}],
+                        "Ora ordina gli elementi: trascina o clicca ciascuno nella categoria giusta.",
+                        ICONS["classifica"])
+
     # abbinamento riepilogo (una sola attività, presa da tutti i moduli)
     pairs = []
     for m in moduli:
@@ -1311,6 +1375,23 @@ def build_slides(struct, draft=False):
 EDGE_VOICE = CONFIG.get("edge_voice", "it-IT-GiuseppeMultilingualNeural")
 EDGE_RATE = CONFIG.get("edge_rate", "-4%")
 EDGE_BITRATE = f"{int(CONFIG.get('audio_bitrate', 96))}k"  # post-produzione a 44.1 kHz
+# Voce secondaria per le DOMANDE (voci alternate): se configurata (es.
+# "it-IT-ElsaNeural"), i passaggi di verifica usano una voce diversa da quella
+# della narrazione: la lezione suona come un dialogo tra due voci.
+EDGE_VOICE_Q = (CONFIG.get("edge_voice_domande") or "").strip()
+_TTS_Q_HINTS = ("?", "verifica", "domanda", "quiz", "abbina", "mettiti alla prova",
+                "ordina", "trascina", "scegli", "classifica", "giudica", "sfida")
+
+
+def voice_for_text(text):
+    """Voce edge per questo testo: la voce 'domande' se configurata e il testo
+    lo suggerisce (punto interrogativo o verbi di verifica), altrimenti la voce
+    principale della narrazione. Con Piper/silenzio non cambia nulla."""
+    if EDGE_VOICE_Q and EDGE_VOICE_Q != EDGE_VOICE:
+        t = (text or "").strip().lower()
+        if t.endswith("?") or any(h in t for h in _TTS_Q_HINTS):
+            return EDGE_VOICE_Q
+    return EDGE_VOICE
 
 
 def _ffmpeg_probe(path):
@@ -1390,14 +1471,15 @@ def _polish_mp3(src, bitrate="96k"):
     return False
 
 
-def _try_edge_tts(text, mp3_path):
-    """Sintesi con edge-tts. Ritorna (ok, words): words = timing reali [(a,b,txt)]."""
+def _try_edge_tts(text, mp3_path, voice=None):
+    """Sintesi con edge-tts. Ritorna (ok, words): words = timing reali [(a,b,txt)].
+    `voice` permette la voce secondaria (voci alternate per le domande)."""
     try:
         import asyncio
         import edge_tts
 
         async def _run():
-            comm = edge_tts.Communicate(text, EDGE_VOICE, rate=EDGE_RATE,
+            comm = edge_tts.Communicate(text, voice or EDGE_VOICE, rate=EDGE_RATE,
                                         boundary="WordBoundary")
             mp3 = bytearray()
             words = []
@@ -1547,8 +1629,9 @@ def generate_audio(out_dir, slides):
     engines = {}
     for i, s in enumerate(slides):
         text = _tts_text(s.get("narration")) or "Fine di questa parte."
+        v = voice_for_text(text)   # voci alternate: la cache distingue per voce
         h = hashlib.sha1(
-            f"{CACHE_VERSION}|edge|{EDGE_VOICE}|{EDGE_RATE}|{EDGE_BITRATE}|{text}".encode("utf-8")
+            f"{CACHE_VERSION}|edge|{v}|{EDGE_RATE}|{EDGE_BITRATE}|{text}".encode("utf-8")
         ).hexdigest()
         mp3 = AUDIO / f"narration-{i + 1:02d}.mp3"
         cached_mp3 = CACHE / f"{h}.mp3"
@@ -1580,7 +1663,7 @@ def generate_audio(out_dir, slides):
             # retry con backoff + jitter: solo errori transienti (timeout/429/5xx)
             _try_edge_tts.last_retryable = True
             for attempt in range(TTS_RETRIES + 1):
-                ok, words = _try_edge_tts(text, mp3)
+                ok, words = _try_edge_tts(text, mp3, voice_for_text(text))
                 if ok:
                     break
                 if not getattr(_try_edge_tts, "last_retryable", True):

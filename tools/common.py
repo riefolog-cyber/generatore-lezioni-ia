@@ -31,6 +31,7 @@ DEFAULT_CONFIG = {
     "llm_parallel": 4,
     "voice": "it_IT-serena-high",
     "edge_voice": "it-IT-GiuseppeMultilingualNeural",
+    "edge_voice_domande": "",  # voci alternate: es. it-IT-ElsaNeural per le domande
     "edge_rate": "-4%",
     "audio_bitrate": 96,
     "theme": "dark",
@@ -89,6 +90,7 @@ def load_config():
     for env_key, cfg_key in (
         ("LLM_URL", "llm_url"), ("LLM_MODEL", "llm_model"),
         ("LLM_API_KEY", "llm_api_key"), ("EDGE_VOICE", "edge_voice"),
+        ("EDGE_VOICE_DOMANDE", "edge_voice_domande"),
         ("EDGE_RATE", "edge_rate"), ("THEME", "theme"), ("PORTA", "porta"),
     ):
         if os.environ.get(env_key):
@@ -185,6 +187,7 @@ def validate_lesson(out_dir, slides):
     if not (out_dir / "lesson-data.js").exists():
         errs.append("lesson-data.js mancante")
     quiz = matching = vf = seq = compila = scenario = errore = flashcards = glossario = 0
+    classifica = 0
     seen_audio = set()
     for i, s in enumerate(slides):
         for b in s.get("blocks", []):
@@ -238,6 +241,21 @@ def validate_lesson(out_dir, slides):
                     if not isinstance(c, dict) or not c.get("t") or not c.get("d"):
                         errs.append(f"slide {i + 1}: carta flashcards malformata")
                         break
+            if "classifica" in b:
+                classifica += 1
+                cl = b["classifica"]
+                cats = cl.get("cats", []) if isinstance(cl, dict) else []
+                items = cl.get("items", []) if isinstance(cl, dict) else []
+                if len(cats) < 2:
+                    errs.append(f"slide {i + 1}: classifica con meno di 2 categorie")
+                if len(items) < 4:
+                    errs.append(f"slide {i + 1}: classifica con meno di 4 elementi")
+                for it in items:
+                    if (not isinstance(it, dict) or not it.get("t")
+                            or not isinstance(it.get("cat"), int)
+                            or not (0 <= it.get("cat", -1) < len(cats))):
+                        errs.append(f"slide {i + 1}: elemento classifica malformato")
+                        break
             if "glossario" in b:
                 gl = b["glossario"]
                 groups = gl.get("groups", []) if isinstance(gl, dict) else []
@@ -290,6 +308,7 @@ def validate_lesson(out_dir, slides):
         "scenario": scenario,
         "errore": errore,
         "flashcards": flashcards,
+        "classifica": classifica,
         "glossario": glossario,
         "matching": matching,
         "audio": len(seen_audio),

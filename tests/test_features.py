@@ -164,7 +164,7 @@ def test_scorm_handout(tmp_path):
     import json as _j
     lsn = tmp_path / "Prova_lesson"
     lsn.mkdir()
-    (lsn / "index.html").write_text("<html>lezione</html>", encoding="utf-8")
+    (lsn / "index.html").write_text("<html><head><title>t</title></head><body>lezione</body></html>", encoding="utf-8")
     (lsn / "lesson-data.js").write_text(
         "window.LESSON_DATA = " + _j.dumps(
             {"titolo": "Prova", "profilo": {"durata": "standard"},
@@ -177,6 +177,149 @@ def test_scorm_handout(tmp_path):
     z = export_scorm(lsn, tmp_path / "p_scorm.zip")
     assert z.exists()
     import zipfile
-    assert "imsmanifest.xml" in zipfile.ZipFile(z).namelist()
+    import xml.etree.ElementTree as ET
+    with zipfile.ZipFile(z) as zf:
+        names = zf.namelist()
+        assert "imsmanifest.xml" in names
+        assert "scorm-adapter.js" in names
+        # manifest XML ben formato, con ogni file del pacchetto elencato
+        root = ET.fromstring(zf.read("imsmanifest.xml").decode("utf-8"))
+        assert root.tag.endswith("manifest")
+        declared = {el.get("href") for el in root.iter() if el.tag.endswith("file")}
+        assert "index.html" in declared and "scorm-adapter.js" in declared
+        assert {n for n in names if n != "imsmanifest.xml"} <= declared
+        # adapter iniettato in index.html DENTRO lo zip, non come doppio tag
+        idx = zf.read("index.html").decode("utf-8")
+        assert idx.count("scorm-adapter.js") == 1
+        assert "LMSInitialize" in zf.read("scorm-adapter.js").decode("utf-8")
+    # l'export è idempotente e la cartella originale NON viene toccata
+    assert "scorm-adapter" not in (lsn / "index.html").read_text(encoding="utf-8")
+    assert export_scorm(lsn, tmp_path / "p_scorm2.zip").exists()
+    assert "scorm-adapter" not in (lsn / "index.html").read_text(encoding="utf-8")
     h = export_handout(lsn, tmp_path / "disp.html")
     assert h.exists() and "Dispensa" in h.read_text(encoding="utf-8")
+
+
+# ==================================================================
+# Nuove funzionalità: classifica (drag & drop), voci alternate, badge,
+# mappa percorso, classifica di classe
+# ==================================================================
+
+def _mod_cl():
+    m = _mod("C1")
+    m["classificazione"] = {
+        "istruzione": "Assegna ogni elemento.",
+        "categorie": ["Animali", "Piante"],
+        "elementi": [{"testo": "Gatto", "categoria": "Animali"},
+                     {"testo": "Rosa", "categoria": "Piante"},
+                     {"testo": "Delfino", "categoria": "Animali"},
+                     {"testo": "Quercia", "categoria": "Piante"}],
+    }
+    return m
+
+
+def test_classificazione_check_and_slides():
+    from new_lesson import _check_struct, build_slides
+    struct = {"titolo": "T", "sottotitolo": "s", "intro": "i",
+              "outro": "o", "citazione": "c", "moduli": [_mod_cl(), _mod("B"), _mod("D")]}
+    _check_struct(struct)
+    cl = struct["moduli"][0]["classificazione"]
+    assert cl and len(cl["categorie"]) == 2 and len(cl["elementi"]) == 4
+    # categoria inesistente scartata
+    struct["moduli"][0]["classificazione"]["elementi"][0]["categoria"] = "Minerali"
+    _check_struct(struct)
+    assert struct["moduli"][0]["classificazione"] is None
+    # slide di classifica generata quando la rotazione la assegna (modulo 5, i=4):
+    # servono almeno 5 moduli
+    struct2 = {"titolo": "T", "sottotitolo": "s", "intro": "i",
+               "outro": "o", "citazione": "c",
+               "moduli": [_mod("A"), _mod("B"), _mod("C"), _mod("D"), _mod_cl(), _mod("E")]}
+    _check_struct(struct2)
+    slides = build_slides(struct2)
+    cl_slides = [s for s in slides if any("classifica" in b for b in s["blocks"])]
+    assert len(cl_slides) == 1 and "Trascina" in cl_slides[0]["title"]
+    items = next(b for b in cl_slides[0]["blocks"] if "classifica" in b)["classifica"]["items"]
+    assert all(0 <= it["cat"] < 2 for it in items)
+
+
+def test_classifica_validation_and_handout(tmp_path):
+    slides = [{"title": "Classifica", "audio": "./assets/audio/narration-01.mp3",
+               "duration": 3.0, "caption": "./assets/captions/narration-01.vtt",
+               "words": [[0, 1, "x"]],
+               "blocks": [{"classifica": {"cats": ["A", "B"],
+                                          "items": [{"t": "x1", "cat": 0},
+                                                    {"t": "x2", "cat": 1},
+                                                    {"t": "x3", "cat": 0},
+                                                    {"t": "x4", "cat": 1}]}}]}]
+    out = tmp_path / "L2_lesson"
+    (out / "assets" / "audio").mkdir(parents=True)
+    (out / "assets" / "captions").mkdir(parents=True)
+    (out / "index.html").write_text("<html></html>", encoding="utf-8")
+    (out / "lesson-data.js").write_text("window.LESSON_DATA = {};", encoding="utf-8")
+    (out / "assets" / "audio" / "narration-01.mp3").write_bytes(b"\x00" * 2048)
+    (out / "assets" / "captions" / "narration-01.vtt").write_text(
+        "WEBVTT\n\n1\n00:00:00,000 --> 00:00:01,000\nx", encoding="utf-8")
+    from common import validate_lesson
+    ok, errs, stats = validate_lesson(out, slides)
+    assert ok, errs
+    assert stats["classifica"] == 1
+    import json as _j
+    (out / "lesson-data.js").write_text(
+        "window.LESSON_DATA = " + _j.dumps(
+            {"titolo": "L2", "slides": [{"title": "Classifica", "narration": "n",
+              "blocks": [{"classifica": {"cats": ["A", "B"],
+                                        "items": [{"t": "x", "cat": 1}]}}]}]}),
+        encoding="utf-8")
+    from export_handout import export_handout
+    txt = export_handout(out, tmp_path / "disp2.html").read_text(encoding="utf-8")
+    assert "A:" in txt and "B:" in txt
+
+
+def test_voci_alternate_config_and_choice():
+    import new_lesson
+    assert hasattr(new_lesson, "voice_for_text")
+    v = new_lesson.voice_for_text("Qual è la capitale? Verifica le tue conoscenze.")
+    assert v in (new_lesson.EDGE_VOICE, new_lesson.EDGE_VOICE_Q or new_lesson.EDGE_VOICE)
+    # con voce domande configurata, il testo con "?" la usa
+    old, oldq = new_lesson.EDGE_VOICE, new_lesson.EDGE_VOICE_Q
+    try:
+        new_lesson.EDGE_VOICE, new_lesson.EDGE_VOICE_Q = "V-Narr", "V-Dom"
+        assert new_lesson.voice_for_text("Che cosa significa?") == "V-Dom"
+        assert new_lesson.voice_for_text("Ora un gioco: giudica se è vero.") == "V-Dom"
+        assert new_lesson.voice_for_text("Ripassiamo insieme il concetto.") == "V-Narr"
+    finally:
+        new_lesson.EDGE_VOICE, new_lesson.EDGE_VOICE_Q = old, oldq
+
+
+def test_player_contains_new_features(tmp_path):
+    from player_template import write_player
+    out = tmp_path / "P_lesson"
+    out.mkdir()
+    write_player(out, "Test Nuove Funzioni")
+    js = (out / "main.js").read_text(encoding="utf-8")
+    html = (out / "index.html").read_text(encoding="utf-8")
+    css = (out / "main.css").read_text(encoding="utf-8")
+    # F1: invio classifica
+    assert "LESSON_DIR" in html and "/api/classifica" in js
+    # F3: attività classifica
+    assert "blockClassify" in js and "clzone" in css
+    # F4: mappa del percorso
+    assert 'id="map"' in html and "paintMap" in js
+    # F5: badge
+    assert "BADGES" in js and "btnBadges" in html and "badge-toast" in css
+    # hook SCORM ancora presente
+    assert "reportProgress" in js
+
+
+def test_classifica_add_and_view(tmp_path, monkeypatch):
+    import panel
+    monkeypatch.setattr(panel, "CLASSIFICA_FILE", tmp_path / "classifica.json")
+    panel._classifica_add("X_lesson", "Alice", 8, 10, True, 4)
+    panel._classifica_add("X_lesson", "Bob", 6, 10, True, 3)
+    panel._classifica_add("X_lesson", "Alice", 9, 10, True, 5)   # migliora il suo best
+    panel._classifica_add("Y_lesson", "Carl", 2, 10, False, 9)
+    view = panel._classifica_view()
+    by = {c["lesson"]: c["rows"] for c in view["classifiche"]}
+    assert [r["studente"] for r in by["X_lesson"]] == ["Alice", "Bob"]
+    assert by["X_lesson"][0]["punti"] == 9
+    assert len(by["Y_lesson"]) == 1

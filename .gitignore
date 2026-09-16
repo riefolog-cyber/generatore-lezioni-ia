@@ -18,6 +18,7 @@ _generated.json
 .progress.json
 job_history.json
 .opencode/
+classifica.json
 
 # log di generazione/avvio
 *.log

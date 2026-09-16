@@ -58,6 +58,15 @@ def export_handout(lesson_dir, out_path=None):
             if "flashcards" in b:
                 for c in b["flashcards"].get("cards", []):
                     parts.append(f"<p><b>{esc(c.get('t',''))}:</b> {esc(c.get('d',''))}</p>")
+            if "classifica" in b:
+                cl = b["classifica"] or {}
+                cats = cl.get("cats", [])
+                parts.append(f"<h3>{esc(cl.get('instr') or 'Trascina nella categoria')}</h3>")
+                for ci, cat in enumerate(cats):
+                    inside = [esc(str(i.get('t', ''))) for i in cl.get("items", [])
+                              if i.get("cat") == ci]
+                    parts.append(f"<p><b>{esc(str(cat))}:</b> "
+                                 + (", ".join(inside) or "—") + "</p>")
             if "glossario" in b:
                 for gr in (b["glossario"] or {}).get("groups", []):
                     parts.append(f"<h3>Glossario — {esc(gr.get('modulo','Modulo'))}</h3><ul>")

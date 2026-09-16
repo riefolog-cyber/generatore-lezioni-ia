@@ -310,6 +310,7 @@ def test_export_single_incorpora_css_js_audio():
         assert 'href="main.css' not in html
         assert 'src="main.js' not in html
         assert 'src="lesson-data.js' not in html
+        assert 'assets/audio/narration-01.mp3' not in html
 
 
 # ---------------------------------------------------------------- sources
