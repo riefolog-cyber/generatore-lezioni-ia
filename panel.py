@@ -1174,12 +1174,25 @@ PANEL_HTML = r"""<!DOCTYPE html>
 <style>
 :root{--bg:#0d1220;--card:#161d33;--line:#2a3554;--txt:#eef2ff;--mut:#93a0c4;
 --acc:#5b7bd5;--ok:#3ecf8e;--err:#ff6b6b;--warn:#ffd166}
+html[data-theme="light"]{--bg:#eef2fb;--card:#ffffff;--line:#d5dff0;--txt:#17233b;
+--mut:#5a6a8a;--acc:#3f63c8;--ok:#128a4a;--err:#d64545;--warn:#9a6b00}
 *{box-sizing:border-box}
 [hidden]{display:none!important}
 body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--txt);
-margin:0;padding:26px 18px 60px}
+margin:0;padding:26px 18px 60px;transition:background .3s ease,color .3s ease}
 .wrap{max-width:960px;margin:0 auto}
+.topbar{display:flex;align-items:center;justify-content:space-between;gap:12px}
 h1{font-size:22px;margin:0 0 4px}
+#btnTheme{font-size:18px;line-height:1;padding:8px 12px;border-radius:10px;flex:0 0 auto}
+html[data-theme="light"] pre{background:#f1f5fd}
+html[data-theme="light"] .urlrow input,html[data-theme="light"] .urlrow textarea,
+html[data-theme="light"] .urlrow select,html[data-theme="light"] select{background:#f1f5fd!important;color:var(--txt)!important}
+html[data-theme="light"] .chip{background:#f1f5fd}
+html[data-theme="light"] .row{border-bottom-color:var(--line)}
+html[data-theme="light"] .upzone:hover,html[data-theme="light"] .upzone.drag{background:#e3eaf7}
+html[data-theme="light"] .card h2{color:#2c3d62}
+html[data-theme="light"] .badge{background:#e3eaf7;color:#2c3d62}
+html[data-theme="light"] a.apri{color:#2b5fc7}
 .sub{color:var(--mut);font-size:13px;margin-bottom:20px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;
 padding:16px 18px;margin-bottom:16px}
@@ -1243,7 +1256,10 @@ transition:border-color .2s,background .2s}
 </head>
 <body>
 <div class="wrap">
-  <h1>🎛 Pannello di controllo — Generatore lezioni</h1>
+  <div class="topbar">
+    <h1>🎛 Pannello di controllo — Generatore lezioni</h1>
+    <button id="btnTheme" class="ghost" type="button" title="Tema chiaro / scuro">☀️</button>
+  </div>
   <div class="sub" id="statusline">…</div>
   <div id="stale" style="display:none;margin:10px 0;padding:10px 14px;border:1px solid #ffb020;
        background:#2a2205;color:#ffd27a;border-radius:8px;font-size:14px">
@@ -1408,6 +1424,16 @@ transition:border-color .2s,background .2s}
 </div>
 
 <script>
+// Tema chiaro/scuro pannello (icona in alto, persistente)
+function applyPanelTheme(tt){
+  document.documentElement.dataset.theme = tt;
+  try{localStorage.setItem('panel-theme', tt);}catch(e){}
+  const b = document.querySelector('#btnTheme');
+  if(b) b.textContent = tt === 'dark' ? '☀️' : '🌙';
+}
+let _startTheme = 'dark';
+try{_startTheme = localStorage.getItem('panel-theme') || 'dark';}catch(e){}
+applyPanelTheme(_startTheme);
 const $ = s => document.querySelector(s);
 let busy = false;
 const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
@@ -1870,6 +1896,8 @@ async function delEditor() {
   if (!r.ok || !j.ok) { alert('Eliminazione fallita: ' + (j.error || r.status)); return; }
   ED.idx = 0; openEditor(ED.lesson);
 }
+document.querySelector('#btnTheme').onclick = () =>
+  applyPanelTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
 loadVoices();
 
 refresh();
