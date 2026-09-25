@@ -2,7 +2,10 @@
   "llm_url": "http://localhost:20128/v1",
   "llm_model": "gemini/gemini-3.1-flash-lite-preview",
   "llm_api_key": "",
-  "llm_modelli_fallback": ["groq/openai/gpt-oss-120b", "comboact"],
+  "llm_modelli_fallback": [
+    "groq/openai/gpt-oss-120b",
+    "comboact"
+  ],
   "llm_max_tokens": 8000,
   "llm_timeout": 120,
   "llm_deadline": 240,
@@ -21,6 +24,9 @@
   "max_upload_mb": 100,
   "pin_docente": "",
   "cache_max_mb": 300,
+  "whisper_model": "base",
+  "backup_keep": 14,
+  "backup_interval_min": 60,
   "tts_workers": 4,
   "tts_retries": 2,
   "profilo_durata": "standard",

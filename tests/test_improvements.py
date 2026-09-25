@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 """Test delle migliorie del pannello: lezioni, backup, QR e rete."""
+import json
 import sys
+import time
 from pathlib import Path
+
+import pytest
 
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
@@ -115,10 +119,19 @@ def test_class_repository_migrates_json_and_keeps_compatibility(tmp_path):
 
 
 def test_panel_blocks_duplicate_generation_jobs():
-    from pathlib import Path
-    source = (Path(__file__).resolve().parent.parent / "panel.py").read_text(encoding="utf-8")
-    assert "Attenzione: questo materiale" in source
-    assert "same_running" in source and "same_queued" in source
+    import panel
+    panel.JOB.update(running=True, kind="generazione", source="Prova.m4a")
+    panel.QUEUE.clear()
+    try:
+        assert panel._material_job_pending("Prova.m4a")
+        assert not panel._material_job_pending("Altro.m4a")
+        panel.JOB["running"] = False
+        panel.QUEUE.append((lambda: None, "generazione", "Coda.m4a"))
+        assert panel._material_job_pending("Coda.m4a")
+    finally:
+        panel.JOB["running"] = False
+        panel.JOB["source"] = None
+        panel.QUEUE.clear()
 
 
 def test_audio_transcription_log_shows_duration(tmp_path):
@@ -128,6 +141,154 @@ def test_audio_transcription_log_shows_duration(tmp_path):
     assert _audio_duration(tmp_path / "inesistente.mp3") is None
 
 
+def test_panel_settings_validates_and_hides_pin(tmp_path):
+    from tools.panel_settings import public_config, update_public
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"llm_api_key": "segreto", "porta": 9000,
+                                "pin_docente": "1234", "whisper_model": "small"}),
+                    encoding="utf-8")
+    public = public_config(path)
+    assert public["porta"] == 9000 and public["whisper_model"] == "small"
+    assert public["pin_configured"] is True and public["pin_docente"] == ""
+    assert "llm_api_key" not in public
+    updated = update_public({"max_upload_mb": 55, "whisper_model": "tiny"}, path)
+    assert updated["max_upload_mb"] == 55 and updated["whisper_model"] == "tiny"
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["llm_api_key"] == "segreto" and saved["pin_docente"] == "1234"
+    with pytest.raises(ValueError):
+        update_public({"porta": 10}, path)
+    with pytest.raises(ValueError):
+        update_public({"pin_docente": "abc"}, path)
+
+
+def test_materials_list_delete_and_storage(tmp_path):
+    from tools.materials import delete_material, list_materials, storage_report
+    (tmp_path / "Prova_lesson").mkdir()
+    (tmp_path / "Prova_lesson" / "index.html").write_text("ok", encoding="utf-8")
+    (tmp_path / "Prova.txt").write_text("testo", encoding="utf-8")
+    (tmp_path / "audio.m4a").write_bytes(b"x" * 50)
+    rows = {m["name"]: m for m in list_materials(tmp_path)}
+    assert rows["Prova.txt"]["generated"] is True
+    assert rows["audio.m4a"]["generated"] is False
+    (tmp_path / "Lezióne_di_prova_lesson").mkdir()
+    (tmp_path / "Lezióne_di_prova_lesson" / "index.html").write_text("ok", encoding="utf-8")
+    (tmp_path / "Lezióne_di_prova.m4a").write_bytes(b"y" * 10)
+    audio_row = next(m for m in list_materials(tmp_path) if m["name"] == "Lezióne_di_prova.m4a")
+    assert audio_row["generated"] is True
+    with pytest.raises(ValueError):
+        delete_material(tmp_path, "audio.m4a", "audio.m4a")
+    with pytest.raises(ValueError):
+        delete_material(tmp_path, "Prova.txt", "nome sbagliato")
+    result = delete_material(tmp_path, "Prova.txt", "Prova.txt")
+    assert result["deleted"] == "Prova.txt"
+    assert (tmp_path / "Prova_lesson" / "index.html").exists()
+    assert storage_report(tmp_path)["materiali"] == 60
+
+
+def test_backups_list_create_and_restore(tmp_path):
+    from tools.backups import create_backup, list_backups, restore_backup
+    (tmp_path / "config.json").write_text(json.dumps({"backup_keep": 3}), encoding="utf-8")
+    (tmp_path / "classifica.json").write_text('[{"studente":"A"}]', encoding="utf-8")
+    (tmp_path / "job_history.json").write_text("[]", encoding="utf-8")
+    first = create_backup(tmp_path)
+    assert first and list_backups(tmp_path)[0]["name"] == first.name
+    (tmp_path / "classifica.json").write_text('[{"studente":"B"}]', encoding="utf-8")
+    (tmp_path / "classifica.sqlite3").write_bytes(b"vecchio")
+    restored = restore_backup(tmp_path, first.name)
+    assert "classifica.json" in restored
+    assert json.loads((tmp_path / "classifica.json").read_text(encoding="utf-8"))[0]["studente"] == "A"
+    assert not (tmp_path / "classifica.sqlite3").exists()
+    with pytest.raises(ValueError):
+        restore_backup(tmp_path, "../altro")
+
+
+def test_uploads_save_atomically_and_validate(tmp_path):
+    from tools.uploads import UploadTooBig, save_upload
+    ext = {".txt", ".m4a"}
+    name, replaced, copied = save_upload(tmp_path, "../materiale.txt", b"uno",
+                                        ext, 100)
+    assert name == "materiale.txt" and not replaced and not copied
+    assert (tmp_path / "materiale.txt").read_bytes() == b"uno"
+    name, replaced, copied = save_upload(tmp_path, "materiale.txt", b"due",
+                                        ext, 100)
+    assert name == "materiale.txt" and replaced and not copied
+    assert (tmp_path / "materiale.txt").read_bytes() == b"due"
+    with pytest.raises(ValueError):
+        save_upload(tmp_path, "vuoto.txt", b"", ext, 100)
+    with pytest.raises(ValueError):
+        save_upload(tmp_path, "malizioso.exe", b"x", ext, 100)
+    with pytest.raises(UploadTooBig):
+        save_upload(tmp_path, "grande.txt", b"x" * 20, ext, 10)
+    assert not list(tmp_path.glob(".upload-*.tmp"))
+
+
+def test_multipart_parser_and_validation():
+    from tools.multipart import parse_multipart
+    boundary = "ABC"
+    body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+            "filename=\"documento.txt\"\r\n\r\ncontenuto\r\n"
+            f"--{boundary}--\r\n").encode("utf-8")
+    assert parse_multipart(body, f"multipart/form-data; boundary={boundary}") == [
+        ("documento.txt", b"contenuto")]
+    with pytest.raises(ValueError):
+        parse_multipart(b"", "multipart/form-data")
+    empty = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+             "filename=\"vuoto.txt\"\r\n\r\n\r\n"
+             f"--{boundary}--\r\n").encode()
+    with pytest.raises(ValueError):
+        parse_multipart(empty, f"multipart/form-data; boundary={boundary}")
+
+
+def test_job_manager_runs_and_invalidates():
+    from tools.jobs import JobManager
+    events = []
+    manager = JobManager(lambda *args: events.append("history"),
+                         lambda: events.append("invalidate"),
+                         lambda text: events.append("error"))
+    assert manager.start(lambda: None, "generazione", "uno") == (True, False)
+    for _ in range(100):
+        if not manager.state["running"]:
+            break
+        time.sleep(0.01)
+    assert manager.state["ok"] is True
+    assert "invalidate" in events and manager.pending_source("uno") is False
+
+
+def test_whisper_cache_progress_and_cancel(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import sources
+    audio = tmp_path / "memo.m4a"
+    audio.write_bytes(b"audio-distinto")
+    progress = []
+
+    class FakeModel:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def transcribe(self, path, **kwargs):
+            return [SimpleNamespace(text="parola " * 30, end=15.0)], object()
+
+    monkeypatch.setitem(__import__("sys").modules, "faster_whisper",
+                        SimpleNamespace(WhisperModel=FakeModel))
+    monkeypatch.setattr(sources.importlib.util, "find_spec",
+                        lambda name: object() if name == "faster_whisper" else None)
+    monkeypatch.setattr(sources, "_WHISPER_MODELS", {})
+    monkeypatch.setattr(sources, "_WHISPER_CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(sources, "_audio_duration", lambda path: 30.0)
+    monkeypatch.setattr(sources, "_whisper_model_name", lambda: "base")
+    sources.begin_transcription()
+    sources.set_transcription_progress(lambda *args: progress.append(args))
+    first = sources.extract_audio(audio)
+    assert progress and progress[-1][3] is False
+    progress.clear()
+    second = sources.extract_audio(audio)
+    assert progress[-1][3] is True
+    assert first["sections"][0]["paras"] == second["sections"][0]["paras"]
+    sources.cancel_transcription()
+    assert sources.is_transcription_cancelled()
+    sources.set_transcription_progress(None)
+
+
 def test_class_repository_pin_is_optional_but_checked():
     from tools.class_repository import authorized
     assert authorized("", None)
@@ -135,8 +296,6 @@ def test_class_repository_pin_is_optional_but_checked():
     assert not authorized("1234", None)
     assert not authorized("1234", "wrong")
     assert authorized("1234", "1234")
-
-
 
 
 def test_sources_support_pptx_epub_and_audio_dispatch(tmp_path):
@@ -183,7 +342,7 @@ def test_whisper_audio_transcription_reuses_model(tmp_path, monkeypatch):
             calls.append(path)
             segments = [SimpleNamespace(text=(
                 "Questa lezione parla di storia e introduce eventi, personaggi "
-                "e concetti importanti per comprendere meglio il periodo."))]
+                "e concetti importanti per comprendere meglio il periodo."), end=30.0)]
             return segments, object()
 
     fake = SimpleNamespace(WhisperModel=FakeModel)
@@ -192,13 +351,20 @@ def test_whisper_audio_transcription_reuses_model(tmp_path, monkeypatch):
                         lambda name: object() if name == "faster_whisper" else None)
     monkeypatch.setattr(sources, "_WHISPER_MODEL", None)
     monkeypatch.setattr(sources, "_WHISPER_BACKEND", None)
+    monkeypatch.setattr(sources, "_WHISPER_MODELS", {})
+    monkeypatch.setattr(sources, "_WHISPER_CACHE_DIR", tmp_path / "cache")
+    sources.begin_transcription()
 
-    for name in ("uno.wav", "due.wav"):
+    for name, content in (("uno.wav", b"RIFF----WAVE-UNO"), ("due.wav", b"RIFF----WAVE-DUE")):
         path = tmp_path / name
-        path.write_bytes(b"RIFF----WAVE")
+        path.write_bytes(content)
         result = sources.extract_audio(path)
         assert "storia" in " ".join(result["sections"][0]["paras"])
 
     assert calls.count("init") == 1
     assert len(calls) == 3
     assert sources._WHISPER_MODEL is not None
+    cached = sources.extract_audio(tmp_path / "uno.wav")
+    assert "storia" in " ".join(cached["sections"][0]["paras"])
+    assert len(calls) == 3  # seconda chiamata: cache, nessuna nuova trascrizione
+    sources.set_transcription_progress(None)

@@ -14,11 +14,13 @@ Ogni estrattore ritorna la stessa struttura di extract_docx:
 {"title": str, "sections": [{"heading": str|None, "paras": [str, ...]}]}
 così il resto della pipeline non cambia.
 """
+import hashlib
 import importlib.util
 import json
 import os
 import re
 import subprocess
+import threading
 import time
 import urllib.request
 from html.parser import HTMLParser
@@ -27,6 +29,30 @@ from pathlib import Path
 # Whisper viene caricato solo al primo audio trascritto e riusato per gli altri.
 _WHISPER_MODEL = None
 _WHISPER_BACKEND = None
+_WHISPER_MODELS = {}
+_WHISPER_CACHE_DIR = Path(__file__).resolve().parent.parent / ".whisper_cache"
+_TRANSCRIBE_CANCEL = threading.Event()
+_TRANSCRIBE_PROGRESS = None
+
+
+def begin_transcription():
+    """Prepara un nuovo job e restituisce l'evento di cancellazione."""
+    _TRANSCRIBE_CANCEL.clear()
+    return _TRANSCRIBE_CANCEL
+
+
+def set_transcription_progress(callback):
+    global _TRANSCRIBE_PROGRESS
+    _TRANSCRIBE_PROGRESS = callback
+
+
+def cancel_transcription():
+    _TRANSCRIBE_CANCEL.set()
+    return _TRANSCRIBE_CANCEL.is_set()
+
+
+def is_transcription_cancelled():
+    return _TRANSCRIBE_CANCEL.is_set()
 SUPPORTED_EXT = {".docx", ".pdf", ".txt", ".md", ".html", ".htm", ".pptx", ".epub", ".mp3", ".m4a", ".wav"}
 
 _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -134,6 +160,74 @@ def _pulisci_estratto(ext):
     return ext
 
 
+def _whisper_model_name():
+    try:
+        from common import load_config
+        name = str(load_config().get("whisper_model") or "base").lower()
+        return name if name in ("tiny", "base", "small") else "base"
+    except Exception:
+        return "base"
+
+
+def _load_whisper_model(name):
+    """Carica una sola istanza per modello; riusata nei job successivi."""
+    global _WHISPER_MODEL, _WHISPER_BACKEND
+    if name in _WHISPER_MODELS:
+        _WHISPER_MODEL, _WHISPER_BACKEND = _WHISPER_MODELS[name]
+        return _WHISPER_MODEL
+    if importlib.util.find_spec("faster_whisper") is not None:
+        from faster_whisper import WhisperModel
+        model = WhisperModel(
+            name, device="cpu", compute_type="int8",
+            cpu_threads=max(1, min(8, os.cpu_count() or 1)))
+        _WHISPER_MODELS[name] = (model, "faster-whisper")
+        _WHISPER_MODEL, _WHISPER_BACKEND = model, "faster-whisper"
+        return model
+    if importlib.util.find_spec("whisper") is not None:
+        import whisper
+        model = whisper.load_model(name)
+        _WHISPER_MODELS[name] = (model, "whisper")
+        _WHISPER_MODEL, _WHISPER_BACKEND = model, "whisper"
+        return model
+    raise ValueError("Trascrizione Whisper non installata. "
+                     "Esegui: pip install faster-whisper")
+
+
+def _audio_fingerprint(path, model_name):
+    h = hashlib.sha256()
+    h.update(model_name.encode("utf-8"))
+    with Path(path).open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _transcript_cache_path(path, model_name):
+    return _WHISPER_CACHE_DIR / f"{_audio_fingerprint(path, model_name)}.json"
+
+
+def _load_transcript_cache(path, model_name):
+    try:
+        data = json.loads(_transcript_cache_path(path, model_name).read_text(encoding="utf-8"))
+        if data.get("model") == model_name and int(data.get("chars", 0)) >= 50:
+            return data
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
+def _save_transcript_cache(path, model_name, title, text, duration):
+    try:
+        _WHISPER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        target = _transcript_cache_path(path, model_name)
+        target.write_text(json.dumps({
+            "model": model_name, "title": title, "text": text,
+            "duration": duration, "chars": len(text), "t": time.time(),
+        }, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def _split_into_sections(text, title=None):
     """Trasforma testo piatto in sezioni: intestazioni brevi (non frasi)
     diventano heading, il resto paragrafi."""
@@ -239,49 +333,48 @@ def _format_duration(seconds):
 
 
 def extract_audio(path):
-    """Trascrizione locale con Whisper; il modello viene riusato."""
+    """Trascrizione locale con cache hash, avanzamento e cancellazione."""
     p = Path(path)
     if p.suffix.lower() not in (".mp3", ".m4a", ".wav"):
         raise ValueError("Formato audio non supportato: usa MP3, M4A o WAV.")
-    dur = _audio_duration(p)
-    dur_txt = ""
-    if dur:
-        dur_txt = f" (durata {_format_duration(dur)}: l'operazione può richiedere qualche minuto)"
-    global _WHISPER_MODEL, _WHISPER_BACKEND
-    if _WHISPER_MODEL is None:
-        if importlib.util.find_spec("faster_whisper") is not None:
-            try:
-                from faster_whisper import WhisperModel
-                # Su CPU multi-core la trascrizione è quasi lineare: sul PC
-                # Snapdragon X (8 core) il modello base passa da ~102s a ~15s
-                # per 30s di audio, senza cambiare modello o qualità.
-                cpu_threads = max(1, min(8, os.cpu_count() or 1))
-                _WHISPER_MODEL = WhisperModel(
-                    "base", device="cpu", compute_type="int8",
-                    cpu_threads=cpu_threads)
-                _WHISPER_BACKEND = "faster-whisper"
-            except Exception:
-                _WHISPER_MODEL = None
-        if _WHISPER_MODEL is None and importlib.util.find_spec("whisper") is not None:
-            try:
-                import whisper
-                _WHISPER_MODEL = whisper.load_model("base")
-                _WHISPER_BACKEND = "whisper"
-            except Exception:
-                _WHISPER_MODEL = None
-    if _WHISPER_MODEL is None:
-        raise ValueError(
-            "Trascrizione Whisper non installata. Esegui: "
-            "pip install faster-whisper")
-    print(f"  Whisper ({_WHISPER_BACKEND}, {min(8, os.cpu_count() or 1)} core): "
+    model_name = _whisper_model_name()
+    duration = _audio_duration(p)
+    cached = _load_transcript_cache(p, model_name)
+    if cached:
+        print(f"  Whisper: trascrizione in cache ({cached['chars']} caratteri).", flush=True)
+        if _TRANSCRIBE_PROGRESS:
+            _TRANSCRIBE_PROGRESS(100, 0, duration, True, model_name)
+        return _split_into_sections(cached["text"], title=cached.get("title") or p.stem)
+    dur_txt = f", durata {_format_duration(duration)}" if duration else ""
+    print(f"  Whisper modello {model_name} ({min(8, os.cpu_count() or 1)} core): "
           f"trascrizione di {p.name}{dur_txt}…", flush=True)
-    if _WHISPER_BACKEND == "faster-whisper":
-        segments, _ = _WHISPER_MODEL.transcribe(str(p), language="it")
-        text = " ".join(s.text.strip() for s in segments if s.text.strip())
+    model = _load_whisper_model(model_name)
+    backend = _WHISPER_BACKEND
+    started = time.time()
+    parts = []
+    if backend == "faster-whisper":
+        segments, _ = model.transcribe(str(p), language="it")
+        for segment in segments:
+            if _TRANSCRIBE_CANCEL.is_set():
+                raise ValueError("Trascrizione annullata dall'utente.")
+            if str(getattr(segment, "text", "")).strip():
+                parts.append(segment.text.strip())
+            position = float(getattr(segment, "end", 0) or 0)
+            pct = min(99, int(position / duration * 100)) if duration else 0
+            left = max(0, int((time.time() - started) * (100 - pct) / max(1, pct))) if pct else 0
+            if _TRANSCRIBE_PROGRESS:
+                _TRANSCRIBE_PROGRESS(pct, left, duration, False, model_name)
     else:
-        text = str(_WHISPER_MODEL.transcribe(str(p)).get("text", "")).strip()
+        if _TRANSCRIBE_CANCEL.is_set():
+            raise ValueError("Trascrizione annullata dall'utente.")
+        text = str(model.transcribe(str(p)).get("text", "")).strip()
+        parts = [text]
+        if _TRANSCRIBE_PROGRESS:
+            _TRANSCRIBE_PROGRESS(100, 0, duration, True, model_name)
+    text = " ".join(parts).strip()
     if len(text) < 50:
         raise ValueError("Trascrizione audio troppo breve o non riconosciuta.")
+    _save_transcript_cache(p, model_name, p.stem, text, duration)
     return _split_into_sections(text, title=p.stem)
 
 # ------------------------------------------------------------------ DOCX

@@ -45,6 +45,9 @@ DEFAULT_CONFIG = {
     "tts_workers": 4,
     "tts_retries": 2,
     "audio_loudnorm_dual": False,
+    "whisper_model": "base",
+    "backup_keep": 14,
+    "backup_interval_min": 60,
     "profilo_durata": "standard",
     "profilo_livello": "intermedio",
     "profilo_obiettivo": "auto",
@@ -118,6 +121,11 @@ def load_config():
     cfg["num_moduli_min"], cfg["num_moduli_max"] = nmin, nmax
     if cfg.get("theme") not in ("dark", "light"):
         cfg["theme"] = "dark"
+    if cfg.get("whisper_model") not in ("tiny", "base", "small"):
+        cfg["whisper_model"] = "base"
+    cfg["backup_keep"] = _clamp_int(cfg.get("backup_keep", 14), 14, 1, 100)
+    cfg["backup_interval_min"] = _clamp_int(
+        cfg.get("backup_interval_min", 60), 60, 15, 1440)
     if not re.fullmatch(r"-?\d+%", str(cfg.get("edge_rate", "-4%"))):
         cfg["edge_rate"] = "-4%"
     prof = normalize_profilo(cfg)

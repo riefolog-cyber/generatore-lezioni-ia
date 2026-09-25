@@ -75,6 +75,14 @@ _check_modulo("faster_whisper", "faster-whisper",
                "Whisper (trascrizione audio locale)",
                hint="pip install faster-whisper — necessario per MP3/M4A/WAV")
 
+cfg = load_config()
+avviso(f"Whisper: modello {cfg.get('whisper_model', 'base')}; cache in .whisper_cache/",
+       cfg.get("whisper_model") in ("tiny", "base", "small"),
+       "modello non valido: usa tiny, base o small")
+avviso(f"Backup: {cfg.get('backup_keep', 14)} copie ogni {cfg.get('backup_interval_min', 60)} minuti",
+       int(cfg.get("backup_keep", 14)) >= 1 and int(cfg.get("backup_interval_min", 60)) >= 15,
+       "intervallo backup non valido")
+
 
 voice, _ = resolve_voice()
 avviso(f"voce Piper di riserva ({voice.name})", voice.exists(),

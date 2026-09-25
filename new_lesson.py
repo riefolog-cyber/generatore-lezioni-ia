@@ -1931,6 +1931,11 @@ def build_from_docx(path, force=False, bozza=False, no_cache=False,
         return _build_impl(path, force=force, bozza=bozza, no_cache=no_cache,
                            single=single, keep_folder=keep_folder, profilo=profilo)
     finally:
+        try:
+            from sources import set_transcription_progress
+            set_transcription_progress(None)
+        except Exception:
+            pass
         _unlock_build()
 
 
@@ -2010,6 +2015,17 @@ def _build_impl(source, force=False, bozza=False, no_cache=False,
                       f"{display} — l'operazione può durare qualche minuto")
     else:
         _set_progress("lettura materiale", 5, display)
+    from sources import set_transcription_progress
+    def _transcription_progress(pct, left, duration, cached, model_name):
+        overall = min(14, 5 + int(round(pct * 0.09)))
+        if cached:
+            extra = f"{display} — trascrizione recuperata dalla cache"
+        else:
+            eta = f", circa {left}s rimanenti" if left else ""
+            extra = (f"{display} — modello {model_name}, {pct}% trascritto"
+                     f"{eta}")
+        _set_progress("trascrizione audio Whisper", overall, extra)
+    set_transcription_progress(_transcription_progress)
     t_read = time.time()
     ext = extract_source(src)
     _times["lettura"] = round(time.time() - t_read, 1)

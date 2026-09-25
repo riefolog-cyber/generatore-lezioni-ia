@@ -10,6 +10,9 @@ _archify/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.kilo/
+.freebuff/
 *.pyc
 *.lock
 !requirements.lock
@@ -20,17 +23,23 @@ job_history.json
 .opencode/
 classifica.json
 classifica.sqlite3
+archivio_backup/
 
 # log di generazione/avvio
 *.log
 
-# lezioni generate (rigenerabili dal codice) e fonte docx
+# lezioni generate (rigenerabili dal codice) e materiali di partenza
 *_lesson/
 *.docx
 *.pdf
+*.mp3
+*.m4a
+*.wav
 
 # file HTML unici generati (così non finiscono in git: si rigenerano al volo)
 *_singola.html
+
+.whisper_cache/
 
 # report di classe prodotti dagli export
 report_classe.csv
