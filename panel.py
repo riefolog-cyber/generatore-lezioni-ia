@@ -28,7 +28,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import threading
 import time
 import urllib.parse
 import webbrowser
@@ -356,23 +355,17 @@ def _state():
         archived = list_archived(BASE)
     except Exception:
         archived = []
-    try:
-        from tools.backups import last_backup
-        backup = last_backup(BASE)
-    except Exception:
-        backup = None
     return {
         "materials": _materials(), "lessons": lessons, "archived": archived,
         "singles": _single_files(), "deps": _deps(),
         "lan_ip": lan_ip(), "port": RUNTIME_PORT,
         "max_upload_mb": MAX_UPLOAD_MB,
-        "last_backup": backup,
         "pipeline_stantia": _pipeline_mtime() != _PIPELINE_MTIME_START,
         "config": {k: CONFIG.get(k) for k in
                    ("theme", "voice", "edge_voice", "edge_rate",
                     "llm_model", "num_moduli_min", "num_moduli_max",
                     "profilo_durata", "profilo_livello", "profilo_obiettivo",
-                    "whisper_model", "backup_keep", "backup_interval_min")},
+                    "whisper_model")},
         "voices": EDGE_VOICES,
     }
 
@@ -466,15 +459,6 @@ class PanelHandler(_RangeHandler):
             from tools.panel_settings import public_config
             return self._json({"settings": public_config(),
                                "runtime_port": RUNTIME_PORT})
-        if path == "/api/backups":
-            from tools.backups import list_backups
-            return self._json({"backups": list_backups(BASE)})
-        if path == "/api/storage":
-            from tools.materials import storage_report
-            return self._json({"storage": storage_report(BASE)})
-        if path == "/api/materials_all":
-            from tools.materials import list_materials
-            return self._json({"materials": list_materials(BASE)})
         self.send_error(404, "API sconosciuta")
 
     def _teacher_allowed(self):
@@ -1065,35 +1049,6 @@ class PanelHandler(_RangeHandler):
                             "restart_required": restart})
             except Exception as e:  # noqa: BLE001
                 self._json({"ok": False, "error": str(e)}, 400)
-        elif parsed.path == "/api/backup_create":
-            try:
-                from tools.backups import create_backup
-                folder = create_backup(BASE)
-                self._json({"ok": True, "backup": folder.name if folder else None})
-            except Exception as e:  # noqa: BLE001
-                self._json({"ok": False, "error": str(e)}, 400)
-        elif parsed.path == "/api/backup_restore":
-            if not self._require_teacher():
-                return
-            try:
-                from tools.backups import restore_backup
-                data = self._read_json_body()
-                restored = restore_backup(BASE, str(data.get("name") or ""))
-                self._json({"ok": True, "restored": restored})
-            except Exception as e:  # noqa: BLE001
-                self._json({"ok": False, "error": str(e)}, 400)
-        elif parsed.path == "/api/material_delete":
-            if not self._require_teacher():
-                return
-            try:
-                from tools.materials import delete_material
-                data = self._read_json_body()
-                result = delete_material(BASE, str(data.get("name") or ""),
-                                        str(data.get("confirm") or ""))
-                UPLOADED.pop(result["deleted"], None)
-                self._json({"ok": True, **result})
-            except Exception as e:  # noqa: BLE001
-                self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/save_slide":
             try:
                 self._save_slide()
@@ -1211,8 +1166,6 @@ def main():
     port = free
 
     RUNTIME_PORT = port
-    from tools.backups import backup_loop
-    threading.Thread(target=backup_loop, args=(BASE,), daemon=True).start()
     url = f"http://localhost:{port}/"
     print("=" * 60)
     print("  PANNELLO DI CONTROLLO — generatore lezioni")

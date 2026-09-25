@@ -7,8 +7,7 @@ installa le dipendenze, parte il server locale e si apre nel browser
 il **pannello di controllo** (pagina grafica), con cui puoi:
 1. caricare il **materiale**: trascinalo nella zona tratteggiata del pannello
    o usa "Sfoglia" (documenti, `.pptx`, `.epub`, `.mp3`, `.m4a`, `.wav`) e premi
-   **Carica e genera**; i materiali già presenti sono elencati anche nella
-   sezione **Materiali e spazio**;
+   **Carica e genera**;
 2. generare da **link** (sito web o video YouTube);
 3. impostare il **profilo lezione**: durata (breve/standard/approfondita),
    livello (base/intermedio/avanzato), obiettivo Bloom
@@ -18,13 +17,12 @@ il **pannello di controllo** (pagina grafica), con cui puoi:
    generare come **file HTML unico** (senza cartella) e attivare la
    **trascrizione audio locale con Whisper**;
 5. usare le **impostazioni** del pannello per porta, limite upload, cache,
-   modello Whisper, backup, IP e PIN docente;
-6. gestire **materiali**, spazio occupato e **backup** dalle sezioni dedicate;
-7. **modificare** le slide dopo la generazione (titolo, narrazione, quiz)
+   modello Whisper, IP e PIN docente;
+6. **modificare** le slide dopo la generazione (titolo, narrazione, quiz)
    con rigenerazione audio della singola slide;
-8. provare le **voci** neurali (anteprima audio) prima di generare;
-9. seguire il **log** in tempo reale (errori anche in `panel_errors.log`);
-10. **aprire** le lezioni generate (anche da tablet/telefono sulla stessa rete
+7. provare le **voci** neurali (anteprima audio) prima di generare;
+8. seguire il **log** in tempo reale (errori anche in `panel_errors.log`);
+9. **aprire** le lezioni generate (anche da tablet/telefono sulla stessa rete
    Wi-Fi: l'indirizzo LAN è mostrato nel pannello).
 
 `AVVIA.bat gui` → vecchia GUI desktop (tkinter: anteprima, genera, esporta ZIP).
@@ -149,8 +147,8 @@ requirements-dev.txt    pytest (test unitari)
 tools/               common, player_template (player autogenerato),
                      sources (fonti e Whisper), export_zip, export_single,
                      class_report, selftest (QA), netdiag, qr, jobs,
-                     multipart, uploads, panel_ui, panel_settings, materials,
-                     backups, class_repository, lesson_admin
+                     multipart, uploads, panel_ui, panel_settings,
+                     class_repository, lesson_admin
 assets/voice/        modello Piper + cache audio
 ```
 
@@ -184,7 +182,7 @@ assets/voice/        modello Piper + cache audio
 - Log in `generazione.log`, errori API del pannello in `panel_errors.log`.
   Rigenera con `python new_lesson.py build file.docx --force`.
 - **Codice modulare**: `panel.py` contiene logica HTTP e compatibilità API;
-  interfaccia, coda/job, upload, impostazioni, materiali, backup, rete e
+  interfaccia, coda/job, upload, impostazioni, rete e
   classifica vivono in moduli `tools/` separati e testati.
 - **Niente pagina bianca da cache**: il server della lezione invia intestazioni
   no-cache e i file sono caricati con versione (`main.js?v=4`); se il browser
@@ -210,14 +208,6 @@ assets/voice/        modello Piper + cache audio
   file con lo stesso modello la riutilizza immediatamente. Durante il lavoro
   il pannello mostra percentuale e tempo residuo stimato e permette di
   annullare la trascrizione.
-- **Backup e ripristino**: la sezione Backup elenca le copie automatiche di
-  classifica e cronologia. Il ripristino crea prima un backup di sicurezza;
-  le impostazioni permettono di scegliere quante copie conservare e ogni
-  quanti minuti crearne una.
-- **Materiali e spazio**: la sezione omonima mostra i file di partenza, la
-  lezione corrispondente e lo spazio per materiali, lezioni, cache e backup.
-  Un materiale può essere eliminato solo digitando nuovamente il suo nome e
-  solo se la lezione corrispondente esiste già.
 - **Trascina nella categoria**: nuova attività interattiva (l'LLM la crea solo
   quando il materiale offre categorie nette): elementi da smistare su 2-3
   colonne con drag & drop o tap; punteggio al primo collocamento. Valida dal

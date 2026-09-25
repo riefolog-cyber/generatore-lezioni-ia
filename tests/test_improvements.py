@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Test delle migliorie del pannello: lezioni, backup, QR e rete."""
+"""Test delle migliorie del pannello: lezioni, impostazioni, QR e rete."""
 import json
 import sys
 import time
@@ -11,7 +11,7 @@ BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 sys.path.insert(0, str(BASE / "tools"))
 
-from tools import backups, lesson_admin
+from tools import lesson_admin
 from tools.qr import qr_png_bytes, qr_svg
 
 
@@ -61,17 +61,6 @@ def test_lesson_info_size_and_duration(tmp_path):
     assert info["duration"] == 90
     assert info["size"] > 100
     assert info["title"] == "Lezione prova"
-
-
-def test_backup_copies_and_keeps(tmp_path):
-    (tmp_path / "job_history.json").write_text("[]", encoding="utf-8")
-    (tmp_path / "classifica.json").write_text("[]", encoding="utf-8")
-    first = backups.create_backup(tmp_path, keep=1)
-    assert first and (first / "classifica.json").exists()
-    second = backups.create_backup(tmp_path, keep=1)
-    assert second and second != first
-    folders = [p for p in (tmp_path / "archivio_backup").iterdir() if p.is_dir()]
-    assert len(folders) == 1 and folders[0] == second
 
 
 def test_qr_assets_are_well_formed():
@@ -159,47 +148,6 @@ def test_panel_settings_validates_and_hides_pin(tmp_path):
         update_public({"porta": 10}, path)
     with pytest.raises(ValueError):
         update_public({"pin_docente": "abc"}, path)
-
-
-def test_materials_list_delete_and_storage(tmp_path):
-    from tools.materials import delete_material, list_materials, storage_report
-    (tmp_path / "Prova_lesson").mkdir()
-    (tmp_path / "Prova_lesson" / "index.html").write_text("ok", encoding="utf-8")
-    (tmp_path / "Prova.txt").write_text("testo", encoding="utf-8")
-    (tmp_path / "audio.m4a").write_bytes(b"x" * 50)
-    rows = {m["name"]: m for m in list_materials(tmp_path)}
-    assert rows["Prova.txt"]["generated"] is True
-    assert rows["audio.m4a"]["generated"] is False
-    (tmp_path / "Lezióne_di_prova_lesson").mkdir()
-    (tmp_path / "Lezióne_di_prova_lesson" / "index.html").write_text("ok", encoding="utf-8")
-    (tmp_path / "Lezióne_di_prova.m4a").write_bytes(b"y" * 10)
-    audio_row = next(m for m in list_materials(tmp_path) if m["name"] == "Lezióne_di_prova.m4a")
-    assert audio_row["generated"] is True
-    with pytest.raises(ValueError):
-        delete_material(tmp_path, "audio.m4a", "audio.m4a")
-    with pytest.raises(ValueError):
-        delete_material(tmp_path, "Prova.txt", "nome sbagliato")
-    result = delete_material(tmp_path, "Prova.txt", "Prova.txt")
-    assert result["deleted"] == "Prova.txt"
-    assert (tmp_path / "Prova_lesson" / "index.html").exists()
-    assert storage_report(tmp_path)["materiali"] == 60
-
-
-def test_backups_list_create_and_restore(tmp_path):
-    from tools.backups import create_backup, list_backups, restore_backup
-    (tmp_path / "config.json").write_text(json.dumps({"backup_keep": 3}), encoding="utf-8")
-    (tmp_path / "classifica.json").write_text('[{"studente":"A"}]', encoding="utf-8")
-    (tmp_path / "job_history.json").write_text("[]", encoding="utf-8")
-    first = create_backup(tmp_path)
-    assert first and list_backups(tmp_path)[0]["name"] == first.name
-    (tmp_path / "classifica.json").write_text('[{"studente":"B"}]', encoding="utf-8")
-    (tmp_path / "classifica.sqlite3").write_bytes(b"vecchio")
-    restored = restore_backup(tmp_path, first.name)
-    assert "classifica.json" in restored
-    assert json.loads((tmp_path / "classifica.json").read_text(encoding="utf-8"))[0]["studente"] == "A"
-    assert not (tmp_path / "classifica.sqlite3").exists()
-    with pytest.raises(ValueError):
-        restore_backup(tmp_path, "../altro")
 
 
 def test_uploads_save_atomically_and_validate(tmp_path):

@@ -137,7 +137,6 @@ transition:border-color .2s,background .2s}
       <div class="upmsg" id="upmsg" hidden></div>
     </div>
     <div id="materials"></div>
-    <div class="upmsg" id="backupInfo" style="text-align:center;margin-top:10px"></div>
     <div class="opts">
       <label>Durata <select id="profDurata">
         <option value="breve">Breve (3-4 moduli)</option>
@@ -291,7 +290,7 @@ transition:border-color .2s,background .2s}
       <div><b>1. Carica</b><br><span class="empty">Trascina qui un documento. Per un audio MP3/M4A/WAV spunta «Trascrizione audio con Whisper».</span></div>
       <div><b>2. Genera</b><br><span class="empty">Scegli durata e livello, poi premi «Carica e genera». Puoi usare anche un link o incollare testo.</span></div>
       <div><b>3. Condividi</b><br><span class="empty">Apri il QR a schermo intero e fai scansione dal telefono. Computer e dispositivi devono essere sulla stessa rete.</span></div>
-      <div><b>4. Assistenza</b><br><span class="empty">Se un dispositivo non si collega, premi «Controlla computer e rete». I backup si ripristinano dalla sezione Backup.</span></div>
+      <div><b>4. Assistenza</b><br><span class="empty">Se un dispositivo non si collega, premi «Controlla computer e rete».</span></div>
     </div>
   </div>
 
@@ -304,8 +303,6 @@ transition:border-color .2s,background .2s}
       <label>Modello Whisper <select id="setWhisper">
         <option value="tiny">Veloce (tiny)</option><option value="base">Bilanciato (base)</option>
         <option value="small">Preciso (small)</option></select></label>
-      <label>Backup da conservare <input id="setBackupKeep" type="number" min="1" max="100"></label>
-      <label>Backup ogni minuti <input id="setBackupInterval" type="number" min="15" max="1440"></label>
       <label>IP fisso (facoltativo) <input id="setLanIp" maxlength="15"></label>
       <label>PIN docente (facoltativo) <input id="setPin" type="password" maxlength="12" inputmode="numeric"></label>
     </div>
@@ -313,19 +310,6 @@ transition:border-color .2s,background .2s}
       <input type="checkbox" id="clearPin"> Rimuovi il PIN docente</label>
     <div class="uprow"><button class="primary" id="btnSaveSettings" type="button">Salva impostazioni</button>
       <span class="upmsg" id="settingsMsg"></span></div>
-  </div>
-
-  <div class="card">
-    <h2>🗃 Materiali e spazio</h2>
-    <div id="storageInfo" class="opts"></div>
-    <div id="allMaterials" style="margin-top:10px"></div>
-  </div>
-
-  <div class="card">
-    <h2>💾 Backup</h2>
-    <div class="uprow"><button class="mini" id="btnBackupNow" type="button">Crea backup ora</button>
-      <span class="upmsg" id="backupMsg"></span></div>
-    <div id="backupList" style="margin-top:10px"></div>
   </div>
 
   <div class="card">
@@ -411,8 +395,6 @@ async function loadSettings() {
     $('#setUpload').value = s.max_upload_mb || 100;
     $('#setCache').value = s.cache_max_mb || 300;
     $('#setWhisper').value = s.whisper_model || 'base';
-    $('#setBackupKeep').value = s.backup_keep || 14;
-    $('#setBackupInterval').value = s.backup_interval_min || 60;
     $('#setLanIp').value = s.lan_ip_fisso || '';
     $('#setPin').value = s.pin_configured ? '••••' : '';
     $('#setPin').placeholder = s.pin_configured ? 'Lascia invariato per non rimuoverlo' : 'Nessun PIN';
@@ -425,8 +407,6 @@ $('#btnSaveSettings').onclick = async () => {
   try {
     const body = { porta:+$('#setPorta').value, max_upload_mb:+$('#setUpload').value,
       cache_max_mb:+$('#setCache').value, whisper_model:$('#setWhisper').value,
-      backup_keep:+$('#setBackupKeep').value,
-      backup_interval_min:+$('#setBackupInterval').value,
       lan_ip_fisso:$('#setLanIp').value.trim() };
     const pin = $('#setPin').value.trim();
     if ($('#clearPin').checked) body.pin_docente = '';
@@ -437,50 +417,6 @@ $('#btnSaveSettings').onclick = async () => {
     refresh();
   } catch (e) { msg.textContent = '✗ ' + e.message; msg.className = 'upmsg err'; }
 };
-
-async function loadManagement() {
-  try {
-    const [st, ma] = await Promise.all([api('storage'), api('materials_all')]);
-    const s = st.storage || {};
-    $('#storageInfo').innerHTML = Object.entries(s).map(([k,v]) =>
-      `<span class="chip">${esc(k.replace('_',' '))}: ${fmtSize(v)}</span>`).join('');
-    $('#allMaterials').innerHTML = (ma.materials || []).length ? ma.materials.map(m =>
-      `<div class="row"><span class="name">${esc(m.name)}</span>
-        <span class="meta">${fmtSize(m.size)}</span>
-        <span class="badge ${m.generated ? 'exists' : ''}">${m.generated ? 'lezione presente' : 'non generato'}</span>
-        ${m.generated ? `<button class="mini ghost" onclick="deleteMaterial('${escAttr(m.name)}')">Elimina materiale</button>` : ''}
-      </div>`).join('') : '<div class="empty">Nessun materiale nella cartella.</div>';
-  } catch (e) { /* la card resta vuota */ }
-}
-async function deleteMaterial(name) {
-  const confirmName = prompt('Per sicurezza scrivi di nuovo il nome del file da eliminare:\n' + name);
-  if (confirmName === null) return;
-  if (!confirm('La lezione generata verrà conservata. Eliminare il materiale?')) return;
-  try { await teacherPost('material_delete', {name, confirm:confirmName}); await loadManagement(); await refresh(); }
-  catch (e) { alert(e.message); }
-}
-
-async function loadBackups() {
-  const msg = $('#backupMsg');
-  try {
-    const j = await api('backups'), list = j.backups || [];
-    $('#backupList').innerHTML = list.length ? list.map(b =>
-      `<div class="row"><span class="name">${esc(b.name.replace('_',' '))}</span>
-        <span class="meta">${fmtSize(b.size)}</span><span class="badge">${esc((b.files||[]).join(', '))}</span>
-        <button class="mini ghost" onclick="restoreBackup('${escAttr(b.name)}')">↩ Ripristina</button></div>`).join('')
-      : '<div class="empty">Nessun backup disponibile.</div>';
-  } catch (e) { msg.textContent = e.message; msg.className = 'upmsg err'; }
-}
-$('#btnBackupNow').onclick = async () => {
-  const msg = $('#backupMsg');
-  try { const j = await api('backup_create', {method:'POST'}); msg.textContent = '✓ Backup creato'; msg.className='upmsg ok'; await loadBackups(); }
-  catch (e) { msg.textContent = '✗ ' + e.message; msg.className='upmsg err'; }
-};
-async function restoreBackup(name) {
-  if (!confirm('Ripristinare classifica e cronologia dal backup ' + name + '?\nVerrà creato prima un backup di sicurezza.')) return;
-  try { const j = await teacherPost('backup_restore', {name}); alert('Ripristinati: ' + j.restored.join(', ')); await loadBackups(); }
-  catch (e) { alert(e.message); }
-}
 
 // ---------------------------------------------------------------- classifica di classe
 async function loadClassifica() {
@@ -576,8 +512,6 @@ async function refresh() {
     $('#deps').innerHTML = depChips(s.deps);
     $('#uptxt').textContent = 'Più file insieme · .docx, .pdf, .txt, .md, .html · massimo ' +
       (s.max_upload_mb || 100) + ' MB per file';
-    $('#backupInfo').textContent = s.last_backup ?
-      '💾 Ultimo backup automatico: ' + s.last_backup.replace('_', ' ') : '💾 I backup automatici partiranno dopo il primo lavoro.';
 
     const mats = s.materials;
     $('#materials').innerHTML = mats.length ? mats.map(m => {
@@ -1043,8 +977,6 @@ loadVoices();
 refresh();
 loadLan();
 loadSettings();
-loadManagement();
-loadBackups();
 setInterval(() => { if (!busy) refresh(); }, 4000);
 </script>
 </body>

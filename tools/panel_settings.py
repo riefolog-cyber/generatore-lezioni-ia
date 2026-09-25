@@ -19,8 +19,6 @@ PUBLIC_FIELDS = {
     "porta": ("number", 1024, 65535, 8341),
     "max_upload_mb": ("number", 1, 1000, 100),
     "cache_max_mb": ("number", 50, 2000, 300),
-    "backup_keep": ("number", 1, 100, 14),
-    "backup_interval_min": ("number", 15, 1440, 60),
     "whisper_model": ("choice", ("tiny", "base", "small"), None, "base"),
     "pin_docente": ("text", 0, 12, ""),
     "lan_ip_fisso": ("text", 0, 15, ""),
