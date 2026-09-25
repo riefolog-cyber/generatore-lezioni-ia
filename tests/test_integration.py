@@ -90,7 +90,7 @@ def test_profilo_cache_key_distinta():
 def test_normalize_profilo_fallback():
     from common import normalize_profilo
     assert normalize_profilo({}) == {"durata": "standard", "livello": "intermedio",
-                                     "obiettivo": "comprensione"}
+                                     "obiettivo": "auto"}
     assert normalize_profilo({"durata": "xxx"})["durata"] == "standard"
 
 
