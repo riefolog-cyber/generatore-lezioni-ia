@@ -114,6 +114,20 @@ def test_class_repository_migrates_json_and_keeps_compatibility(tmp_path):
     assert json.loads(json_path.read_text(encoding="utf-8"))
 
 
+def test_panel_blocks_duplicate_generation_jobs():
+    from pathlib import Path
+    source = (Path(__file__).resolve().parent.parent / "panel.py").read_text(encoding="utf-8")
+    assert "Attenzione: questo materiale" in source
+    assert "same_running" in source and "same_queued" in source
+
+
+def test_audio_transcription_log_shows_duration(tmp_path):
+    from sources import _audio_duration, _format_duration
+    assert _format_duration(543) == "9 min 03 s"
+    assert _format_duration(3723) == "1:02:03"
+    assert _audio_duration(tmp_path / "inesistente.mp3") is None
+
+
 def test_class_repository_pin_is_optional_but_checked():
     from tools.class_repository import authorized
     assert authorized("", None)
@@ -187,3 +201,4 @@ def test_whisper_audio_transcription_reuses_model(tmp_path, monkeypatch):
 
     assert calls.count("init") == 1
     assert len(calls) == 3
+    assert sources._WHISPER_MODEL is not None

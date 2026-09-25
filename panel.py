@@ -625,6 +625,15 @@ class PanelHandler(_RangeHandler):
     def _start(self, parsed):
         import new_lesson
         src, force, bozza, single, profilo = parsed
+        source_name = Path(src).name if not is_url(src) else src
+        with JOB_LOCK:
+            same_running = JOB["running"] and JOB["source"] == source_name
+            same_queued = any(str(q[2]) == source_name for q in QUEUE)
+        if same_running or same_queued:
+            where = "già in lavorazione" if same_running else "già in coda"
+            self._json({"started": False,
+                        "reason": f"Attenzione: questo materiale è {where}."}, 409)
+            return
         started, queued = start_job(
             lambda: new_lesson.build_from_docx(src, force=force, bozza=bozza,
                                                single=single, profilo=profilo),

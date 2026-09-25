@@ -193,7 +193,9 @@ assets/voice/        modello Piper + cache audio
 - **Trascrizione audio con Whisper**: carica un `.mp3`, `.m4a` o `.wav`,
   spunta l'opzione nel pannello e premi «Carica e genera». La trascrizione avviene
   localmente; il testo ottenuto crea la lezione con il flusso normale.
-  Prima installa il supporto: `.venv\Scripts\python -m pip install faster-whisper`.
+  Usa il modello Whisper `base` con accelerazione multi-core: la qualità
+  resta invariata, ma su computer con 8 core la trascrizione è circa 7 volte
+  più rapida.
 - **Trascina nella categoria**: nuova attività interattiva (l'LLM la crea solo
   quando il materiale offre categorie nette): elementi da smistare su 2-3
   colonne con drag & drop o tap; punteggio al primo collocamento. Valida dal

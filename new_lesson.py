@@ -2005,7 +2005,11 @@ def _build_impl(source, force=False, bozza=False, no_cache=False,
         profilo = _np({**_cfg_prof, **(profilo or {})})
     except Exception:
         profilo = {"durata": "standard", "livello": "intermedio", "obiettivo": "comprensione"}
-    _set_progress("lettura materiale", 5, display)
+    if Path(src).suffix.lower() in (".mp3", ".m4a", ".wav"):
+        _set_progress("trascrizione audio Whisper", 5,
+                      f"{display} — l'operazione può durare qualche minuto")
+    else:
+        _set_progress("lettura materiale", 5, display)
     t_read = time.time()
     ext = extract_source(src)
     _times["lettura"] = round(time.time() - t_read, 1)

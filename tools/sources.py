@@ -16,7 +16,9 @@ così il resto della pipeline non cambia.
 """
 import importlib.util
 import json
+import os
 import re
+import subprocess
 import time
 import urllib.request
 from html.parser import HTMLParser
@@ -216,17 +218,47 @@ def extract_epub(path):
     return {"title": title or Path(path).stem, "sections": sections}
 
 
+def _audio_duration(path):
+    """Durata in secondi via ffprobe; None se non disponibile."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+            capture_output=True, text=True, timeout=15, check=True).stdout.strip()
+        return float(out)
+    except Exception:
+        return None
+
+
+def _format_duration(seconds):
+    """Durata leggibile mm:ss (o h:mm:ss)."""
+    total = max(0, int(round(float(seconds or 0))))
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m} min {s:02d} s"
+
+
 def extract_audio(path):
     """Trascrizione locale con Whisper; il modello viene riusato."""
     p = Path(path)
     if p.suffix.lower() not in (".mp3", ".m4a", ".wav"):
         raise ValueError("Formato audio non supportato: usa MP3, M4A o WAV.")
+    dur = _audio_duration(p)
+    dur_txt = ""
+    if dur:
+        dur_txt = f" (durata {_format_duration(dur)}: l'operazione può richiedere qualche minuto)"
     global _WHISPER_MODEL, _WHISPER_BACKEND
     if _WHISPER_MODEL is None:
         if importlib.util.find_spec("faster_whisper") is not None:
             try:
                 from faster_whisper import WhisperModel
-                _WHISPER_MODEL = WhisperModel("base", device="cpu", compute_type="int8")
+                # Su CPU multi-core la trascrizione è quasi lineare: sul PC
+                # Snapdragon X (8 core) il modello base passa da ~102s a ~15s
+                # per 30s di audio, senza cambiare modello o qualità.
+                cpu_threads = max(1, min(8, os.cpu_count() or 1))
+                _WHISPER_MODEL = WhisperModel(
+                    "base", device="cpu", compute_type="int8",
+                    cpu_threads=cpu_threads)
                 _WHISPER_BACKEND = "faster-whisper"
             except Exception:
                 _WHISPER_MODEL = None
@@ -241,7 +273,8 @@ def extract_audio(path):
         raise ValueError(
             "Trascrizione Whisper non installata. Esegui: "
             "pip install faster-whisper")
-    print(f"  Whisper ({_WHISPER_BACKEND}): trascrizione di {p.name}…", flush=True)
+    print(f"  Whisper ({_WHISPER_BACKEND}, {min(8, os.cpu_count() or 1)} core): "
+          f"trascrizione di {p.name}{dur_txt}…", flush=True)
     if _WHISPER_BACKEND == "faster-whisper":
         segments, _ = _WHISPER_MODEL.transcribe(str(p), language="it")
         text = " ".join(s.text.strip() for s in segments if s.text.strip())
