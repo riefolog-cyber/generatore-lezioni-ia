@@ -1302,10 +1302,7 @@ transition:border-color .2s,background .2s}
         <option value="avanzato">Avanzato</option>
       </select></label>
       <label>Obiettivo <select id="profObiettivo">
-        <option value="conoscenza">Conoscenza</option>
-        <option value="comprensione" selected>Comprensione</option>
-        <option value="applicazione">Applicazione</option>
-        <option value="analisi">Analisi</option>
+        <option value="auto" selected>Auto (misto per modulo)</option>
       </select></label>
     </div>
     <details class="adv">

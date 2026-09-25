@@ -234,6 +234,14 @@ def profilo_istruzioni(profilo):
     liv = {"base": "linguaggio semplice, definisci ogni termine tecnico, esempi concreti",
            "intermedio": "linguaggio chiaro ma preciso, collegamenti tra concetti",
            "avanzato": "dettagli, casi limite, distinzioni sottili, niente banalizzazioni"}.get(livello, "")
+    if obiettivo == "auto":
+        ob = ("scegli il livello Bloom più adatto per ogni modulo: "
+              "Conoscenza per definizioni/fatti, "
+              "Comprensione per concetti da spiegare, "
+              "Applicazione per casi pratici/esercizi, "
+              "Analisi per confronti/scomposizione/errori")
+        return (f"- PROFILO LEZIONE: durata {durata}, livello {livello} ({liv}). "
+                f"Obiettivo Bloom: {obiettivo} ({ob}).")
     ob = {"conoscenza": "verifica il ricordo: definizioni, fatti, termini chiave",
           "comprensione": "verifica la comprensione: spiega con parole tue, esempi, confronti",
           "applicazione": "verifica l'uso: casi concreti, cosa faresti, errori tipici",

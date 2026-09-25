@@ -45,7 +45,7 @@ DEFAULT_CONFIG = {
     "audio_loudnorm_dual": False,
     "profilo_durata": "standard",
     "profilo_livello": "intermedio",
-    "profilo_obiettivo": "comprensione",
+    "profilo_obiettivo": "auto",
     # IP fisso mostrato come indirizzo LAN in classe (es. "192.168.0.2"):
     # utile con router senza internet, dove l'auto-rilevamento fallisce.
     # Vuoto = rilevamento automatico.
@@ -54,7 +54,7 @@ DEFAULT_CONFIG = {
 
 PROFILO_DURATE = ("breve", "standard", "approfondita")
 PROFILO_LIVELLI = ("base", "intermedio", "avanzato")
-PROFILO_OBIETTIVI = ("conoscenza", "comprensione", "applicazione", "analisi")
+PROFILO_OBIETTIVI = ("conoscenza", "comprensione", "applicazione", "analisi", "auto")
 
 
 def normalize_profilo(data):
@@ -62,7 +62,7 @@ def normalize_profilo(data):
     d = data if isinstance(data, dict) else {}
     durata = str(d.get("durata") or d.get("profilo_durata") or "standard").lower()
     livello = str(d.get("livello") or d.get("profilo_livello") or "intermedio").lower()
-    obiettivo = str(d.get("obiettivo") or d.get("profilo_obiettivo") or "comprensione").lower()
+    obiettivo = str(d.get("obiettivo") or d.get("profilo_obiettivo") or "auto").lower()
     if durata not in PROFILO_DURATE:
         durata = "standard"
     if livello not in PROFILO_LIVELLI:
