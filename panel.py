@@ -2,9 +2,9 @@
 """Pannello di controllo web (locale).
 
 Sostituisce l'avvio da terminale con una pagina grafica nel browser:
-  - caricamento materiale via upload (drag & drop o Sfoglia: .docx/.pdf/
-    .txt/.md/.html) con pulsante "Carica e genera" — SOLO upload, nessuna
-    scansione della cartella progetto;
+  - caricamento materiale via upload (drag & drop o Sfoglia: documenti,
+    PPTX, EPUB, testo e audio MP3/M4A/WAV) con pulsante "Carica e genera";
+  - trascrizione locale dell'audio con Whisper, se installato;
   - generazione da URL (sito web o video YouTube);
   - opzioni: rigenera anche se esiste (--force), bozza senza LLM (--bozza),
     rigenera solo l'audio di una lezione già generata (--reaudio);
@@ -24,6 +24,7 @@ import contextlib
 import functools
 import html
 import http.server
+import io
 import json
 import re
 import shutil
@@ -34,6 +35,7 @@ import threading
 import time
 import urllib.parse
 import webbrowser
+import zipfile
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
@@ -41,13 +43,16 @@ sys.path.insert(0, str(BASE / "tools"))
 sys.path.insert(0, str(BASE))
 
 from common import load_config  # noqa: E402
+from class_repository import add_result as _class_repo_add, authorized as _class_repo_authorized  # noqa: E402
+from class_repository import list_results as _class_repo_list, reset as _class_repo_reset  # noqa: E402
 from sources import SUPPORTED_EXT, is_url  # noqa: E402
 from start_lesson import _RangeHandler, _hub_page, find_port, list_lessons  # noqa: E402
 
 CONFIG = load_config()
 DEFAULT_PORT = int(CONFIG.get("porta", 8341))
-MAX_UPLOAD_MB = 100        # limite per i file caricati dal pannello
+MAX_UPLOAD_MB = int(CONFIG.get("max_upload_mb", 100))  # configurabile
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
+RUNTIME_PORT = DEFAULT_PORT  # valore reale, utile se find_port sceglie 8342 ecc.
 
 # Il pannello importa new_lesson UNA volta: i moduli restano in memoria anche
 # se i file cambiano su disco (es. aggiornamenti del codice). Se uno dei file
@@ -119,7 +124,7 @@ def _history_clear():
 def _classifica_reset():
     """Azzera la classifica di classe (pulsante nel pannello)."""
     try:
-        CLASSIFICA_FILE.write_text("[]", encoding="utf-8")
+        _class_repo_reset(CLASSIFICA_FILE)
     except OSError:
         pass
 
@@ -138,30 +143,15 @@ _CLASSIFICA_PANEL = 50         # righe mostrate in classifica per lezione
 
 def _classifica_add(lesson, studente, punti, totale, completata, tempo_min):
     """Aggiunge un risultato (chiamato anche da client LAN: nessun segreto)."""
-    try:
-        rows = []
-        if CLASSIFICA_FILE.exists():
-            rows = json.loads(CLASSIFICA_FILE.read_text(encoding="utf-8") or "[]")
-    except Exception:
-        rows = []
-    pct = round(punti / totale * 100) if totale > 0 else 0
-    rows.append({"t": time.strftime("%Y-%m-%d %H:%M"), "lesson": str(lesson)[:80],
-                 "studente": str(studente)[:40] or "Anonimo",
-                 "punti": punti, "totale": totale, "pct": pct,
-                 "completata": bool(completata), "tempo_min": tempo_min})
-    try:
-        CLASSIFICA_FILE.write_text(json.dumps(rows[-_CLASSIFICA_MAX:], ensure_ascii=False),
-                                   encoding="utf-8")
-    except OSError:
-        pass
+    _class_repo_add(CLASSIFICA_FILE, lesson, studente, punti, totale,
+                    completata, tempo_min)
 
 
 def _classifica_view():
     """Classifica per lezione: miglior risultato per studente, ordinato per
     percentuale (decrescente) e tempo (crescente)."""
     try:
-        rows = json.loads(CLASSIFICA_FILE.read_text(encoding="utf-8") or "[]") \
-            if CLASSIFICA_FILE.exists() else []
+        rows = _class_repo_list(CLASSIFICA_FILE)
     except Exception:
         rows = []
     by_lesson = {}
@@ -386,6 +376,7 @@ def _deps():
         "edge_tts": have("edge_tts"),
         "pypdf": have("pypdf"),
         "youtube_transcript_api": have("youtube_transcript_api"),
+        "faster_whisper": have("faster_whisper"),
         "ffmpeg": bool(shutil.which("ffmpeg")),
     }
 
@@ -404,16 +395,34 @@ def _single_files():
     return out
 
 
+def _lesson_details(name):
+    try:
+        from tools.lesson_admin import lesson_info
+        return lesson_info(BASE, name)
+    except Exception:
+        l = BASE / name
+        return {"name": name, "title": name.replace("_lesson", ""),
+                "size": 0, "duration": 0, "modified": 0}
+
+
 def _state():
-    lessons = [{"name": l.name,
-                "title": l.name.replace("_lesson", "")} for l in list_lessons()]
+    lessons = [_lesson_details(l.name) for l in list_lessons()]
+    try:
+        from tools.lesson_admin import list_archived
+        archived = list_archived(BASE)
+    except Exception:
+        archived = []
+    try:
+        from tools.backups import last_backup
+        backup = last_backup(BASE)
+    except Exception:
+        backup = None
     return {
-        "materials": _materials(),
-        "lessons": lessons,
-        "singles": _single_files(),
-        "deps": _deps(),
-        "lan_ip": lan_ip(),
-        "port": DEFAULT_PORT,
+        "materials": _materials(), "lessons": lessons, "archived": archived,
+        "singles": _single_files(), "deps": _deps(),
+        "lan_ip": lan_ip(), "port": RUNTIME_PORT,
+        "max_upload_mb": MAX_UPLOAD_MB,
+        "last_backup": backup,
         "pipeline_stantia": _pipeline_mtime() != _PIPELINE_MTIME_START,
         "config": {k: CONFIG.get(k) for k in
                    ("theme", "voice", "edge_voice", "edge_rate",
@@ -489,22 +498,24 @@ class PanelHandler(_RangeHandler):
             return self._start_reaudio(query)
         if path == "/api/export_single":
             return self._export_single(query)
-        if path == "/api/export_scorm":
-            return self._export_scorm(query)
-        if path == "/api/handout":
-            return self._handout(query)
         if path == "/api/progress":
             return self._progress()
         if path == "/api/history":
             return self._history()
         if path == "/api/lan":
-            return self._json({"lan_ip": lan_ip(), "port": DEFAULT_PORT,
-                               "url": f"http://{lan_ip()}:{DEFAULT_PORT}/" if lan_ip() else None})
+            return self._json({"lan_ip": lan_ip(), "port": RUNTIME_PORT,
+                               "url": f"http://{lan_ip()}:{RUNTIME_PORT}/" if lan_ip() else None})
+        if path == "/api/qr":
+            return self._qr(query)
+        if path == "/api/diagnostica":
+            from tools.netdiag import diagnose
+            return self._json(diagnose(RUNTIME_PORT))
+        if path == "/api/logs_download":
+            return self._logs_download()
         if path == "/api/voices":
             return self._json({"voices": _edge_voices_live(),
                                "current": CONFIG.get("edge_voice")})
         if path == "/api/lesson_data":
-            return self._lesson_data(query)
             return self._lesson_data(query)
         self.send_error(404, "API sconosciuta")
 
@@ -522,6 +533,65 @@ class PanelHandler(_RangeHandler):
             raise ValueError("Corpo troppo grande")
         raw = self.rfile.read(length) if length else b"{}"
         return json.loads(raw.decode("utf-8") or "{}")
+
+    def _qr(self, query):
+        """QR locale: funziona anche senza internet, a differenza dei servizi esterni."""
+        text = (query.get("url", [""])[0] or "").strip()
+        if not re.fullmatch(r"https?://[^\s]{1,500}", text):
+            self._json({"error": "Indirizzo URL non valido"}, 400)
+            return
+        try:
+            from tools.qr import qr_png_bytes
+            body = qr_png_bytes(text, scale=6, border=4)
+        except Exception as e:  # noqa: BLE001
+            self._json({"error": f"QR non creato: {e}"}, 500)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Cache-Control", "no-cache, no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _logs_download(self):
+        """Un unico ZIP con i log utili per assistenza, senza dati degli alunni."""
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("log-pannello.txt", "\n".join(list(LOG)[-500:]).encode("utf-8"))
+            for name in ("generazione.log", "panel_errors.log"):
+                p = BASE / name
+                if p.is_file():
+                    z.write(p, arcname=name)
+            z.writestr("diagnostica.json", json.dumps(
+                _state(), ensure_ascii=False, indent=2).encode("utf-8"))
+        body = buf.getvalue()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition",
+                         'attachment; filename="log-generatore.zip"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _lesson_action(self, action, data):
+        name = str(data.get("lesson") or "")
+        from tools import lesson_admin
+        if action == "rename":
+            result = lesson_admin.rename_lesson(BASE, name, data.get("title"))
+        elif action == "duplicate":
+            result = lesson_admin.duplicate_lesson(BASE, name)
+        elif action == "archive":
+            result = lesson_admin.archive_lesson(BASE, name)
+        elif action == "restore":
+            result = lesson_admin.restore_lesson(BASE, name)
+        elif action == "delete":
+            if data.get("confirm") != name:
+                raise ValueError("Conferma richiesta: nome della lezione non corrisponde.")
+            result = lesson_admin.delete_lesson(BASE, name)
+        else:
+            raise ValueError("Operazione lezione sconosciuta.")
+        _invalidate_lessons_cache()
+        self._json({"ok": True, "name": result})
 
     def _resolve_source(self, src):
         """Solo file caricati via upload in questa sessione (no scansione
@@ -544,6 +614,9 @@ class PanelHandler(_RangeHandler):
         force = bool(data.get("force"))
         bozza = bool(data.get("bozza"))
         single = bool(data.get("single"))
+        whisper = bool(data.get("whisper"))
+        if Path(src).suffix.lower() in (".mp3", ".m4a", ".wav") and not whisper:
+            raise ValueError("Per generare da audio devi confermare la trascrizione Whisper.")
         profilo = normalize_profilo(data.get("profilo") or {
             "durata": data.get("durata"), "livello": data.get("livello"),
             "obiettivo": data.get("obiettivo")})
@@ -649,34 +722,6 @@ class PanelHandler(_RangeHandler):
         except Exception:
             hist = []
         return self._json({"history": hist[-20:]})
-
-    def _export_scorm(self, query):
-        name = query.get("lesson", [None])[0] or ""
-        lesson = BASE / name
-        if not name or not lesson.is_dir() or not (lesson / "index.html").exists():
-            self.send_error(400, "Lezione non trovata")
-            return
-        try:
-            from export_scorm import export_scorm
-            p = export_scorm(lesson)
-        except Exception as e:  # noqa: BLE001
-            self._json({"error": str(e)}, 500)
-            return
-        self._json({"url": f"/{lesson.name}/{p.name}", "size": p.stat().st_size})
-
-    def _handout(self, query):
-        name = query.get("lesson", [None])[0] or ""
-        lesson = BASE / name
-        if not name or not lesson.is_dir() or not (lesson / "index.html").exists():
-            self.send_error(400, "Lezione non trovata")
-            return
-        try:
-            from export_handout import export_handout
-            p = export_handout(lesson)
-        except Exception as e:  # noqa: BLE001
-            self._json({"error": str(e)}, 500)
-            return
-        self._json({"url": f"/{p.name}", "size": p.stat().st_size})
 
     def _check_lesson(self, name):
         # anti-traversal: rigetta .., /, \, null byte e nomi non whitelistati
@@ -861,15 +906,14 @@ class PanelHandler(_RangeHandler):
                 break
             buf.extend(chunk)
             remaining -= len(chunk)
-            if len(buf) > MAX_UPLOAD_BYTES:
+            if len(buf) > MAX_UPLOAD_BYTES * 10 + 2 * 1024 * 1024:
                 raise _UploadTooBig(
-                    f"File troppo grande: supera il limite di {MAX_UPLOAD_MB} MB.")
+                    f"Caricamento troppo grande: massimo {MAX_UPLOAD_MB} MB per file e 10 file per richiesta.")
         return bytes(buf)
 
     def _parse_upload_body(self):
-        """Estrae (filename, contenuto) dalla parte 'file' di un multipart
-        form-data (quello che invia il pannello). Solleva ValueError se il
-        corpo non è valido, _UploadTooBig se supera MAX_UPLOAD_MB."""
+        """Estrae tutte le parti 'file' dal multipart. Solleva ValueError se il
+        corpo non è valido, _UploadTooBig se supera MAX_UPLOAD_BYTES."""
         ctype = self.headers.get("Content-Type", "")
         m = re.search(r'boundary=(?:"([^"]+)"|([^;\s]+))', ctype)
         if not m:
@@ -878,28 +922,23 @@ class PanelHandler(_RangeHandler):
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0:
             raise ValueError("Richiesta senza corpo da caricare.")
-        if length > MAX_UPLOAD_BYTES:
+        if length > MAX_UPLOAD_BYTES * 10 + 2 * 1024 * 1024:
             raise _UploadTooBig(
-                f"File troppo grande: supera il limite di {MAX_UPLOAD_MB} MB.")
+                f"Caricamento troppo grande: massimo {MAX_UPLOAD_MB} MB per file e 10 file per richiesta.")
         body = self._read_limited(length)
         sep = b"--" + boundary
-        saw_file_part = False
+        files = []
         for part in body.split(sep):
             part = part.strip(b"\r\n")
             if not part or part == b"--":
                 continue
             head_end = part.find(b"\r\n\r\n")
             if head_end < 0:
-                # Parte file senza contenuto (file vuoto: il separatore finale
-                # viene mangiato dallo strip) — segnalalo invece di "nessun file"
-                if 'name="file"' in part.decode("utf-8", "replace"):
-                    saw_file_part = True
                 continue
             headers = part[:head_end].decode("utf-8", "replace")
             mf = re.search(r'filename="([^"]*)"', headers)
             fname = mf.group(1) if mf else None
             if fname is None:
-                # RFC 5987: filename*=utf-8''nome%20file.docx (nomi non-ASCII)
                 m2 = re.search(r"filename\*\s*=\s*[^']*''([^;\s]+)", headers)
                 if m2:
                     try:
@@ -908,22 +947,38 @@ class PanelHandler(_RangeHandler):
                         fname = None
             if fname is None or 'name="file"' not in headers:
                 continue
-            return fname, part[head_end + 4:]
-        if saw_file_part:
-            raise ValueError("Il file ricevuto è vuoto (0 byte).")
-        raise ValueError("Nessun file ricevuto nella richiesta.")
+            files.append((fname, part[head_end + 4:]))
+        if not files:
+            raise ValueError("Nessun file ricevuto nella richiesta.")
+        if any(not data for _, data in files):
+            raise ValueError("Uno dei file ricevuti è vuoto (0 byte).")
+        return files
 
     def _upload(self):
-        raw_name, data = self._parse_upload_body()
+        files = self._parse_upload_body()
+        if len(files) > 10:
+            raise ValueError("Carica al massimo 10 file per volta.")
+        saved = []
+        for raw_name, data in files:
+            saved.append(self._save_uploaded_file(raw_name, data))
+        total = sum((BASE / name).stat().st_size for name in saved)
+        self._json({"ok": True, "names": saved, "name": saved[0],
+                    "size": total, "replaced": len(saved) == 1,
+                    "copy": len(saved) != 1})
+
+    def _save_uploaded_file(self, raw_name, data):
         safe = Path(raw_name or "").name.strip()   # niente percorsi, solo nome
         if not safe:
             raise ValueError("Nome file non valido.")
         if Path(safe).suffix.lower() not in SUPPORTED_EXT:
             raise ValueError(
                 f"Formato non supportato ({Path(safe).suffix or 'nessuna estensione'}): "
-                "usa .docx, .pdf, .txt, .md, .html.")
+                f"usa .docx, .pdf, .pptx, .epub, .txt, .md, .html, .mp3, .m4a o .wav.")
         if not data:
             raise ValueError("Il file ricevuto è vuoto.")
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise _UploadTooBig(
+                f"«{safe}» supera il limite di {MAX_UPLOAD_MB} MB.")
         # Scrittura atomica: mai file troncati se il server viene killato.
         # Su Windows il file esistente può essere bloccato in transito
         # (antivirus, indicizzazione, OneDrive) o in uso (PDF/Word aperto):
@@ -984,8 +1039,7 @@ class PanelHandler(_RangeHandler):
         _log(f"✔ materiale caricato dal pannello: {final_name}"
              + (" (sostituito)" if replaced else "")
              + (f" (copia: {safe} bloccato)" if final_name != safe else ""))
-        self._json({"ok": True, "name": final_name, "replaced": replaced,
-                    "size": len(data), "copy": final_name != safe})
+        return final_name
 
     # -- GET ------------------------------------------------------------------
     def do_GET(self):
@@ -1001,6 +1055,9 @@ class PanelHandler(_RangeHandler):
             body = PANEL_HTML.encode("utf-8") if _loopback(self) else _hub_page_cached().encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -1080,6 +1137,12 @@ class PanelHandler(_RangeHandler):
                 self._start_reaudio(urllib.parse.parse_qs(parsed.query))
             except Exception as e:  # noqa: BLE001
                 self._json({"started": False, "reason": str(e)}, 400)
+        elif parsed.path == "/api/lesson_action":
+            try:
+                data = self._read_json_body()
+                self._lesson_action(str(data.get("action") or ""), data)
+            except Exception as e:  # noqa: BLE001
+                self._json({"ok": False, "error": str(e)}, 400)
         elif parsed.path == "/api/upload":
             try:
                 self._upload()
@@ -1116,6 +1179,10 @@ class PanelHandler(_RangeHandler):
             _history_clear()
             self._json({"ok": True})
         elif parsed.path == "/api/reset_classifica":
+            if not _class_repo_authorized(CONFIG.get("pin_docente"),
+                                          self.headers.get("X-Teacher-Pin")):
+                self._json({"ok": False, "error": "PIN docente non valido."}, 403)
+                return
             _classifica_reset()
             self._json({"ok": True})
         else:
@@ -1208,7 +1275,13 @@ details.adv summary{cursor:pointer;padding:6px 0;user-select:none}
 details.adv summary:hover{color:var(--txt)}
 details.adv .opts{margin-top:6px}
 .urlrow{flex-wrap:wrap}
-#lanQr{width:140px;height:140px;border-radius:12px;border:1px solid var(--line);background:#fff;padding:6px}
+#lanQr{width:140px;height:140px;border-radius:12px;border:1px solid var(--line);background:#fff;padding:6px;cursor:zoom-in;box-sizing:border-box}
+#lanQr:hover,#lanQr:focus{outline:3px solid var(--acc);outline-offset:2px}
+.qrOv{position:fixed;inset:0;z-index:9999;background:rgba(4,8,18,.94);display:flex;align-items:center;justify-content:center;padding:22px;flex-direction:column;gap:14px}
+.qrOv[hidden]{display:none}
+.qrOv img{width:min(88vmin,760px);height:min(88vmin,760px);background:#fff;padding:18px;border-radius:18px;box-shadow:0 24px 80px rgba(0,0,0,.65)}
+.qrOv .qru{color:#fff;font-size:17px;font-weight:700;word-break:break-all;text-align:center}
+.qrOv button{background:#fff;color:#111827;border:none;border-radius:10px;padding:10px 18px;font-weight:800;cursor:pointer;font-size:15px}
 .lanrow{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
 .lanrow .grow{flex:1;min-width:200px}
 .chips{display:flex;flex-wrap:wrap;gap:8px}
@@ -1277,19 +1350,20 @@ transition:border-color .2s,background .2s}
     <h2><span class="step">1</span> Carica il materiale e genera</h2>
     <div class="upzone" id="upzone" role="button" tabindex="0"
          title="Carica un file (trascinalo qui sopra o clicca per sceglierlo)">
-      <input type="file" id="upfile" accept=".docx,.pdf,.txt,.md,.html,.htm" hidden>
-      <span class="big">📄 Trascina qui il materiale</span>
-      <span class="sub2" id="uptxt">.docx, .pdf, .txt, .md, .html — oppure clicca per sceglierlo (max 100 MB)</span>
+      <input type="file" id="upfile" accept=".docx,.pdf,.txt,.md,.html,.htm,.pptx,.epub,.mp3,.m4a,.wav" multiple hidden>
+      <span class="big">📄 Trascina qui uno o più materiali</span>
+      <span class="sub2" id="uptxt">Documenti, siti salvati, PPTX, EPUB o audio MP3/M4A/WAV</span>
       <div class="uprow" id="uprow" hidden>
         <span class="name" id="upname"></span>
         <span class="meta" id="upsize"></span>
-        <button class="primary" id="btnUpGen" type="button">Carica e genera</button>
-        <button class="mini ghost" id="btnUp" type="button" title="Solo carica, senza generare">Solo carica</button>
-        <button class="mini ghost" id="btnUpX" type="button" title="Annulla">✕</button>
+        <button class="primary" id="btnUpGen" type="button">Carica e genera tutto</button>
+        <button class="mini ghost" id="btnUp" type="button">Solo carica</button>
+        <button class="mini ghost" id="btnUpX" type="button">✕</button>
       </div>
       <div class="upmsg" id="upmsg" hidden></div>
     </div>
     <div id="materials"></div>
+    <div class="upmsg" id="backupInfo" style="text-align:center;margin-top:10px"></div>
     <div class="opts">
       <label>Durata <select id="profDurata">
         <option value="breve">Breve (3-4 moduli)</option>
@@ -1311,6 +1385,7 @@ transition:border-color .2s,background .2s}
         <label><input type="checkbox" id="forceAll"> Rigenera anche le lezioni già esistenti</label>
         <label><input type="checkbox" id="bozzaAll"> Bozza veloce senza IA (solo struttura dal testo)</label>
         <label><input type="checkbox" id="singleAll"> Genera come file HTML unico, senza cartella</label>
+        <label><input type="checkbox" id="whisperAudio"> 🎙️ Trascrizione audio con Whisper (MP3, M4A, WAV)</label>
       </div>
     </details>
   </div>
@@ -1354,7 +1429,14 @@ transition:border-color .2s,background .2s}
 
   <div class="card">
     <h2><span class="step">3</span> Lezioni generate</h2>
+    <div class="urlrow" style="margin-bottom:8px">
+      <input id="lessonSearch" placeholder="Cerca una lezione…" oninput="filterLessons()">
+    </div>
     <div id="lessons"></div>
+    <details style="margin-top:12px">
+      <summary>Archivio lezioni (<span id="archiveCount">0</span>)</summary>
+      <div id="archived" style="margin-top:8px"></div>
+    </details>
     <h2 style="margin-top:16px">File unici (HTML singolo)</h2>
     <div id="singles"></div>
   </div>
@@ -1406,7 +1488,9 @@ transition:border-color .2s,background .2s}
   <div class="card">
     <h2><span class="step">4</span> Condividi in classe <span style="color:var(--mut);font-weight:400;font-size:12px">(stessa Wi-Fi)</span></h2>
     <div class="lanrow">
-      <img id="lanQr" hidden alt="QR per aprire la lezione dal telefono">
+      <img id="lanQr" hidden tabindex="0" role="button"
+           title="Clicca per vedere il QR a schermo intero"
+           alt="QR per aprire la lezione dal telefono">
       <div class="grow">
         <div class="urlrow"><input id="lanUrl" readonly placeholder="Caricamento indirizzo…">
           <button class="mini" id="btnLanCopy" type="button">📋 Copia link</button>
@@ -1417,6 +1501,23 @@ transition:border-color .2s,background .2s}
     <h2 style="margin-top:14px">Cronologia generazioni
       <button class="mini ghost" onclick="clearHistory()" type="button" title="Cancella la cronologia generazioni">🗑 Svuota</button></h2>
     <div id="hist" style="margin-top:8px;font-size:12px;color:var(--mut)"><div>Nessun job ancora.</div></div>
+  </div>
+
+
+  <div id="qrOv" class="qrOv" hidden role="dialog" aria-modal="true" aria-label="QR a schermo intero">
+    <img id="qrOvImg" alt="QR a schermo intero">
+    <div class="qru" id="qrOvUrl"></div>
+    <button type="button" id="qrOvClose">Chiudi (Esc)</button>
+  </div>
+
+  <div class="card">
+    <h2>🛟 Assistenza rapida</h2>
+    <div class="uprow">
+      <button class="mini" id="btnDiagnostica" type="button"
+              onclick="event.preventDefault(); if (typeof runDiagnostica === 'function') runDiagnostica(); else window.open('/api/diagnostica','_blank','noopener');">🔍 Controlla computer e rete</button>
+      <button class="mini ghost" onclick="location.href='/api/logs_download'">⬇ Scarica log per assistenza</button>
+    </div>
+    <pre id="diagnostica" style="display:none"></pre>
   </div>
 </div>
 
@@ -1433,13 +1534,23 @@ try{_startTheme = localStorage.getItem('panel-theme') || 'dark';}catch(e){}
 applyPanelTheme(_startTheme);
 const $ = s => document.querySelector(s);
 let busy = false;
+let serverRetryAt = 0;
+let serverRetryStep = 0;
 const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 const escAttr = s => esc(s).replace(/`/g,'&#96;');
 
 async function api(path, opts) {
-  const r = await fetch('/api/' + path, opts);
+  let r;
+  try {
+    r = await fetch('/api/' + path, opts);
+  } catch (e) {
+    const err = new Error('Server non raggiungibile. Riavvia AVVIA.bat e attendi alcuni secondi.');
+    err.offline = true;
+    throw err;
+  }
   const j = await r.json().catch(() => ({}));
-  if (!r.ok && j.reason) throw new Error(j.reason);
+  if (!r.ok) throw new Error(j.reason || j.error || ('Errore ' + r.status));
+  if (j.ok === false) throw new Error(j.error || 'Operazione non riuscita.');
   return j;
 }
 
@@ -1455,6 +1566,7 @@ function depChips(d) {
     ['edge_tts', 'edge-tts (voce)'],
     ['pypdf', 'pypdf (.pdf)'],
     ['youtube_transcript_api', 'youtube-transcript-api (YouTube)'],
+    ['faster_whisper', 'Whisper (trascrizione audio locale)'],
     ['ffmpeg', 'ffmpeg (audio)'],
   ];
   return map.map(([k, label]) =>
@@ -1496,8 +1608,14 @@ function exportClassifica() {
 }
 async function resetClassifica() {
   if (!confirm('Azzerare TUTTA la classifica di classe? I risultati degli studenti andranno persi.')) return;
-  const r = await fetch('/api/reset_classifica', { method: 'POST' });
-  if (!r.ok) { alert('Svuotamento fallito.'); return; }
+  let r = await fetch('/api/reset_classifica', { method: 'POST' });
+  if (r.status === 403) {
+    const pin = prompt('Inserisci il PIN docente per azzerare la classifica:');
+    if (pin === null) return;
+    r = await fetch('/api/reset_classifica', { method: 'POST',
+      headers: {'X-Teacher-Pin': pin} });
+  }
+  if (!r.ok) { alert('Svuotamento fallito: PIN non valido.'); return; }
   loadClassifica();
 }
 async function addManuale() {
@@ -1516,13 +1634,41 @@ async function addManuale() {
   loadClassifica();
 }
 
+function lessonRow(l) {
+  const mins = Math.max(1, Math.round((l.duration || 0) / 60));
+  return `<div class="row" data-lesson-search="${escAttr(((l.title || '') + ' ' + l.name).toLowerCase())}">
+    <span class="name">${esc(l.title)}<div class="meta">${fmtSize(l.size)} · ${mins} min</div></span>
+    <a class="apri" href="/${escAttr(l.name)}/index.html" target="_blank">Apri →</a>
+    <button class="mini ghost" onclick="openEditor('${escAttr(l.name)}')">Modifica</button>
+    <button class="mini ghost" onclick="single('${escAttr(l.name)}')">HTML singolo</button>
+    <button class="mini ghost" onclick="reaudio('${escAttr(l.name)}')">Rigenera audio</button>
+    <button class="mini ghost" onclick="lessonAction('${escAttr(l.name)}','duplicate')" title="Duplica">⧉</button>
+    <button class="mini ghost" onclick="lessonAction('${escAttr(l.name)}','rename')" title="Rinomina">✎</button>
+    <button class="mini ghost" onclick="lessonAction('${escAttr(l.name)}','archive')" title="Archivia">⌸</button>
+    <button class="mini ghost" onclick="lessonAction('${escAttr(l.name)}','delete')" title="Elimina">🗑</button>
+  </div>`;
+}
+function filterLessons() {
+  const q = ($('#lessonSearch')?.value || '').trim().toLowerCase();
+  document.querySelectorAll('#lessons [data-lesson-search]').forEach(row => {
+    row.hidden = q && !row.dataset.lessonSearch.includes(q);
+  });
+}
+
 async function refresh() {
+  if (Date.now() < serverRetryAt) return false;
   try {
     const s = await api('state');
+    serverRetryAt = 0;
+    serverRetryStep = 0;
     if (s.pipeline_stantia) $('#stale').style.display = 'block';
     $('#statusline').innerHTML =
       `Porta ${esc(s.port)} · server locale` + (s.lan_ip ? ` · da tablet/telefono: <span id="lan">http://${esc(s.lan_ip)}:${esc(s.port)}/</span>` : '');
     $('#deps').innerHTML = depChips(s.deps);
+    $('#uptxt').textContent = 'Più file insieme · .docx, .pdf, .txt, .md, .html · massimo ' +
+      (s.max_upload_mb || 100) + ' MB per file';
+    $('#backupInfo').textContent = s.last_backup ?
+      '💾 Ultimo backup automatico: ' + s.last_backup.replace('_', ' ') : '💾 I backup automatici partiranno dopo il primo lavoro.';
 
     const mats = s.materials;
     $('#materials').innerHTML = mats.length ? mats.map(m => {
@@ -1535,17 +1681,14 @@ async function refresh() {
       </div>`;
     }).join('') : '<div class="empty">Nessun file caricato: trascina qui sopra o usa Sfoglia, poi premi «Carica e genera».</div>';
 
-    $('#lessons').innerHTML = s.lessons.length ? s.lessons.map(l =>
-      `<div class="row">
-        <span class="name">${esc(l.title)}</span>
-        <a class="apri" href="/${escAttr(l.name)}/index.html" target="_blank">Apri →</a>
-        <button class="mini ghost" onclick="openEditor('${escAttr(l.name)}')">Modifica</button>
-        <button class="mini ghost" onclick="single('${escAttr(l.name)}')">HTML singolo</button>
-        <button class="mini ghost" onclick="scorm('${escAttr(l.name)}')">SCORM</button>
-        <button class="mini ghost" onclick="handout('${escAttr(l.name)}')">Dispensa</button>
-        <button class="mini ghost" onclick="reaudio('${escAttr(l.name)}')">Rigenera audio</button>
-      </div>`).join('')
+    $('#lessons').innerHTML = s.lessons.length ? s.lessons.map(lessonRow).join('')
       : '<div class="empty">Nessuna lezione generata ancora.</div>';
+    filterLessons();
+    $('#archiveCount').textContent = (s.archived || []).length;
+    $('#archived').innerHTML = (s.archived || []).length ? s.archived.map(n =>
+      `<div class="row"><span class="name">${esc(n.replace(/_lesson$/, ''))}</span>
+       <button class="mini" onclick="lessonAction('${escAttr(n)}','restore')">↩ Ripristina</button></div>`).join('')
+      : '<div class="empty">Archivio vuoto.</div>';
 
     // classifica: opzioni lezione (mantieni la selezione corrente se c'è ancora)
     const selC = $('#claSel');
@@ -1562,8 +1705,16 @@ async function refresh() {
         <a class="apri" href="/${escAttr(f.name)}" target="_blank" download="${escAttr(f.name)}">Apri / salva →</a>
       </div>`).join('')
       : '<div class="empty">Nessun file unico: spunta "Genera come file HTML unico" qui sopra la prossima volta.</div>';
+    return true;
   } catch (e) {
-    $('#statusline').textContent = 'Errore: ' + e.message;
+    $('#statusline').textContent = e.message;
+    if (e.offline) {
+      const delays = [5000, 10000, 20000, 30000];
+      const wait = delays[Math.min(serverRetryStep, delays.length - 1)];
+      serverRetryStep++;
+      serverRetryAt = Date.now() + wait;
+    }
+    return false;
   }
 }
 
@@ -1598,15 +1749,20 @@ async function pollLog() {
 
 async function startJob(path, payload) {
   busy = true;
-  document.querySelectorAll('button').forEach(b => b.disabled = true);
   addLog(['— nuova richiesta: ' + path]);
   try {
     const j = await api(path, { method: 'POST', headers: {'Content-Type': 'application/json'},
                      body: JSON.stringify(payload) });
     if (j.queued) addLog(['⏳ accodato: partirà dopo quello in corso']);
-  } catch (e) { addLog(['✗ ' + e.message]); busy = false;
-    document.querySelectorAll('button').forEach(b => b.disabled = false); return; }
-  pollLog();
+    else await pollLog();
+  } catch (e) { addLog(['✗ ' + e.message]); await refresh(); return; }
+}
+
+async function startJobs(items, payloadFn) {
+  for (const item of items) {
+    await startJob('build', payloadFn(item));
+    if (busy) break;
+  }
 }
 
 $('#btnCancelQ').onclick = async () => {
@@ -1619,9 +1775,13 @@ function profilo() {
 }
 
 async function gen(name) {
+  if (/\.(mp3|m4a|wav)$/i.test(name) && !$('#whisperAudio').checked) {
+    alert('Per generare da audio devi spuntare «Trascrizione audio con Whisper».');
+    return;
+  }
   startJob('build', { source: name, force: $('#forceAll').checked,
                       bozza: $('#bozzaAll').checked, single: $('#singleAll').checked,
-                      profilo: profilo() });
+                      whisper: $('#whisperAudio').checked, profilo: profilo() });
 }
 
 async function reaudio(lesson) {
@@ -1638,19 +1798,21 @@ async function single(lesson) {
   window.open(j.url, '_blank');
 }
 
-async function scorm(lesson) {
-  const r = await fetch('/api/export_scorm?lesson=' + encodeURIComponent(lesson));
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) { alert('Export SCORM fallito: ' + (j.error || r.status)); return; }
-  alert('Pacchetto SCORM pronto: caricalo su Moodle come "Pacchetto SCORM".');
-  window.open(j.url, '_blank');
-}
-
-async function handout(lesson) {
-  const r = await fetch('/api/handout?lesson=' + encodeURIComponent(lesson));
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) { alert('Dispensa fallita: ' + (j.error || r.status)); return; }
-  window.open(j.url, '_blank');
+async function lessonAction(lesson, action) {
+  if (action === 'delete' && !confirm('Eliminare definitivamente «' + lesson + '»? È consigliato archiviarla.')) return;
+  let extra = {};
+  if (action === 'rename') {
+    const title = prompt('Nuovo nome della lezione:', lesson.replace(/_lesson$/, ''));
+    if (!title) return;
+    extra = {title: title};
+  }
+  const data = Object.assign({lesson: lesson, action: action}, extra);
+  if (action === 'delete') data.confirm = lesson;
+  try {
+    await api('lesson_action', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data)});
+    await refresh();
+    loadClassifica();
+  } catch (e) { alert(e.message); }
 }
 
 async function refreshProg() {
@@ -1681,9 +1843,9 @@ async function loadLan() {
     $('#lanUrl').value = url || 'LAN non disponibile (stessa Wi-Fi del PC?)';
     const qr = $('#lanQr');
     if (url) {
-      qr.src = 'https://api.qrserver.com/v1/create-qr-code/?size=140x140&data=' + encodeURIComponent(url);
+      qr.src = '/api/qr?url=' + encodeURIComponent(url);  // QR locale: funziona offline
       qr.hidden = false;
-      qr.onerror = () => { qr.hidden = true; };  // offline: niente QR, resta il link
+      qr.onerror = () => { qr.hidden = true; };
     } else { qr.hidden = true; }
   } catch (e) { $('#lanUrl').value = 'LAN non disponibile'; }
   try {
@@ -1693,7 +1855,50 @@ async function loadLan() {
       || '<div>Nessun job ancora.</div>';
   } catch (e) { /* resta il placeholder */ }
 }
+function closeQrFullscreen() {
+  const ov = $('#qrOv');
+  if (ov) ov.hidden = true;
+}
+function openQrFullscreen() {
+  const qr = $('#lanQr');
+  if (!qr || qr.hidden || !qr.src) return;
+  $('#qrOvImg').src = qr.src;
+  $('#qrOvUrl').textContent = $('#lanUrl').value || '';
+  $('#qrOv').hidden = false;
+  $('#qrOvClose').focus();
+}
+$('#lanQr').onclick = openQrFullscreen;
+$('#lanQr').onkeydown = e => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openQrFullscreen(); }
+};
+$('#qrOvClose').onclick = closeQrFullscreen;
+$('#qrOv').onclick = e => { if (e.target === e.currentTarget) closeQrFullscreen(); };
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !$('#qrOv').hidden) closeQrFullscreen();
+});
 $('#btnLan').onclick = loadLan;
+async function runDiagnostica() {
+  const box = $('#diagnostica');
+  box.hidden = false;
+  box.textContent = 'Controllo in corso…';
+  try {
+    const d = await api('diagnostica');
+    const lines = [];
+    lines.push(d.ok ? '✓ Computer pronto per la classe' : '⚠ Controlla i punti seguenti');
+    if (d.url_lan) lines.push('• Indirizzo rete: ' + d.url_lan);
+    else lines.push('• Indirizzo rete: non rilevato');
+    lines.push('• Porta del server: ' + d.port);
+    lines.push('• Wi-Fi: ' + (d.wifi_ok ? 'collegata' : 'non disponibile o da controllare'));
+    if (d.same_configured_ip === false && d.lan_ip_fisso) {
+      lines.push('• Attenzione: l\'IP configurato non coincide con quelli rilevati.');
+    }
+    if (d.disk_free_gb != null) lines.push('• Spazio disco: ' + d.disk_free_gb + ' GB liberi');
+    lines.push('• Firewall: Windows/ antivirus possono chiedere conferma alla prima apertura.');
+    if (d.warnings && d.warnings.length) lines.push(...d.warnings.map(x => '• ' + x));
+    box.textContent = lines.join('\n');
+  } catch (e) { box.textContent = 'Diagnostica non disponibile: ' + e.message; }
+}
+$('#btnDiagnostica').onclick = runDiagnostica;
 $('#btnLanCopy').onclick = async () => {
   const v = $('#lanUrl').value;
   if (!v || v.startsWith('LAN')) return;
@@ -1704,7 +1909,7 @@ $('#btnLanCopy').onclick = async () => {
 
 // ---------------------------------------------------- upload materiale
 const upZone = $('#upzone'), upFile = $('#upfile');
-let pendingFile = null;
+let pendingFiles = [];
 
 function upMsg(text, ok) {
   const el = $('#upmsg');
@@ -1713,47 +1918,67 @@ function upMsg(text, ok) {
   el.className = ok === null ? 'upmsg' : ok ? 'upmsg ok' : 'upmsg err';
 }
 
-function pickUpload(f) {
-  if (!f) return;
-  if (!/\.(docx|pdf|txt|md|html?)$/i.test(f.name)) {
-    upMsg('Formato non supportato: usa .docx, .pdf, .txt, .md, .html', false);
-    return;
-  }
-  pendingFile = f;
-  $('#upname').textContent = f.name;
-  $('#upsize').textContent = fmtSize(f.size);
+function pickUpload(files) {
+  files = Array.from(files || []);
+  if (!files.length) return;
+  const bad = files.filter(f => !/\.(docx|pdf|txt|md|html?|pptx|epub|mp3|m4a|wav)$/i.test(f.name));
+  if (bad.length) { upMsg('Formato non supportato: ' + bad.map(f => f.name).join(', '), false); return; }
+  if (files.length > 10) { upMsg('Carica al massimo 10 file per volta.', false); return; }
+  pendingFiles = files;
+  const total = files.reduce((n, f) => n + f.size, 0);
+  $('#upname').textContent = files.length === 1 ? files[0].name : files.length + ' materiali';
+  $('#upsize').textContent = fmtSize(total);
   $('#uprow').hidden = false;
   upMsg('', null);
 }
 
 function clearUpload() {
-  pendingFile = null;
+  pendingFiles = [];
   upFile.value = '';
   $('#uprow').hidden = true;
   upMsg('', null);
 }
 
 async function doUpload(andGenerate) {
-  if (!pendingFile) return null;
-  upMsg('Caricamento…', null);
+  if (!pendingFiles.length) return [];
+  const audioFiles = pendingFiles.filter(f => /\.(mp3|m4a|wav)$/i.test(f.name));
+  if (andGenerate && audioFiles.length && !$('#whisperAudio').checked) {
+    upMsg('Per gli audio spunta «Trascrizione audio con Whisper» prima di generare.', false);
+    return [];
+  }
+  upMsg('Caricamento di ' + pendingFiles.length + ' file…', null);
   const fd = new FormData();
-  fd.append('file', pendingFile);
+  pendingFiles.forEach(f => fd.append('file', f));
   try {
     const r = await fetch('/api/upload', { method: 'POST', body: fd });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || ('Errore ' + r.status));
-    const fname = j.name;
-    upMsg('✔ Caricato: ' + fname + (j.replaced ? ' (sostituito)' : '') +
-          (j.copy ? ' (salvato come copia: originale bloccato)' : ''), true);
+    const names = j.names || [j.name];
+    upMsg('✔ Caricati: ' + names.join(', '), true);
     $('#uprow').hidden = true;
-    pendingFile = null;
+    pendingFiles = [];
     upFile.value = '';
     await refresh();
-    if (andGenerate) gen(fname);
-    return fname;
+    if (andGenerate) {
+      // Le richieste restano in coda sul server; non si attende la fine di ogni
+      // generazione, così più materiali vengono preparati con una sola azione.
+      busy = true;
+      for (const name of names) {
+        const res = await fetch('/api/build', { method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ source: name, force: $('#forceAll').checked,
+            bozza: $('#bozzaAll').checked, single: $('#singleAll').checked,
+            whisper: $('#whisperAudio').checked, profilo: profilo() }) });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          throw new Error(err.reason || err.error || ('Avvio generazione fallito: ' + res.status));
+        }
+      }
+      await pollLog();
+    }
+    return names;
   } catch (e) {
     upMsg('✗ ' + e.message, false);
-    return null;
+    return [];
   }
 }
 
@@ -1769,9 +1994,9 @@ upZone.addEventListener('dragleave', () => upZone.classList.remove('drag'));
 upZone.addEventListener('drop', e => {
   e.preventDefault();
   upZone.classList.remove('drag');
-  pickUpload(e.dataTransfer.files[0]);
+  pickUpload(e.dataTransfer.files);
 });
-upFile.onchange = () => pickUpload(upFile.files[0]);
+upFile.onchange = () => pickUpload(upFile.files);
 $('#btnUp').onclick = () => doUpload(false);
 $('#btnUpGen').onclick = () => doUpload(true);
 $('#btnUpX').onclick = clearUpload;
@@ -1908,6 +2133,7 @@ setInterval(() => { if (!busy) refresh(); }, 4000);
 
 # ------------------------------------------------------------------ main
 def main():
+    global RUNTIME_PORT
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
@@ -1940,6 +2166,9 @@ def main():
         sys.exit(1)
     port = free
 
+    RUNTIME_PORT = port
+    from tools.backups import backup_loop
+    threading.Thread(target=backup_loop, args=(BASE,), daemon=True).start()
     url = f"http://localhost:{port}/"
     print("=" * 60)
     print("  PANNELLO DI CONTROLLO — generatore lezioni")

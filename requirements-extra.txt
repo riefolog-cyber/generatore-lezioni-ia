@@ -2,3 +2,7 @@
 #   pip install -r requirements-extra.txt
 pypdf>=4.0.0,<7          # lettura file .pdf
 youtube-transcript-api>=0.6.0,<2   # trascrizioni dei video YouTube
+# PPTX ed EPUB sono gestiti con Python standard.
+# Per trascrivere audio localmente serve faster-whisper (CPU, int8):
+#   .venv\Scripts\python -m pip install faster-whisper
+faster-whisper>=1.0,<2          # facoltativo: modello Whisper locale per audio

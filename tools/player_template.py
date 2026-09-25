@@ -654,6 +654,14 @@ html[data-contrast="1"] header, html[data-contrast="1"] nav, html[data-contrast=
 #nmok { border: none; background: linear-gradient(135deg, var(--accent), var(--accent2));
   color: #fff; border-radius: 9px; padding: 8px 15px; cursor: pointer;
   font-size: 13px; font-weight: 800; font-family: inherit; }
+#examTimer { color: var(--warn); font-size: 12px; font-weight: 800; }
+#examBanner { margin: 8px auto; max-width: 940px; padding: 9px 14px; border-radius: 10px;
+  background: color-mix(in srgb, var(--warn) 13%, transparent); border: 1px solid var(--warn);
+  color: var(--text); font-size: 13px; font-weight: 700; }
+html[data-mode="exam"] .fb, html[data-mode="exam"] .vffb,
+html[data-mode="exam"] .seqmsg, html[data-mode="exam"] .cmpmsg,
+html[data-mode="exam"] .clmsg { display: none !important; }
+html[data-mode="exam"] #map { opacity: .35; pointer-events: none; }
 
 /* ------------------------------------------------ export docente */
 .exprow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 14px;
@@ -1033,6 +1041,60 @@ const MODNAV = slides.map((s, i) => {
 }).filter(Boolean);
 const LAST = slides.length - 1;
 
+// Modalità operative: studente (predefinita) ed esame.
+let lessonMode = 'student';
+let examOrder = [], examPos = 0, examTimer = null, examEndsAt = 0, examDone = false;
+function setLessonMode(next) {
+  lessonMode = next === 'exam' ? 'exam' : 'student';
+  document.documentElement.dataset.mode = lessonMode;
+  try { localStorage.setItem(DATA_KEY + '-mode', lessonMode); } catch (e) {}
+  const eb = _safe('btnModeExam');
+  if (eb) eb.setAttribute('aria-pressed', lessonMode === 'exam' ? 'true' : 'false');
+  const banner = _safe('examBanner'), timer = _safe('examTimer');
+  if (lessonMode !== 'exam') {
+    if (timer) timer.hidden = true;
+    if (banner) banner.hidden = true;
+    if (examTimer) { clearInterval(examTimer); examTimer = null; }
+  }
+}
+function fmtExam(ms) {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+}
+function startExam() {
+  if (!activeIdx.length) { alert('Questa lezione non contiene attività interattive.'); return; }
+  if (!confirm('Avviare la modalità esame? Le attività verranno mescolate e il tempo sarà di 15 minuti.')) return;
+  setLessonMode('exam');
+  results = {}; celebrated = false; examDone = false; examOrder = shuffle(activeIdx.slice());
+  examPos = 0; examEndsAt = Date.now() + 15 * 60 * 1000;
+  const timer = _safe('examTimer'), banner = _safe('examBanner');
+  if (timer) { timer.hidden = false; timer.textContent = '⏱ 15:00'; }
+  if (banner) { banner.hidden = false; banner.textContent = 'Esame: un tentativo, ordine casuale e feedback nascosto fino alla fine.'; }
+  go(examOrder[0]);
+  if (examTimer) clearInterval(examTimer);
+  examTimer = setInterval(() => {
+    const left = examEndsAt - Date.now();
+    if (timer) timer.textContent = '⏱ ' + fmtExam(left);
+    if (left <= 0 && !examDone) finishExam();
+  }, 1000);
+}
+function finishExam() {
+  if (examDone) return;
+  examDone = true;
+  if (examTimer) { clearInterval(examTimer); examTimer = null; }
+  const timer = _safe('examTimer'), banner = _safe('examBanner');
+  if (timer) timer.textContent = '⏱ 00:00';
+  if (banner) { banner.hidden = false; banner.textContent = 'Esame terminato. Il punteggio è disponibile nel riepilogo.'; }
+  go(LAST);
+}
+function goExam(delta) {
+  if (lessonMode !== 'exam' || !examOrder.length) return go(cur + delta);
+  const next = examPos + delta;
+  if (delta > 0 && next >= examOrder.length) { finishExam(); return; }
+  examPos = (next + examOrder.length) % examOrder.length;
+  go(examOrder[examPos]);
+}
+
 // ------------------------------------------------------------ tema
 const btnTheme = _safe('btnTheme') || el('div');
 function applyTheme(tt) {
@@ -1059,6 +1121,17 @@ function shuffle(a) {
     [a[i], a[j]] = [a[j], a[i]];
   }
   return a;
+}
+function shuffleOpts(opts) {
+  const order = shuffle(opts.map((o, k) => k));
+  // La risposta corretta non viene mai mostrata per prima: evita il pattern
+  // "la risposta giusta è sempre A", senza cambiare il testo delle opzioni.
+  const good = opts.findIndex(o => !!o.ok);
+  if (order.length > 1 && order[0] === good) {
+    const alt = order.findIndex(k => k !== good);
+    [order[0], order[alt]] = [order[alt], order[0]];
+  }
+  return order;
 }
 
 // ------------------------------------------------------------ dots + stat
@@ -1141,10 +1214,9 @@ function grade(i) {
   return { e, t: slideTotal(i) };
 }
 // ------------------------------------------------------------ progress hook
-// Punto d'aggancio per l'integrazione LMS (es. pacchetto SCORM): non fa nulla
-// di per sé (reportProgress è un no-op), l'export SCORM lo sostituisce con
-// l'adattatore che parla con l'API dell'LMS. Fuori dall'LMS resta innocuo.
-function reportProgress(_p) { /* sostituito dall'adapter SCORM, se presente */ }
+// Punto d'aggancio per integrazioni esterne: non invia nulla di per sé.
+// Un adattatore può sostituire questo hook quando richiesto.
+function reportProgress(_p) { /* nessun invio esterno predefinito */ }
 function paintScore() {
   let e = 0, t = 0;
   for (const i of activeIdx) {
@@ -1378,11 +1450,11 @@ function challengeWidget() {
     body.appendChild(top);
     body.appendChild(el('q', null, it.q));
     const btns = [];
-    const order = shuffle(it.opts.map((o, k) => k));
-    order.forEach(k => {
+    const order = shuffleOpts(it.opts);
+    order.forEach((k, pos) => {
       const o = it.opts[k];
       const btn = el('button', 'opt');
-      btn.appendChild(el('span', 'letter', String.fromCharCode(65 + k)));
+      btn.appendChild(el('span', 'letter', String.fromCharCode(65 + pos)));
       btn.appendChild(el('span', null, o.t));
       btns[k] = btn;
       btn.onclick = () => {
@@ -1433,8 +1505,7 @@ function buildExport() {
            }),
            risposte: LOG };
 }
-// Riepilogo compatto dei progressi: consumato dall'hook reportProgress
-// (adattatore SCORM) per aggiornare il punteggio/stato nell'LMS.
+// Riepilogo compatto dei progressi, disponibile per adattatori esterni.
 function buildProgress() {
   let e = 0, t = 0, done = 0;
   for (const i of activeIdx) {
@@ -1543,7 +1614,7 @@ function finishPanel() {
       : (pct >= 90 ? 'Percorso perfetto: padroni del tema! 🎉' : 'Hai completato tutte le attività: riascolta i moduli e riprova per punteggi migliori.')));
   const acts = el('div', 'actrow');
   const again = el('button', 'primary', '🔄 Rigioca il percorso');
-  again.onclick = () => { results = {}; celebrated = false; const sc = _btn('score'); if (sc) sc.hidden = true; go(0); };
+  if (again) again.onclick = () => { if (lessonMode === 'exam') return; results = {}; celebrated = false; const sc = _btn('score'); if (sc) sc.hidden = true; go(0); };
   const back = el('button', null, '⬅ Torna all\'inizio');
   back.onclick = () => go(0);
   acts.appendChild(again); acts.appendChild(back);
@@ -1686,6 +1757,10 @@ function render(i) {
     bNext.textContent = i === LAST ? '🏁 Fine' : 'Avanti →';
     bNext.disabled = false;
   }
+  if (lessonMode === 'exam' && examOrder.length && i !== LAST) {
+    const ep = examOrder.indexOf(i);
+    if (ep >= 0) examPos = ep;
+  }
   const prog = _btn('prog');
   if (prog) prog.textContent = (i + 1) + ' / ' + slides.length;
   const pf = _btn('pfill');
@@ -1734,9 +1809,13 @@ function answerFeedback(good, okTxt, koTxt, fbTxt) {
 function blockQuiz(q, idx) {
   const w = el('div', 'quiz');
   w.appendChild(el('q', null, q.q));
-  q.opts.forEach((o, k) => {
+  // Ordine casuale coerente: la lettera segue la posizione mostrata e il
+  // dataset conserva l'indice reale per valutare correttamente la risposta.
+  const order = shuffleOpts(q.opts);
+  order.forEach((k, pos) => {
+    const o = q.opts[k];
     const btn = el('button', 'opt');
-    btn.appendChild(el('span', 'letter', String.fromCharCode(65 + k)));
+    btn.appendChild(el('span', 'letter', String.fromCharCode(65 + pos)));
     btn.appendChild(el('span', null, o.t));
     btn.dataset.k = k;
     w.appendChild(btn);
@@ -1755,7 +1834,7 @@ function blockQuiz(q, idx) {
       btn.querySelector('.letter').textContent = good ? '✓' : '✗';
       if (!good) {
         const gi = q.opts.findIndex(o => o.ok);
-        const g = w.querySelectorAll('.opt')[gi];
+        const g = [...w.querySelectorAll('.opt')].find(x => +x.dataset.k === gi);
         if (g) { g.classList.add('correct'); g.querySelector('.letter').textContent = '✓'; }
       }
       fb.innerHTML = '';
@@ -1778,9 +1857,10 @@ function blockQuiz(q, idx) {
 function blockScenario(s, idx) {
   const m = el('div', 'scn');
   m.appendChild(el('div', 'situ', s.situazione));
-  s.opts.forEach((o, k) => {
+  shuffleOpts(s.opts).forEach((k, pos) => {
+    const o = s.opts[k];
     const btn = el('button', 'opt');
-    btn.appendChild(el('span', 'letter', String.fromCharCode(65 + k)));
+    btn.appendChild(el('span', 'letter', String.fromCharCode(65 + pos)));
     btn.appendChild(el('span', null, o.t));
     btn.dataset.ok = o.ok ? '1' : '';
     btn.dataset.fb = o.fb || '';
@@ -2451,6 +2531,19 @@ function applyMute(m) {
 const _btnMute = _safe('btnMute');
 if (_btnMute) _btnMute.onclick = () => applyMute(!audioMuted);
 applyMute(audioMuted);
+const _btnModeExam = _safe('btnModeExam');
+if (_btnModeExam) _btnModeExam.onclick = () => {
+  if (lessonMode === 'exam') setLessonMode('student');
+  else startExam();
+};
+try {
+  const savedMode = localStorage.getItem(DATA_KEY + '-mode');
+  if (savedMode === 'exam') setLessonMode('student');
+  else setLessonMode('student');
+  if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
+  }
+} catch (e) { setLessonMode('student'); }
 
 function tick() {
   const t = audio.currentTime || 0;
@@ -2657,9 +2750,9 @@ function printLesson() {
 const _bPrnt = _safe('btnPrint');
 if (_bPrnt) _bPrnt.onclick = printLesson;
 const _bPrev = _safe('btnPrev');
-if (_bPrev) _bPrev.onclick = () => go(cur - 1);
+if (_bPrev) _bPrev.onclick = () => (lessonMode === 'exam' ? goExam(-1) : go(cur - 1));
 const _bNext = _safe('btnNext');
-if (_bNext) _bNext.onclick = () => { if (cur < LAST) go(cur + 1); else { const f = document.querySelector('#slide .fin') || document.querySelector('.fin'); if (f) f.scrollIntoView({ behavior: 'smooth', block: 'start' }); } };
+if (_bNext) _bNext.onclick = () => { if (lessonMode === 'exam' && !examDone) { if (cur === LAST) finishExam(); else goExam(1); } else if (cur < LAST) go(cur + 1); else { const f = document.querySelector('#slide .fin') || document.querySelector('.fin'); if (f) f.scrollIntoView({ behavior: 'smooth', block: 'start' }); } };
 document.addEventListener('keydown', e => {
   const tag = (e.target && e.target.tagName) || '';
   const inField = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
@@ -2786,6 +2879,8 @@ def write_player(out_dir: Path, titolo: str, tema: str = 'dark'):
   <span id="score" class="hchip" hidden>⭐ 0/0</span>
   <span id="streak" class="hchip streak" hidden>🔥</span>
   <span id="rvw" class="hchip" hidden>🔖</span>
+  <span id="examTimer" class="hchip" hidden>⏱ --:--</span>
+  <button id="btnModeExam" class="hbtn" title="Modalità esame: domande casuali e timer">⏱<span class="hbtntxt">Esame</span></button>
   <button id="btnMute" class="hbtn" title="Disattiva la voce per tutta la lezione" aria-pressed="false"><span class="hbtnico">🔊</span><span class="hbtntxt">Audio</span></button>
   <button id="btnSearch" class="hbtn" title="Cerca nella lezione (F)">🔍<span class="hbtntxt">Cerca</span></button>
   <div id="hmenu">
@@ -2810,6 +2905,7 @@ def write_player(out_dir: Path, titolo: str, tema: str = 'dark'):
   <input id="nminput" type="text" maxlength="40" placeholder="il tuo nome" autocomplete="off">
   <button id="nmok">OK</button>
 </div>
+<div id="examBanner" hidden></div>
 <div id="pbar"><div id="pfill"></div></div>
 <div id="map"></div>
 <main><div id="stage"><div id="slide" aria-live="polite"></div></div></main>
@@ -2858,10 +2954,15 @@ def write_player(out_dir: Path, titolo: str, tema: str = 'dark'):
             % (__import__('json').dumps(titolo), __import__('json').dumps(titolo[:12])),
             encoding='utf-8')
         (out_dir / 'sw.js').write_text(
-            "const C='lesson-v1';\n"
+            "const C='lesson-v3';\n"
             "self.addEventListener('install',e=>{e.waitUntil(caches.open(C).then(c=>c.addAll("
             "['./index.html','./main.css','./main.js','./lesson-data.js']).catch(()=>{})));});\n"
-            "self.addEventListener('fetch',e=>{e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request).catch(()=>r)));});\n",
+            "self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(ks=>Promise.all("
+            "ks.filter(k=>k!==C).map(k=>caches.delete(k)))));self.clients.claim();});\n"
+            "self.addEventListener('fetch',e=>{const req=e.request; if(req.method!=='GET') return;"
+            "e.respondWith(caches.match(req).then(r=>r||fetch(req).then(res=>{const copy=res.clone();"
+            "caches.open(C).then(c=>c.put(req,copy)).catch(()=>{}); return res;})"
+            ".catch(()=>req.mode==='navigate'?caches.match('./index.html'):Response.error())));});\n",
             encoding='utf-8')
     except OSError:
         pass

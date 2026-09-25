@@ -66,7 +66,7 @@ class App:
 
         self.refresh()
         self.put("NOTA: GUI classica — il pannello web (python panel.py) ha più funzioni "
-                 "(profilo, voce, editor, HTML unico, SCORM, dispensa).\n")
+                 "(profilo, voce, editor, HTML unico e trascrizione audio Whisper).\n")
         self.put("Pronto. 1) Verifica ambiente  2) Anteprima  3) Genera  4) Apri lezione.\n")
 
     # ------------------------------------------------------------ UI

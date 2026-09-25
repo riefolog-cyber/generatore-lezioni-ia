@@ -8,11 +8,13 @@ Supporta:
 - URL di siti web (fetch + parsing HTML)
 - video YouTube (trascrizione via youtube-transcript-api, opzionale;
   fallback: titolo + descrizione)
+- audio MP3/M4A/WAV (trascrizione locale con Whisper, opzionale)
 
 Ogni estrattore ritorna la stessa struttura di extract_docx:
 {"title": str, "sections": [{"heading": str|None, "paras": [str, ...]}]}
 così il resto della pipeline non cambia.
 """
+import importlib.util
 import json
 import re
 import time
@@ -20,7 +22,10 @@ import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
 
-SUPPORTED_EXT = {".docx", ".pdf", ".txt", ".md", ".html", ".htm"}
+# Whisper viene caricato solo al primo audio trascritto e riusato per gli altri.
+_WHISPER_MODEL = None
+_WHISPER_BACKEND = None
+SUPPORTED_EXT = {".docx", ".pdf", ".txt", ".md", ".html", ".htm", ".pptx", ".epub", ".mp3", ".m4a", ".wav"}
 
 _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
@@ -156,6 +161,95 @@ def _split_into_sections(text, title=None):
         sections.append(cur)
     return {"title": title, "sections": sections}
 
+
+
+
+# ------------------------------------------------------------------ PPTX / EPUB
+def _clean_xml_text(value):
+    return re.sub(r"\s+", " ", value or "").strip()
+
+
+def extract_pptx(path):
+    """Estrae il testo delle slide usando solo zipfile/XML standard."""
+    import xml.etree.ElementTree as ET
+    import zipfile
+    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    sections, title = [], None
+    with zipfile.ZipFile(str(path)) as zf:
+        names = sorted((n for n in zf.namelist()
+                        if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)),
+                       key=lambda n: int(re.search(r"(\d+)", n).group(1)))
+        for n, name in enumerate(names, 1):
+            root = ET.fromstring(zf.read(name))
+            text = _clean_xml_text(" ".join(
+                node.text or "" for node in root.iter()
+                if str(node.tag).rsplit("}", 1)[-1] == "t"))
+            if text:
+                if title is None:
+                    title = text[:120]
+                sections.append({"heading": f"Slide {n}", "paras": [text]})
+    if not sections:
+        raise ValueError("Il PowerPoint non contiene testo estraibile.")
+    return {"title": title or Path(path).stem, "sections": sections}
+
+
+def extract_epub(path):
+    """Estrae un EPUB basilare leggendo i documenti XHTML nello ZIP."""
+    import xml.etree.ElementTree as ET
+    import zipfile
+    sections, title = [], None
+    with zipfile.ZipFile(str(path)) as zf:
+        names = [n for n in zf.namelist()
+                 if n.lower().endswith((".xhtml", ".html", ".htm"))]
+        for name in names:
+            try:
+                root = ET.fromstring(zf.read(name))
+            except ET.ParseError:
+                continue
+            text = _clean_xml_text(" ".join(x.strip() for x in root.itertext() if x.strip()))
+            if text:
+                if title is None:
+                    title = Path(name).stem.replace("_", " ").strip()
+                sections.append({"heading": Path(name).stem, "paras": [text]})
+    if not sections:
+        raise ValueError("L'EPUB non contiene testo estraibile.")
+    return {"title": title or Path(path).stem, "sections": sections}
+
+
+def extract_audio(path):
+    """Trascrizione locale con Whisper; il modello viene riusato."""
+    p = Path(path)
+    if p.suffix.lower() not in (".mp3", ".m4a", ".wav"):
+        raise ValueError("Formato audio non supportato: usa MP3, M4A o WAV.")
+    global _WHISPER_MODEL, _WHISPER_BACKEND
+    if _WHISPER_MODEL is None:
+        if importlib.util.find_spec("faster_whisper") is not None:
+            try:
+                from faster_whisper import WhisperModel
+                _WHISPER_MODEL = WhisperModel("base", device="cpu", compute_type="int8")
+                _WHISPER_BACKEND = "faster-whisper"
+            except Exception:
+                _WHISPER_MODEL = None
+        if _WHISPER_MODEL is None and importlib.util.find_spec("whisper") is not None:
+            try:
+                import whisper
+                _WHISPER_MODEL = whisper.load_model("base")
+                _WHISPER_BACKEND = "whisper"
+            except Exception:
+                _WHISPER_MODEL = None
+    if _WHISPER_MODEL is None:
+        raise ValueError(
+            "Trascrizione Whisper non installata. Esegui: "
+            "pip install faster-whisper")
+    print(f"  Whisper ({_WHISPER_BACKEND}): trascrizione di {p.name}…", flush=True)
+    if _WHISPER_BACKEND == "faster-whisper":
+        segments, _ = _WHISPER_MODEL.transcribe(str(p), language="it")
+        text = " ".join(s.text.strip() for s in segments if s.text.strip())
+    else:
+        text = str(_WHISPER_MODEL.transcribe(str(p)).get("text", "")).strip()
+    if len(text) < 50:
+        raise ValueError("Trascrizione audio troppo breve o non riconosciuta.")
+    return _split_into_sections(text, title=p.stem)
 
 # ------------------------------------------------------------------ DOCX
 def extract_docx(path):
@@ -446,9 +540,16 @@ def extract_source(source):
     ext = p.suffix.lower()
     if ext == ".docx":
         return extract_docx(p)
+    if ext == ".pptx":
+        return extract_pptx(p)
+    if ext == ".epub":
+        return extract_epub(p)
+    if ext in (".mp3", ".m4a", ".wav"):
+        return extract_audio(p)
     if ext == ".pdf":
         return extract_pdf(p)
     if ext in SUPPORTED_EXT:
         return extract_text(p)
     raise ValueError(f"Formato non supportato ({ext or 'nessuna estensione'}): "
-                     "usa .docx, .pdf, .txt, .md, .html oppure un URL di sito/YouTube.")
+                     "usa .docx, .pdf, .pptx, .epub, .txt, .md, .html, .mp3, .m4a, .wav "
+                     "oppure un URL di sito/YouTube.")

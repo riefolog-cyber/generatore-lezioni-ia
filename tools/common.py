@@ -38,6 +38,8 @@ DEFAULT_CONFIG = {
     "num_moduli_min": 4,
     "num_moduli_max": 7,
     "porta": 8341,
+    "max_upload_mb": 100,
+    "pin_docente": "",
     "llm_contesto_caratteri": 18000,
     "cache_max_mb": 300,
     "tts_workers": 4,
@@ -104,6 +106,8 @@ def load_config():
     cfg["tts_retries"] = _clamp_int(cfg.get("tts_retries", 2), 2, 0, 5)
     cfg["audio_bitrate"] = _clamp_int(cfg.get("audio_bitrate", 96), 96, 32, 320)
     cfg["porta"] = _clamp_int(cfg.get("porta", 8341), 8341, 1024, 65535)
+    cfg["max_upload_mb"] = _clamp_int(
+        cfg.get("max_upload_mb", 100), 100, 1, 1000)
     cfg["cache_max_mb"] = _clamp_int(cfg.get("cache_max_mb", 300), 300, 50, 2000)
     cfg["llm_contesto_caratteri"] = _clamp_int(
         cfg.get("llm_contesto_caratteri", 18000), 18000, 2000, 60000)

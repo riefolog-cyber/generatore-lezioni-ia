@@ -71,8 +71,7 @@ def test_glossary_slide_uses_glossario_block():
     assert any(g.get("slide") is not None for g in groups)
 
 
-def test_glossario_validation_and_handout(tmp_path):
-    import json as _j
+def test_glossario_validation(tmp_path):
     from common import validate_lesson
     slides = [{"title": "Glossario", "audio": "./assets/audio/narration-01.mp3",
                "duration": 3.0, "caption": "./assets/captions/narration-01.vtt",
@@ -93,19 +92,6 @@ def test_glossario_validation_and_handout(tmp_path):
     ok, errs, stats = validate_lesson(out, slides)
     assert ok, errs
     assert stats["glossario"] == 3
-    from export_handout import export_handout
-    (out / "lesson-data.js").write_text(
-        "window.LESSON_DATA = " + _j.dumps(
-            {"titolo": "L", "slides": [
-                {"title": "Glossario", "narration": "g",
-                 "blocks": [{"glossario": {"groups": [
-                     {"modulo": "M1",
-                      "terms": [{"t": "Alpha", "d": "prima"}]}]}}]}]}),
-        encoding="utf-8")
-    h = export_handout(out, tmp_path / "disp.html")
-    txt = h.read_text(encoding="utf-8")
-    assert "Alpha" in txt and "Glossario" in txt
-
 
 def test_final_exam_limit():
     mods = [_mod(f"M{i}") for i in range(7)]
@@ -158,46 +144,6 @@ def test_move_delete_add_slide(tmp_path):
     assert isinstance(pos, int)
     n = new_lesson.delete_slide(str(tmp_path), 0)
     assert n == 5
-
-
-def test_scorm_handout(tmp_path):
-    import json as _j
-    lsn = tmp_path / "Prova_lesson"
-    lsn.mkdir()
-    (lsn / "index.html").write_text("<html><head><title>t</title></head><body>lezione</body></html>", encoding="utf-8")
-    (lsn / "lesson-data.js").write_text(
-        "window.LESSON_DATA = " + _j.dumps(
-            {"titolo": "Prova", "profilo": {"durata": "standard"},
-             "slides": [{"title": "A", "narration": "ciao",
-                         "blocks": [{"quiz": {"q": "D?",
-                                              "opts": [{"t": "x", "ok": True}]}}]}]}),
-        encoding="utf-8")
-    from export_scorm import export_scorm
-    from export_handout import export_handout
-    z = export_scorm(lsn, tmp_path / "p_scorm.zip")
-    assert z.exists()
-    import zipfile
-    import xml.etree.ElementTree as ET
-    with zipfile.ZipFile(z) as zf:
-        names = zf.namelist()
-        assert "imsmanifest.xml" in names
-        assert "scorm-adapter.js" in names
-        # manifest XML ben formato, con ogni file del pacchetto elencato
-        root = ET.fromstring(zf.read("imsmanifest.xml").decode("utf-8"))
-        assert root.tag.endswith("manifest")
-        declared = {el.get("href") for el in root.iter() if el.tag.endswith("file")}
-        assert "index.html" in declared and "scorm-adapter.js" in declared
-        assert {n for n in names if n != "imsmanifest.xml"} <= declared
-        # adapter iniettato in index.html DENTRO lo zip, non come doppio tag
-        idx = zf.read("index.html").decode("utf-8")
-        assert idx.count("scorm-adapter.js") == 1
-        assert "LMSInitialize" in zf.read("scorm-adapter.js").decode("utf-8")
-    # l'export è idempotente e la cartella originale NON viene toccata
-    assert "scorm-adapter" not in (lsn / "index.html").read_text(encoding="utf-8")
-    assert export_scorm(lsn, tmp_path / "p_scorm2.zip").exists()
-    assert "scorm-adapter" not in (lsn / "index.html").read_text(encoding="utf-8")
-    h = export_handout(lsn, tmp_path / "disp.html")
-    assert h.exists() and "Dispensa" in h.read_text(encoding="utf-8")
 
 
 # ==================================================================
@@ -263,16 +209,6 @@ def test_classifica_validation_and_handout(tmp_path):
     ok, errs, stats = validate_lesson(out, slides)
     assert ok, errs
     assert stats["classifica"] == 1
-    import json as _j
-    (out / "lesson-data.js").write_text(
-        "window.LESSON_DATA = " + _j.dumps(
-            {"titolo": "L2", "slides": [{"title": "Classifica", "narration": "n",
-              "blocks": [{"classifica": {"cats": ["A", "B"],
-                                        "items": [{"t": "x", "cat": 1}]}}]}]}),
-        encoding="utf-8")
-    from export_handout import export_handout
-    txt = export_handout(out, tmp_path / "disp2.html").read_text(encoding="utf-8")
-    assert "A:" in txt and "B:" in txt
 
 
 def test_voci_alternate_config_and_choice():
@@ -307,9 +243,30 @@ def test_player_contains_new_features(tmp_path):
     assert 'id="map"' in html and "paintMap" in js
     # F5: badge
     assert "BADGES" in js and "btnBadges" in html and "badge-toast" in css
-    # hook SCORM ancora presente
+    # hook di avanzamento disponibile per adattatori esterni
     assert "reportProgress" in js
 
+
+
+
+def test_player_classroom_modes_and_service_worker(tmp_path):
+    from player_template import write_player
+    out = tmp_path / "Classroom_lesson"
+    out.mkdir()
+    write_player(out, "Modalità classe")
+    html = (out / "index.html").read_text(encoding="utf-8")
+    js = (out / "main.js").read_text(encoding="utf-8")
+    css = (out / "main.css").read_text(encoding="utf-8")
+    sw = (out / "sw.js").read_text(encoding="utf-8")
+    assert 'id="btnModeTeacher"' not in html and 'id="btnModeExam"' in html
+    assert 'id="examTimer"' in html and 'id="examBanner"' in html
+    assert "btnModeTeacher" not in js and "data-mode=\"teacher\"" not in css
+    assert "const order = shuffleOpts(q.opts);" in js
+    assert "function shuffleOpts(opts)" in js
+    assert "String.fromCharCode(65 + pos)" in js
+    assert "setLessonMode" in js and "startExam" in js and "goExam" in js
+    assert "navigator.serviceWorker.register('./sw.js')" in js
+    assert "lesson-v3" in sw and "caches.open" in sw
 
 def test_player_lesson_dir_is_valid_js(tmp_path):
     """Regressione: lo script inline window.LESSON_DIR non deve contenere

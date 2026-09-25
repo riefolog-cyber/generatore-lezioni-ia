@@ -6,7 +6,7 @@ Doppio clic su **`AVVIA.bat`**: crea/usa l'ambiente virtuale `.venv`,
 installa le dipendenze, parte il server locale e si apre nel browser
 il **pannello di controllo** (pagina grafica), con cui puoi:
 1. caricare il **materiale**: trascinalo nella zona tratteggiata del pannello
-   o usa "Sfoglia" (`.docx`, `.pdf`, `.txt`, `.md`, `.html`) e premi
+   o usa "Sfoglia" (documenti, `.pptx`, `.epub`, `.mp3`, `.m4a`, `.wav`) e premi
    **Carica e genera** — solo upload, i file già presenti in cartella
    non vengono rilevati;
 2. generare da **link** (sito web o video YouTube);
@@ -15,7 +15,8 @@ il **pannello di controllo** (pagina grafica), con cui puoi:
    (conoscenza/comprensione/applicazione/analisi);
 4. impostare le **opzioni**: rigenera anche le lezioni esistenti (`--force`),
    bozza senza LLM (`--bozza`), rigenera solo l'audio di una lezione,
-   generare come **file HTML unico** (senza cartella);
+   generare come **file HTML unico** (senza cartella) e attivare la
+   **trascrizione audio locale con Whisper**;
 5. **modificare** le slide dopo la generazione (titolo, narrazione, quiz)
    con rigenerazione audio della singola slide;
 6. provare le **voci** neurali (anteprima audio) prima di generare;
@@ -32,9 +33,10 @@ In alternativa al pannello, da terminale: `python new_lesson.py build <file|URL>
 
 La pipeline accetta qualsiasi di queste fonti (stessa struttura interna):
 
-- **File**: `.docx` (python-docx), `.pdf` (serve `pypdf`), `.txt`, `.md`,
-  `.html` — solo via upload dal pannello (drag & drop o pulsante
-  "Carica e genera": il file atterra nella cartella del progetto).
+- **File**: `.docx`, `.pdf`, `.txt`, `.md`, `.html`, `.pptx`, `.epub`;
+  inoltre `.mp3`, `.m4a`, `.wav` vengono trascritti localmente con Whisper.
+  Dal pannello si caricano con drag & drop o pulsante
+  "Carica e genera": il file atterra nella cartella del progetto.
   Da terminale restano validi file locali e `watch`:
   `python new_lesson.py build <file|URL>` (con `--durata= --livello=
   --obiettivo=` per il profilo).
@@ -44,7 +46,7 @@ La pipeline accetta qualsiasi di queste fonti (stessa struttura interna):
   è disponibile, ripiega su titolo + descrizione).
 - **Anteprima** senza audio: `python new_lesson.py preview <file|URL>`.
 
-Dipendenze opzionali per PDF e YouTube: `pip install -r requirements-extra.txt`.
+Dipendenze opzionali (PDF, YouTube e Whisper): `pip install -r requirements-extra.txt`.
 
 ## Cosa genera
 
@@ -138,13 +140,10 @@ generatore-lezioni-mappa.html   mappa interattiva del sistema (Archify):
 generatore-lezioni-mappa.json   sorgente dell'IR per rigenerare la mappa
 requirements.txt     python-docx, edge-tts (ffmpeg serve per durata/fallback)
 requirements.lock    versioni esatte testate (pip install -r requirements.lock)
-requirements-extra.txt  pypdf (PDF), youtube-transcript-api (YouTube)
+requirements-extra.txt  pypdf, YouTube e faster-whisper (audio locale)
 requirements-dev.txt    pytest (test unitari)
 tools/               common, player_template (player autogenerato),
-                     sources (fonti di partenza), export_zip,
-                     export_scorm (SCORM 1.2 con tracciamento punteggio/
-                     completamento per Moodle), export_handout (dispensa),
-                     selftest (QA automatico)
+                     sources (fonti e Whisper), export_zip, selftest (QA)
 assets/voice/        modello Piper + cache audio
 ```
 
@@ -191,14 +190,14 @@ assets/voice/        modello Piper + cache audio
 - Riaudio/riplayer senza rifare l'LLM (dopo aver cambiato voce o tema in
   config.json): `python new_lesson.py reaudio Nome_Lezione_lesson`.
 - File HTML unico senza cartella: `python new_lesson.py build file.docx --single`.
-- **SCORM con tracciamento reale**: `python tools/export_scorm.py <cartella_lesson>`
-  (o il pulsante SCORM nel pannello) genera un pacchetto SCORM 1.2 che parla
-  con l'LMS: punteggio, stato (completato/superato), posizione e tempo arrivano
-  al registro voti di Moodle. Fuori dall'LMS la lezione resta identica.
+- **Trascrizione audio con Whisper**: carica un `.mp3`, `.m4a` o `.wav`,
+  spunta l'opzione nel pannello e premi «Carica e genera». La trascrizione avviene
+  localmente; il testo ottenuto crea la lezione con il flusso normale.
+  Prima installa il supporto: `.venv\Scripts\python -m pip install faster-whisper`.
 - **Trascina nella categoria**: nuova attività interattiva (l'LLM la crea solo
   quando il materiale offre categorie nette): elementi da smistare su 2-3
   colonne con drag & drop o tap; punteggio al primo collocamento. Valida dal
-  validatore, inclusa in dispensa e stampa.
+  validatore e visualizzata nel player.
 - **Voci alternate**: imposta `edge_voice_domande` in config.json (es.
   `it-IT-ElsaNeural`) e le domande/verifiche saranno lette da una seconda voce:
   la lezione suona come un dialogo. Cache audio distinta per voce.

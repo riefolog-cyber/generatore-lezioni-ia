@@ -19,6 +19,7 @@ _generated.json
 job_history.json
 .opencode/
 classifica.json
+classifica.sqlite3
 
 # log di generazione/avvio
 *.log

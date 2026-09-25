@@ -71,6 +71,10 @@ _check_modulo("youtube_transcript_api", "youtube-transcript-api",
               "youtube-transcript-api (trascrizioni YouTube)",
               hint="pip install -r requirements-extra.txt — senza, i video YouTube "
               "usano solo titolo e descrizione")
+_check_modulo("faster_whisper", "faster-whisper",
+               "Whisper (trascrizione audio locale)",
+               hint="pip install faster-whisper — necessario per MP3/M4A/WAV")
+
 
 voice, _ = resolve_voice()
 avviso(f"voce Piper di riserva ({voice.name})", voice.exists(),

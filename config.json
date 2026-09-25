@@ -18,6 +18,8 @@
   "num_moduli_max": 7,
   "porta": 8341,
   "lan_ip_fisso": "192.168.0.2",
+  "max_upload_mb": 100,
+  "pin_docente": "",
   "cache_max_mb": 300,
   "tts_workers": 4,
   "tts_retries": 2,
