@@ -9,9 +9,9 @@ pip.
 Build consigliata su Windows ARM64: `whisper-bin-win-cpu-arm64.zip`. Esiste anche
 `whisper-bin-win-opencl-adreno-arm64.zip` (accelerazione GPU sull'Adreno), ma
 richiede i driver OpenCL del produttore installati: senza la cartella
-`C:\Windows\System32\OpenCL\vendors` il binario non parte (errore 0xC0000135,
-DLL mancante). Per questo di default si usa la build CPU, che e gia' molto
-veloce (NEON + ARM FMA + INT8 attivi).
+System32/OpenCL/vendors il binario non parte (errore 0xC0000135, DLL mancante).
+Per questo di default si usa la build CPU, che e gia' molto veloce
+(NEON + ARM FMA + INT8 attivi).
 
 Non sostituisce faster-whisper: e un backend AGGIUNTIVO, scelto solo se
 faster-whisper non e installato. Su x64 resta preferito faster-whisper.
@@ -54,6 +54,10 @@ def find_binary():
     """Percorso del binario whisper.cpp, o None se non e disponibile.
 
     Ordine: variabile d'ambiente WHISPER_CPP_BIN, cache del progetto, PATH.
+    Solo nomi propri di whisper.cpp: "main" da solo e troppo ambiguo (su
+    Windows `shutil.which("main")` restituisce main.CPL, l'applet "Mouse e
+    Tastiera" del Pannello di controllo: accettarlo farebbe fallire la
+    trascrizione solo dopo aver scaricato il modello).
     """
     env = os.environ.get("WHISPER_CPP_BIN", "").strip()
     if env and Path(env).is_file():
@@ -63,7 +67,7 @@ def find_binary():
             cand = base / name
             if cand.is_file():
                 return cand
-    for name in ("whisper-cli", "whisper", "main"):
+    for name in ("whisper-cli", "whisper"):
         found = shutil.which(name)
         if found:
             return Path(found)
