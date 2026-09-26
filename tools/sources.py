@@ -34,6 +34,16 @@ _WHISPER_CACHE_DIR = Path(__file__).resolve().parent.parent / ".whisper_cache"
 _TRANSCRIBE_CANCEL = threading.Event()
 _TRANSCRIBE_PROGRESS = None
 
+# Messaggio unico quando nessun backend di trascrizione e disponibile: su x64 si
+# risolve con faster-whisper, su ARM serve whisper.cpp (vedi tools/whisper_cpp.py).
+_NESSUNA_TRASCRIZIONE = (
+    "Trascrizione audio non disponibile.\n"
+    "  x64:  pip install faster-whisper\n"
+    "  ARM:  scarica whisper-bin-win-cpu-arm64.zip ed estraila in "
+    ".whisper_cache\\whisper-cpp\\ (copia TUTTA la cartella Release: "
+    "l'eseguibile va tenuto insieme alle sue DLL)"
+)
+
 
 def begin_transcription():
     """Prepara un nuovo job e restituisce l'evento di cancellazione."""
@@ -169,8 +179,13 @@ def _whisper_model_name():
         return "base"
 
 
-def _load_whisper_model(name):
-    """Carica una sola istanza per modello; riusata nei job successivi."""
+def _load_whisper_model(name, duration=0.0):
+    """Carica una sola istanza per modello; riusata nei job successivi.
+
+    Ordine di preferenza: faster-whisper, whisper, whisper.cpp. Il primo e il
+    piu' rapido su x64; il terzo e l'unico disponibile su Windows ARM, dove
+    faster-whisper non e installabile (CTranslate2 non ha wheel win_arm64).
+    """
     global _WHISPER_MODEL, _WHISPER_BACKEND
     if name in _WHISPER_MODELS:
         _WHISPER_MODEL, _WHISPER_BACKEND = _WHISPER_MODELS[name]
@@ -189,8 +204,19 @@ def _load_whisper_model(name):
         _WHISPER_MODELS[name] = (model, "whisper")
         _WHISPER_MODEL, _WHISPER_BACKEND = model, "whisper"
         return model
-    raise ValueError("Trascrizione Whisper non installata. "
-                     "Esegui: pip install faster-whisper")
+    # Windows ARM: whisper.cpp, binario nativo (NEON, build anche per Adreno).
+    try:
+        from whisper_cpp import WhisperCppModel, find_binary
+    except ImportError as exc:
+        raise ValueError(_NESSUNA_TRASCRIZIONE) from exc
+    if find_binary() is None:
+        raise ValueError(_NESSUNA_TRASCRIZIONE)
+    model = WhisperCppModel(
+        name, progress=_TRANSCRIBE_PROGRESS,
+        cancel=_TRANSCRIBE_CANCEL, duration=duration)
+    _WHISPER_MODELS[name] = (model, "whisper-cpp")
+    _WHISPER_MODEL, _WHISPER_BACKEND = model, "whisper-cpp"
+    return model
 
 
 def _audio_fingerprint(path, model_name):
@@ -348,7 +374,7 @@ def extract_audio(path):
     dur_txt = f", durata {_format_duration(duration)}" if duration else ""
     print(f"  Whisper modello {model_name} ({min(8, os.cpu_count() or 1)} core): "
           f"trascrizione di {p.name}{dur_txt}…", flush=True)
-    model = _load_whisper_model(model_name)
+    model = _load_whisper_model(model_name, duration or 0.0)
     backend = _WHISPER_BACKEND
     started = time.time()
     parts = []

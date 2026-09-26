@@ -3,6 +3,15 @@
 pypdf>=4.0.0,<7          # lettura file .pdf
 youtube-transcript-api>=0.6.0,<2   # trascrizioni dei video YouTube
 # PPTX ed EPUB sono gestiti con Python standard.
-# Per trascrivere audio localmente serve faster-whisper (CPU, int8):
-#   .venv\Scripts\python -m pip install faster-whisper
-faster-whisper>=1.0,<2          # facoltativo: modello Whisper locale per audio
+#
+# Per trascrivere audio localmente:
+#   x64 -> faster-whisper (CPU, int8):
+#          .venv\Scripts\python -m pip install faster-whisper
+#   ARM -> faster-whisper NON e installabile (CTranslate2 non pubblica wheel
+#          win_arm64): il progetto usa whisper.cpp, che e un binario e non un
+#          pacchetto pip. Scarica whisper-bin-win-cpu-arm64.zip da
+#          https://github.com/ggml-org/whisper.cpp/releases/latest ed estraila
+#          in .whisper_cache\whisper-cpp\ COPIANDO TUTTO il contenuto della
+#          cartella Release (l'eseguibile va tenuto insieme alle sue DLL).
+#          Vedi tools\whisper_cpp.py.
+faster-whisper>=1.0,<2; platform_machine != "ARM64" and platform_machine != "aarch64"

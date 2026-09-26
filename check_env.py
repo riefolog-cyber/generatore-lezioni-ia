@@ -71,9 +71,26 @@ _check_modulo("youtube_transcript_api", "youtube-transcript-api",
               "youtube-transcript-api (trascrizioni YouTube)",
               hint="pip install -r requirements-extra.txt — senza, i video YouTube "
               "usano solo titolo e descrizione")
-_check_modulo("faster_whisper", "faster-whisper",
-               "Whisper (trascrizione audio locale)",
-               hint="pip install faster-whisper — necessario per MP3/M4A/WAV")
+# Motore di trascrizione audio: faster-whisper su x64, whisper.cpp su ARM.
+# Su ARM faster-whisper non e installabile (CTranslate2 non pubblica wheel
+# win_arm64), quindi il progetto ripiega sul binario whisper.cpp.
+_ver_fw = _check_modulo("faster_whisper", "faster-whisper",
+                        "Whisper locale (faster-whisper)")
+if not _ver_fw:
+    from whisper_cpp import MODEL_DIR, find_binary
+    _bin = find_binary()
+    if _bin:
+        _modelli = sorted(p.stem.replace("ggml-", "")
+                          for p in MODEL_DIR.glob("ggml-*.bin"))
+        avviso("Whisper locale (whisper.cpp)", True)
+        print("    binario: " + _bin.name + " | modelli: "
+              + (", ".join(_modelli) if _modelli
+                 else "nessuno (scaricato al primo uso)"))
+    else:
+        avviso("Whisper locale (faster-whisper oppure whisper.cpp)", False,
+               "x64: pip install faster-whisper | ARM: scarica "
+               "whisper-bin-win-cpu-arm64.zip in .whisper_cache\\whisper-cpp\\ "
+               "(copia tutta la cartella Release: exe + DLL) — serve per MP3/M4A/WAV")
 
 cfg = load_config()
 avviso(f"Whisper: modello {cfg.get('whisper_model', 'base')}; cache in .whisper_cache/",
