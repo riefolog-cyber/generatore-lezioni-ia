@@ -275,31 +275,43 @@ def validate_lesson(out_dir, slides):
     seen_audio = set()
     for i, s in enumerate(slides):
         for b in s.get("blocks", []):
+            # Il blocco arriva dall'LLM: puo' essere una lista o una stringa
+            # invece di un dizionario. Senza guardia, `b["quiz"].get(...)` fa
+            # AttributeError e l'eccezione ABORTA TUTTA la validazione,
+            # perdendo anche gli errori raccolti fino a quel punto. Per questo
+            # ogni tipo viene controllato con isinstance prima di usarlo.
+            if not isinstance(b, dict):
+                errs.append(f"slide {i + 1}: blocco non valido ({type(b).__name__})")
+                continue
             if "quiz" in b:
                 quiz += 1
-                if len(b["quiz"].get("opts", [])) < 2:
-                    errs.append(f"slide {i + 1}: quiz con meno di 2 opzioni")
-                if not any(o.get("ok") for o in b["quiz"].get("opts", [])):
-                    errs.append(f"slide {i + 1}: quiz senza risposta corretta")
+                if not isinstance(b["quiz"], dict):
+                    errs.append(f"slide {i + 1}: quiz malformato")
+                else:
+                    opts = b["quiz"].get("opts") or []
+                    if len(opts) < 2:
+                        errs.append(f"slide {i + 1}: quiz con meno di 2 opzioni")
+                    if not any(o.get("ok") for o in opts if isinstance(o, dict)):
+                        errs.append(f"slide {i + 1}: quiz senza risposta corretta")
             if "match" in b:
                 matching += 1
-                if len(b["match"].get("pairs", [])) < 2:
+                if not isinstance(b["match"], dict) or len(b["match"].get("pairs") or []) < 2:
                     errs.append(f"slide {i + 1}: abbinamento con meno di 2 coppie")
             if "vf" in b:
                 vf += 1
-                if len(b["vf"]) < 2:
+                if not isinstance(b["vf"], list) or len(b["vf"]) < 2:
                     errs.append(f"slide {i + 1}: vero/falso con meno di 2 affermazioni")
-                for v in b["vf"]:
+                for v in (b["vf"] if isinstance(b["vf"], list) else []):
                     if not isinstance(v, dict) or not v.get("t") or not isinstance(v.get("ok"), bool):
                         errs.append(f"slide {i + 1}: affermazione vero/falso malformata")
                         break
             if "seq" in b:
                 seq += 1
-                if len(b["seq"].get("passi", [])) < 3:
+                if not isinstance(b["seq"], dict) or len(b["seq"].get("passi") or []) < 3:
                     errs.append(f"slide {i + 1}: sequenza con meno di 3 passi")
             if "compila" in b:
                 compila += 1
-                for c in b["compila"]:
+                for c in (b["compila"] if isinstance(b["compila"], list) else []):
                     if (not isinstance(c, dict) or "___" not in str(c.get("frase", ""))
                             or not c.get("risposta")):
                         errs.append(f"slide {i + 1}: frase compila malformata")
@@ -307,19 +319,21 @@ def validate_lesson(out_dir, slides):
             if "scenario" in b:
                 scenario += 1
                 sc = b["scenario"]
-                if not sc.get("situazione") or len(sc.get("opts", [])) < 2:
+                if not isinstance(sc, dict) or not sc.get("situazione") \
+                        or len(sc.get("opts") or []) < 2:
                     errs.append(f"slide {i + 1}: scenario incompleto")
-                elif not any(o.get("ok") for o in sc["opts"]):
+                elif not any(o.get("ok") for o in (sc.get("opts") or [])
+                             if isinstance(o, dict)):
                     errs.append(f"slide {i + 1}: scenario senza opzione corretta")
             if "errore" in b:
                 errore += 1
                 e0 = b["errore"]
-                if not e0.get("brano") or not e0.get("correzione"):
+                if not isinstance(e0, dict) or not e0.get("brano") or not e0.get("correzione"):
                     errs.append(f"slide {i + 1}: esercizio errore incompleto")
             if "flashcards" in b:
                 flashcards += 1
                 fc = b["flashcards"]
-                if len(fc.get("cards", [])) < 2:
+                if not isinstance(fc, dict) or len(fc.get("cards") or []) < 2:
                     errs.append(f"slide {i + 1}: flashcards con meno di 2 carte")
                 for c in fc.get("cards", []):
                     if not isinstance(c, dict) or not c.get("t") or not c.get("d"):
@@ -362,14 +376,17 @@ def validate_lesson(out_dir, slides):
             ap = safe_join(out_dir, s["audio"])
             if ap is None or not ap.exists():
                 errs.append(f"slide {i + 1}: file audio mancante {s['audio']}")
-            elif s.get("duration", 0) <= 0:
+            elif float(s.get("duration") or 0) <= 0:
                 errs.append(f"slide {i + 1}: durata non misurata")
             if s["audio"] in seen_audio:
                 errs.append(f"audio duplicato: {s['audio']}")
             seen_audio.add(s["audio"])
             cap_rel = s.get("caption") or ""
             cp = safe_join(out_dir, cap_rel) if cap_rel else None
-            if not cap_rel or not cp.exists():
+            # `safe_join` restituisce None se il percorso esce dalla cartella:
+            # chiamare .exists() su None faceva crashare l'intera validazione
+            # (la riga dell'audio, tre righe sopra, controlla gia' `ap is None`)
+            if not cap_rel or cp is None or not cp.exists():
                 errs.append(f"slide {i + 1}: sottotitoli mancanti {s.get('caption')}")
             elif cp.stat().st_size < 20:
                 errs.append(f"slide {i + 1}: sottotitoli vuoti")

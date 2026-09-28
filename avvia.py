@@ -81,7 +81,7 @@ def main():
                 continue
             print(f"[4/5] Genero {out.name} da {d.name}…")
             try:
-                build_from_docx(d, force=True)
+                build_from_source(d, force=True)
             except Exception as e:  # noqa: BLE001
                 print(f"✗ Errore su {d.name}: {e}")
                 log.error(f"avvia: {d.name}: {e}")

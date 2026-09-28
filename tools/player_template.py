@@ -206,12 +206,20 @@ body.idle body::before { animation-play-state: paused; }
 @media (prefers-reduced-motion: reduce) {
   body::before { animation: none; }
 }
+/* Griglia di puntini. Prima era `position: fixed; inset: 0` cioe' uno strato
+   compositato grande quanto l'intero viewport, con la maschera replicata
+   due volte (-webkit- e standard). Il puntino da 1 px era pero' invisibile
+   al 8% di opacita' e sul proiettore diventava rumore: qui l'area dipinta e'
+   limitata a dove la maschera lascia passare qualcosa, e resta una sola
+   dichiarazione di maschera (il prefisso -webkit- non serve dal 2021). */
 body::after {
-  content: ''; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  content: ''; position: fixed; z-index: 0; pointer-events: none;
+  left: 50%; top: 18%;
+  width: min(2000px, 100vw); height: 1280px;
+  transform: translate(-50%, -50%);
   background-image: radial-gradient(var(--dot) 1px, transparent 1.5px);
   background-size: 30px 30px;
-  -webkit-mask-image: radial-gradient(1000px 640px at 50% 18%, #000 25%, transparent 78%);
-  mask-image: radial-gradient(1000px 640px at 50% 18%, #000 25%, transparent 78%);
+  mask-image: radial-gradient(1000px 640px at 50% 50%, #000 25%, transparent 78%);
 }
 :root {
   --blob1: color-mix(in srgb, var(--accent) 26%, transparent);
@@ -1423,7 +1431,7 @@ function shuffle(a) {
 // non è sempre la prima" di shuffleOpts era vanificato proprio dal re-shuffle.
 // La cache è per (slide, blocco, tipo) e si invalida solo se i dati cambiano.
 const ORDER_CACHE = new Map();
-const ORDER_CACHE_MAX = 400;
+const ORDER_CACHE_MAX = 400;   // tetto di memoria: oltre, si scarta la voce piu' vecchia
 function stableOrder(idx, bidx, kind, n, factory) {
   const key = idx + ':' + bidx + ':' + kind + ':' + n;
   let v = ORDER_CACHE.get(key);
@@ -1438,15 +1446,6 @@ function stableOrder(idx, bidx, kind, n, factory) {
     }
   }
   return v;
-}
-function blockKey(idx, bidx, kind) { return idx + ':' + bidx + ':' + kind; }
-function clearOrder(idx, bidx) {
-  // svuota SOLO il blocco modificato dal docente (salvataggio dal pannello
-  // editor), non gli altri
-  const pre = idx + ':' + bidx + ':';
-  for (const k of Array.from(ORDER_CACHE.keys())) {
-    if (k.startsWith(pre)) ORDER_CACHE.delete(k);
-  }
 }
 function shuffleOpts(opts) {
   const order = shuffle(opts.map((o, k) => k));

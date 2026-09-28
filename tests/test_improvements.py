@@ -171,8 +171,7 @@ def test_panel_qr_is_clickable_and_fullscreen():
     assert 'scale=8&url=' in html
     # avviso rete: spiega quale IP usare quando ce ne sono due
     assert 'id="lanWarn"' in html
-    assert 'hasattr(panel.PanelHandler' not in html  # sanity: è HTML, non python
-    assert hasattr(panel.PanelHandler, '_lesson_activities')
+    # NB: la rotta /api/lesson_activities e' stata rimossa: il pannello sceglie una lezione intera
     assert 'id="focusQr"' in html and 'id="focusUrl"' in html
     # tasto dedicato per scegliere la lezione da mostrare + finestra unica
     assert 'id="btnFocusPick"' in html and 'id="focusOv"' in html
@@ -223,45 +222,6 @@ def test_player_focus_mode_single_activity():
     # il wrapper aggancia render (che esiste), non una paint() inesistente
     assert "const _origRender = render;" in src
     assert "_origPaint" not in src
-
-
-def test_lesson_activities_lists_only_question_slides(tmp_path, monkeypatch):
-    import sys
-    import panel
-    lesson = tmp_path / "Prova_lesson"
-    (lesson / "assets").mkdir(parents=True)
-    (lesson / "index.html").write_text("x", encoding="utf-8")
-    payload = {"titolo": "Prova", "slides": [
-        {"title": "Intro", "blocks": [{"p": "ciao"}]},
-        {"title": "Quiz 1", "blocks": [{"quiz": {"domanda": "2+2?"}}]},
-        {"title": "Fine", "blocks": [{"p": "fine"}]},
-    ]}
-    monkeypatch.setattr(panel, "BASE", tmp_path)
-    monkeypatch.setattr(panel, "_allowed_lesson_names", lambda: {"Prova_lesson"})
-    monkeypatch.setattr(panel, "RUNTIME_PORT", 8341)
-    monkeypatch.setattr(panel, "lan_ip", lambda: "10.0.0.5")
-    fake_nl = type(sys)("fake_nl")
-    fake_nl.load_lesson = lambda path: (tmp_path / "Prova_lesson", payload)
-    monkeypatch.setitem(sys.modules, "new_lesson", fake_nl)
-    captured = {}
-
-    class FakeHandler(panel.PanelHandler):
-        def __init__(self):
-            pass
-
-        def _json(self, obj, code=200):
-            captured.update(obj)
-            captured["_code"] = code
-
-    FakeHandler()._lesson_activities({"lesson": ["Prova_lesson"]})
-    assert captured.get("ok") is True
-    assert len(captured["activities"]) == 1
-    assert captured["activities"][0]["slide"] == 1
-    assert "?attivita=1" in captured["activities"][0]["url"]
-    assert re.fullmatch(r"https?://[^\s]{1,500}",
-                        captured["activities"][0]["url"])
-    # ogni attività porta anche il nome della lezione (lista unica del pannello)
-    assert captured["activities"][0]["lesson"] == "Prova_lesson"
 
 
 def test_lesson_action_share_sets_shared_lesson(tmp_path):

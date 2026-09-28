@@ -7,6 +7,8 @@ verso percorsi esterni tramite nomi inseriti dall'utente.
 """
 import html
 import json
+
+from common import write_text_atomic
 import os
 import re
 import shutil
@@ -118,7 +120,7 @@ def _retitle_lesson(lesson, new_title):
                          lambda m: m.group(1) + json.dumps(title, ensure_ascii=False),
                          raw, count=1)
         if new_raw != raw:
-            data.write_text(new_raw, encoding="utf-8")
+            write_text_atomic(data, new_raw)
     except OSError:
         pass
     index = lesson / "index.html"
@@ -128,7 +130,7 @@ def _retitle_lesson(lesson, new_title):
                            lambda _m: f"<title>{esc}</title>", html_text, count=1, flags=re.S)
         html_text = re.sub(r'(<h1 id="ttl">).*?(</h1>)',
                            lambda m: f"{m.group(1)}{esc}{m.group(2)}", html_text, count=1, flags=re.S)
-        index.write_text(html_text, encoding="utf-8")
+        write_text_atomic(index, html_text)
     except OSError:
         pass
     manifest = lesson / "manifest.json"
@@ -136,7 +138,7 @@ def _retitle_lesson(lesson, new_title):
         m = json.loads(manifest.read_text(encoding="utf-8"))
         m["name"] = title
         m["short_name"] = title[:12]
-        manifest.write_text(json.dumps(m, ensure_ascii=False), encoding="utf-8")
+        write_text_atomic(manifest, json.dumps(m, ensure_ascii=False))
     except (OSError, ValueError):
         pass
 

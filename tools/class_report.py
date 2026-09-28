@@ -91,11 +91,25 @@ def _aggregate(reports):
     return precs, tempi
 
 
+def _numero(v, default=0.0):
+    """Numero da una stringa che può avere la virgola decimale.
+
+    Il report dello studente può arrivare con "85,5" (separatore italiano) o
+    con "85.5". `int("85,5".replace("%",""))` sollevava ValueError: il CSV
+    era gia' stato scritto, ma l'HTML moriva e il docente restava con un file
+    a meta' senza saperlo.
+    """
+    s = str(v or "").replace("%", "").replace(",", ".").strip()
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return default
+
+
 def build_html(reports, out_path):
     esc = lambda s: __import__("html").escape(str(s), quote=True)
     rows = []
-    for r in sorted(reports, key=lambda x: -(int(str(x.get("precisione") or "0")
-                                                  .replace("%", "") or 0))):
+    for r in sorted(reports, key=lambda x: -_numero(x.get("precisione"))):
         rows.append(f"<tr><td>{esc(r.get('studente', '?'))}</td>"
                     f"<td>{esc(r.get('punti', '-'))}</td>"
                     f"<td>{esc(r.get('precisione', '-'))}</td>"

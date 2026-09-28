@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pannello di controllo — Generatore lezioni</title>
+@@CSS@@
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <h1>🎛 Pannello di controllo — Generatore lezioni</h1>
+    <button id="btnTheme" class="ghost" type="button" title="Tema chiaro / scuro">☀️</button>
+  </div>
+  <div class="sub" id="statusline">…</div>
+  <div id="stale" style="display:none;margin:10px 0;padding:10px 14px;border:1px solid #ffb020;
+       background:#2a2205;color:#ffd27a;border-radius:8px;font-size:14px">
+    ⚠ <b>Il codice di generazione è cambiato</b> da quando il pannello è stato avviato:
+    le generazioni userebbero il codice vecchio. Chiudi il pannello e riavvialo
+    (<b>AVVIA.bat</b>) per attivare gli aggiornamenti.
+  </div>
+
+  <div class="card">
+    <h2>Ambiente</h2>
+    <div class="chips" id="deps"></div>
+  </div>
+
+  <div class="card">
+    <h2><span class="step">1</span> Carica il materiale e genera</h2>
+    <div class="upzone" id="upzone" role="button" tabindex="0"
+         title="Carica un file (trascinalo qui sopra o clicca per sceglierlo)">
+      <input type="file" id="upfile" accept=".docx,.pdf,.txt,.md,.html,.htm,.pptx,.epub,.mp3,.m4a,.wav" multiple hidden>
+      <span class="big">📄 Trascina qui uno o più materiali</span>
+      <span class="sub2" id="uptxt">Documenti, siti salvati, PPTX, EPUB o audio MP3/M4A/WAV</span>
+      <div class="uprow" id="uprow" hidden>
+        <span class="name" id="upname"></span>
+        <span class="meta" id="upsize"></span>
+        <button class="primary" id="btnUpGen" type="button">Carica e genera tutto</button>
+        <button class="mini ghost" id="btnUp" type="button">Solo carica</button>
+        <button class="mini ghost" id="btnUpX" type="button">✕</button>
+      </div>
+      <div class="upmsg" id="upmsg" hidden></div>
+    </div>
+    <div id="materials"></div>
+    <div class="opts">
+      <label>Durata <select id="profDurata">
+        <option value="breve">Breve (3-4 moduli)</option>
+        <option value="standard" selected>Standard (4-7)</option>
+        <option value="approfondita">Approfondita (6-8)</option>
+      </select></label>
+      <label>Livello <select id="profLivello">
+        <option value="base">Base</option>
+        <option value="intermedio" selected>Intermedio</option>
+        <option value="avanzato">Avanzato</option>
+      </select></label>
+      <label>Obiettivo <select id="profObiettivo">
+        <option value="auto" selected>Auto (misto per modulo)</option>
+        <option value="conoscenza">Conoscenza (riconoscere, definire)</option>
+        <option value="comprensione">Comprensione (spiegare, confrontare)</option>
+        <option value="applicazione">Applicazione (usare una regola)</option>
+        <option value="analisi">Analisi (distinguere, scomporre)</option>
+      </select></label>
+      <label>Accessibilità <select id="profAccess">
+        <option value="standard" selected>Standard</option>
+        <option value="bes">BES / DSA (meno opzioni, carico ridotto)</option>
+      </select></label>
+    </div>
+    <details class="adv">
+      <summary>⚙ Opzioni avanzate (rigenera, bozza, file unico)</summary>
+      <div class="opts">
+        <label><input type="checkbox" id="forceAll"> Rigenera anche le lezioni già esistenti</label>
+        <label><input type="checkbox" id="bozzaAll"> Bozza veloce senza IA (solo struttura dal testo)</label>
+        <label><input type="checkbox" id="singleAll"> Genera come file HTML unico, senza cartella</label>
+        <label><input type="checkbox" id="whisperAudio"> 🎙️ Trascrizione audio con Whisper (MP3, M4A, WAV)</label>
+      </div>
+    </details>
+  </div>
+
+  <div class="card">
+    <h2>Voce — anteprima</h2>
+    <div class="urlrow">
+      <select id="voiceSel" style="max-width:320px;background:#0d1220;border:1px solid var(--line);color:var(--txt);border-radius:9px;padding:9px"></select>
+      <select id="rateSel" style="background:#0d1220;border:1px solid var(--line);color:var(--txt);border-radius:9px;padding:9px">
+        <option value="-10%">Lenta -10%</option>
+        <option value="-4%" selected>Normale -4%</option>
+        <option value="+0%">+0%</option>
+        <option value="+10%">Veloce +10%</option>
+      </select>
+      <button id="btnVoice" type="button">Prova voce</button>
+    </div>
+    <div class="urlrow" style="margin-top:8px">
+      <input id="voiceTxt" value="Ciao! Questa è un'anteprima della voce per le lezioni." maxlength="500">
+    </div>
+    <audio id="voiceAudio" controls style="width:100%;margin-top:8px" hidden></audio>
+    <div class="upmsg" id="voiceMsg" hidden></div>
+  </div>
+
+  <div class="card">
+    <h2><span class="step">2</span> Oppure genera da un link</h2>
+    <div class="urlrow">
+      <input id="url" placeholder="https://it.wikipedia.org/wiki/…  oppure  https://www.youtube.com/watch?v=…">
+      <button id="btnUrl" class="primary">Genera da link</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2><span class="step">2</span> Oppure incolla il testo <span style="color:var(--mut);font-weight:400;font-size:12px">(appunti, dispense)</span></h2>
+    <div class="urlrow"><input id="txtTitle" placeholder="Titolo lezione (es. Il sistema solare)" maxlength="80"></div>
+    <div class="urlrow" style="margin-top:8px">
+      <textarea id="txtBody" rows="4" style="flex:1;background:#0d1220;border:1px solid var(--line);color:var(--txt);border-radius:9px;padding:9px"
+        placeholder="Incolla qui il testo (min 50 caratteri)…"></textarea>
+    </div>
+    <div class="uprow"><button class="primary" id="btnText" type="button">Genera da testo</button></div>
+  </div>
+
+  <div class="card">
+    <h2><span class="step">3</span> Lezioni generate</h2>
+    <div class="urlrow" style="margin-bottom:8px">
+      <input id="lessonSearch" placeholder="Cerca una lezione…" oninput="filterLessons()">
+    </div>
+    <div id="lessons"></div>
+    <details style="margin-top:12px">
+      <summary>Archivio lezioni (<span id="archiveCount">0</span>)</summary>
+      <div id="archived" style="margin-top:8px"></div>
+    </details>
+    <h2 style="margin-top:16px">File unici (HTML singolo)</h2>
+    <div id="singles"></div>
+  </div>
+
+  <div class="card">
+    <h2><span class="step">🏆</span> Classifica di classe</h2>
+    <div class="urlrow">
+      <select id="claSel" onchange="loadClassifica()" style="flex:1;background:#0d1220;border:1px solid var(--line);color:var(--txt);border-radius:9px;padding:9px"></select>
+      <button class="mini ghost" onclick="loadClassifica()" type="button">🔄 Aggiorna</button>
+      <button class="mini ghost" onclick="exportClassifica()" type="button">⬇ CSV</button>
+      <button class="mini ghost" onclick="resetClassifica()" type="button" title="Azzera tutta la classifica di classe">🗑 Svuota</button>
+    </div>
+    <div class="urlrow" style="margin-top:8px">
+      <input id="claAddName" placeholder="Nome studente (per aggiungere a mano un risultato)">
+      <input id="claAddPts" placeholder="Punti (es. 7/10)" style="max-width:140px">
+      <button class="mini" onclick="addManuale()" type="button">Aggiungi</button>
+    </div>
+    <div id="classifica" style="margin-top:10px"><span class="empty">Nessun risultato ancora: gli studenti lo inviano dal pulsante nel pannello finale della lezione.</span></div>
+  </div>
+
+  <div class="card" id="editor" hidden>
+    <h2>Modifica slide <span id="edMeta" style="color:var(--mut);font-weight:400;font-size:12px"></span></h2>
+    <div class="urlrow">
+      <select id="edSel" onchange="ED.idx=+this.value;renderEditor()" style="flex:1;background:#0d1220;border:1px solid var(--line);color:var(--txt);border-radius:9px;padding:9px"></select>
+      <button class="mini ghost" onclick="document.querySelector('#editor').hidden=true" type="button">Chiudi</button>
+    </div>
+    <div class="urlrow" style="margin-top:8px"><input id="edTitle" placeholder="Titolo slide" maxlength="200"></div>
+    <div class="urlrow" style="margin-top:8px"><input id="edNarr" placeholder="Narrazione (voce legge questo testo)" maxlength="3000"></div>
+    <div class="urlrow" style="margin-top:8px"><input id="edQuizQ" placeholder="Domanda quiz (vuoto = nessun quiz)"></div>
+    <div class="urlrow" style="margin-top:8px"><input id="edQuizOpts" placeholder="Opzioni, una per riga — * davanti = corretta (es. * Roma)"></div>
+    <div class="uprow">
+      <button class="mini" onclick="saveEditor(false)" type="button">Salva testo/quiz</button>
+      <button class="mini" onclick="saveEditor(true)" type="button" title="Salva e rigenera l'audio di questa slide">Salva + rigenera audio</button>
+      <button class="mini ghost" onclick="moveEditor(-1)" type="button" title="Sposta slide indietro">← Sposta</button>
+      <button class="mini ghost" onclick="moveEditor(1)" type="button" title="Sposta slide avanti">Sposta →</button>
+      <button class="mini ghost" onclick="addEditor()" type="button" title="Aggiungi slide contenuto">+ Aggiungi</button>
+      <button class="mini ghost" onclick="delEditor()" type="button" title="Elimina questa slide">✕ Elimina</button>
+    </div>
+    <div class="upmsg" id="edMsg" hidden></div>
+  </div>
+
+  <div class="card">
+    <h2>Log di generazione <span id="jobinfo" style="color:var(--mut);font-weight:400;font-size:12px"></span>
+      <button class="mini ghost" id="btnCancelQ" type="button" hidden>Svuota coda</button>
+      <button class="mini ghost" id="btnCancelJob" type="button" hidden>⏹ Annulla trascrizione</button></h2>
+    <div class="urlrow" style="margin-bottom:8px"><span id="progTxt" style="color:var(--warn);font-size:12px"></span></div>
+    <pre id="log">Il log apparirà qui durante la generazione…</pre>
+  </div>
+
+  <div class="card">
+    <h2><span class="step">4</span> Condividi in classe <span style="color:var(--mut);font-weight:400;font-size:12px">(stessa Wi-Fi)</span></h2>
+    <div class="lanrow">
+      <img id="lanQr" hidden tabindex="0" role="button"
+           title="Clicca per vedere il QR a schermo intero"
+           alt="QR per aprire la lezione dal telefono">
+      <div class="grow">
+        <div class="urlrow"><input id="lanUrl" readonly placeholder="Caricamento indirizzo…">
+          <button class="mini" id="btnLanCopy" type="button">📋 Copia link</button>
+          <button class="mini ghost" id="btnLan" type="button" title="Ricarica indirizzo e cronologia">↻</button></div>
+        <div class="upmsg" style="font-size:12px">Gli studenti vedono solo l'indice delle lezioni, non questo pannello.</div>
+        <div class="upmsg" id="lanWarn" style="font-size:12px" hidden></div>
+      </div>
+    </div>
+    <button class="bigbtn" id="btnFocusPick" type="button"
+            title="Scegli la lezione da far vedere agli alunni: la vedranno intera, dall'inizio alla fine">📚 Scegli la lezione da mostrare</button>
+    <div class="upmsg" id="focusNow" style="font-size:12px;margin-top:10px" hidden></div>
+    <h2 style="margin-top:14px">Manutenzione
+      <button class="mini" onclick="refreshPlayer()" type="button"
+              title="Riscrive CSS, JavaScript e il service worker di tutte le lezioni già generate, senza toccare audio o contenuti. Serve dopo un aggiornamento del player: senza, gli alunni continuano a vedere la versione precedente.">🎨 Aggiorna il player</button>
+      <button class="mini ghost" onclick="clearHistory()" type="button" title="Cancella la cronologia generazioni">🗑 Svuota</button></h2>
+    <div id="hist" style="margin-top:8px;font-size:12px;color:var(--mut)"><div>Nessun job ancora.</div></div>
+    <div id="maintMsg" style="margin-top:8px;font-size:12px"></div>
+  </div>
+
+
+  <div id="qrOv" class="qrOv" hidden role="dialog" aria-modal="true" aria-label="QR a schermo intero">
+    <img id="qrOvImg" alt="QR a schermo intero">
+    <div class="qru" id="qrOvUrl"></div>
+    <button type="button" id="qrOvClose">Chiudi (Esc)</button>
+  </div>
+
+  <div id="focusOv" hidden role="dialog" aria-modal="true" aria-label="Scegli la lezione da mostrare">
+    <div class="fbox">
+      <h3>📚 Lezione da far vedere agli alunni</h3>
+      <input id="focusSearch" type="search" autocomplete="off"
+             placeholder="Cerca fra le tue lezioni…">
+      <div id="focusList"><div class="fempty">Caricamento lezioni…</div></div>
+      <img id="focusQr" hidden tabindex="0" role="button"
+           title="Clicca per vedere il QR a schermo intero"
+           alt="QR per aprire la lezione dal telefono">
+      <div class="urlrow"><input id="focusUrl" readonly placeholder="Scegli una lezione dalla lista…">
+        <button class="mini" id="btnFocusCopy" type="button">📋 Copia link</button>
+        <button class="mini" id="btnFocusOpen" type="button">Apri 👀</button>
+        <button class="mini primary" id="btnFocusQr" type="button">⬛ QR grande</button></div>
+      <p class="fhint">Gli alunni vedono la lezione <b>per intero</b>, dall'inizio alla fine, con moduli, attività e riepilogo finale. Il link e il QR qui sotto puntano a quella lezione; anche il QR di sopra si aggiorna.</p>
+      <button class="mini fclose" id="focusOvClose" type="button">Chiudi (Esc)</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>📚 Istruzioni</h2>
+    <div class="grid2">
+      <div><b>1. Carica</b><br><span class="empty">Trascina qui un documento. Per un audio MP3/M4A/WAV spunta «Trascrizione audio con Whisper».</span></div>
+      <div><b>2. Genera</b><br><span class="empty">Scegli durata e livello, poi premi «Carica e genera». Puoi usare anche un link o incollare testo.</span></div>
+      <div><b>3. Condividi</b><br><span class="empty">Apri il QR a schermo intero e fai scansione dal telefono. Computer e dispositivi devono essere sulla stessa rete.</span></div>
+      <div><b>4. Assistenza</b><br><span class="empty">Se un dispositivo non si collega, premi «Controlla computer e rete».</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>⚙ Impostazioni</h2>
+    <div class="grid2">
+      <label>Porta server <input id="setPorta" type="number" min="1024" max="65535"></label>
+      <label>Upload massimo (MB) <input id="setUpload" type="number" min="1" max="1000"></label>
+      <label>Cache audio (MB) <input id="setCache" type="number" min="50" max="2000"></label>
+      <label>Modello Whisper <select id="setWhisper">
+        <option value="tiny">Veloce (tiny)</option><option value="base">Bilanciato (base)</option>
+        <option value="small">Preciso (small)</option></select></label>
+      <label>IP fisso (facoltativo) <input id="setLanIp" maxlength="15"></label>
+      <label>PIN docente (facoltativo) <input id="setPin" type="password" maxlength="12" inputmode="numeric"></label>
+    </div>
+    <label class="mini" style="display:flex;gap:6px;align-items:center;margin-top:10px">
+      <input type="checkbox" id="clearPin"> Rimuovi il PIN docente</label>
+    <div class="uprow"><button class="primary" id="btnSaveSettings" type="button">Salva impostazioni</button>
+      <span class="upmsg" id="settingsMsg"></span></div>
+  </div>
+
+  <div class="card">
+    <h2>🛟 Assistenza rapida</h2>
+    <div class="uprow">
+      <button class="mini" id="btnDiagnostica" type="button"
+              onclick="event.preventDefault(); if (typeof runDiagnostica === 'function') runDiagnostica(); else window.open('/api/diagnostica','_blank','noopener');">🔍 Controlla computer e rete</button>
+      <button class="mini ghost" onclick="location.href='/api/logs_download'">⬇ Scarica log per assistenza</button>
+    </div>
+    <pre id="diagnostica" style="display:none"></pre>
+  </div>
+</div>
+
+@@JS@@
+</body>
+</html>

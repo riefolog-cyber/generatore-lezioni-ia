@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import urllib.request
 from pathlib import Path
 
@@ -194,6 +195,19 @@ class WhisperCppModel:
             text=True, encoding="utf-8", errors="replace", bufsize=1,
         )
         last_pct = -1
+        # Il loop su stderr finisce solo all'EOF: se whisper.cpp si impianta,
+        # `wait(timeout=)` non viene MAI raggiunto e non protegge nulla (il job
+        # restava bloccato per sempre e l'annullamento non arrivava). Il
+        # watchdog e' un timer indipendente che termina il processo.
+        scaduto = []
+
+        def _scadenza():
+            scaduto.append(True)
+            self._kill(proc)
+
+        watchdog = threading.Timer(_RUN_TIMEOUT, _scadenza)
+        watchdog.daemon = True
+        watchdog.start()
         try:
             for line in (proc.stderr or ()):
                 # l'annullamento viene valutato DURANTE l'elaborazione: prima
@@ -202,6 +216,10 @@ class WhisperCppModel:
                 if self._cancelled():
                     self._kill(proc)
                     raise ValueError("Trascrizione annullata dall'utente.")
+                if scaduto:
+                    raise RuntimeError(
+                        f"whisper.cpp non ha terminato entro {_RUN_TIMEOUT}s: "
+                        "trascrizione interrotta.")
                 m = _TS_RE.search(line)
                 if not m:
                     continue
@@ -214,15 +232,18 @@ class WhisperCppModel:
                             self._progress(pct, 0, self._duration, False, self.name)
                         except Exception:
                             pass
-            proc.wait(timeout=_RUN_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            self._kill(proc)
-            raise RuntimeError(
-                f"whisper.cpp non ha terminato entro {_RUN_TIMEOUT}s: trascrizione interrotta.")
+            proc.wait(timeout=30)
+            if scaduto:
+                raise RuntimeError(
+                    f"whisper.cpp non ha terminato entro {_RUN_TIMEOUT}s: "
+                    "trascrizione interrotta.")
         except ValueError:
             raise
         except Exception:
             self._kill(proc)
+            raise
+        finally:
+            watchdog.cancel()
             raise
         if self._cancelled():
             raise ValueError("Trascrizione annullata dall'utente.")

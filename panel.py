@@ -53,7 +53,8 @@ sys.path.insert(0, str(BASE))
 from common import load_config, write_text_atomic  # noqa: E402
 from class_repository import add_result as _class_repo_add, authorized as _class_repo_authorized  # noqa: E402
 from class_repository import list_results as _class_repo_list, reset as _class_repo_reset  # noqa: E402
-from http_safety import host_allowed, same_origin_post, safe_request_path  # noqa: E402
+from http_safety import (  # noqa: E402
+    LOOPBACK_HOSTS, host_allowed, same_origin_post, safe_request_path)
 from sources import SUPPORTED_EXT, is_url  # noqa: E402
 from start_lesson import _RangeHandler, _hub_page, find_port, list_lessons  # noqa: E402
 
@@ -359,12 +360,15 @@ def _local_ips():
     except Exception:
         pass
     for dest in (("8.8.8.8", 80), ("192.168.0.1", 80)):
+        # `with`: prima close() stava DENTRO il try, dopo getsockname(): se
+        # connect() o getsockname() sollevava il socket non veniva mai
+        # chiuso. Queste funzioni girano ogni 30 s (TTL della cache degli
+        # host ammessi), quindi il leak era cumulativo.
         try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.settimeout(1.5)
-            s.connect(dest)
-            ip = s.getsockname()[0]
-            s.close()
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.settimeout(1.5)
+                s.connect(dest)
+                ip = s.getsockname()[0]
             if not ip.startswith("127."):
                 ips.add(ip)
         except Exception:
@@ -375,11 +379,10 @@ def _local_ips():
 def _default_route_ip():
     """IP dell'interfaccia con la route predefinita (= rete che va a internet)."""
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(1.5)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(1.5)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
         if ip and not ip.startswith("127."):
             return ip
     except Exception:
@@ -629,7 +632,8 @@ def _edge_voices_live():
 
 
 def _loopback(handler):
-    return handler.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+    return handler.client_address[0] in LOOPBACK_HOSTS or \
+        handler.client_address[0] == "::ffff:127.0.0.1"
 
 
 # ------------------------------------------------- anti DNS-rebinding / CSRF
@@ -739,14 +743,6 @@ class PanelHandler(_RangeHandler):
             })
         if path == "/api/qr":
             return self._qr(query)
-        if path == "/api/lesson_activities":
-            return self._lesson_activities(query)
-        if path == "/api/shared_lesson":
-            try:
-                from tools.shared_lesson import get_shared
-                return self._json({"shared": get_shared(BASE)})
-            except Exception as e:  # noqa: BLE001
-                return self._json({"shared": "", "error": str(e)})
         if path == "/api/diagnostica":
             from tools.netdiag import diagnose
             return self._json(diagnose(RUNTIME_PORT))
@@ -766,6 +762,30 @@ class PanelHandler(_RangeHandler):
     def _teacher_allowed(self):
         return _class_repo_authorized(
             CONFIG.get("pin_docente"), self.headers.get("X-Teacher-Pin"))
+
+    def _genera_e_verifica(self, src, force, bozza, single, profilo,
+                           text=None, title=None):
+        """Genera e SOLO allora riesce.
+
+        `build_from_source` restituisce `(None, False)` quando il lock
+        anti-concorrenza e' occupato: prima la lambda del pannello scartava quel
+        risultato, il runner metteva `ok=True` e il pannello annunciava
+        "JOB COMPLETATO" scrivendo in cronologia un successo per una lezione
+        che non era stata generata. Il runner deve vedere l'eccezione.
+        """
+        import new_lesson
+        if text is not None:
+            out, ok = new_lesson.build_from_text(text, title=title, force=force,
+                                                  bozza=bozza, single=single,
+                                                  profilo=profilo)
+        else:
+            out, ok = new_lesson.build_from_source(src, force=force, bozza=bozza,
+                                                   single=single, profilo=profilo)
+        if out is None:
+            raise RuntimeError(
+                "Generazione saltata: un'altra generazione e' gia' in corso. "
+                "Riprova fra poco.")
+        return out, ok
 
     def _require_teacher(self):
         if self._teacher_allowed():
@@ -827,55 +847,6 @@ class PanelHandler(_RangeHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
-
-    _ACT_LABEL = {
-        "quiz": "Quiz", "match": "Abbina", "vf": "Vero/Falso",
-        "seq": "Metti in ordine", "compila": "Completa",
-        "scenario": "Cosa faresti?", "errore": "Trova l'errore",
-        "classifica": "Classifica", "flashcards": "Flashcards",
-        "glossario": "Glossario",
-    }
-
-    def _acts_from_payload(self, payload, lesson, base):
-        """Slide con attività interattive, con il link per mostrarne una sola."""
-        acts = []
-        for i, s in enumerate(payload.get("slides") or []):
-            kinds = [k for b in (s.get("blocks") or []) if isinstance(b, dict)
-                     for k in b if k in self._ACT_LABEL]
-            if not kinds:
-                continue
-            acts.append({"lesson": lesson, "slide": i,
-                         "title": s.get("title") or f"Slide {i + 1}",
-                         "kind": kinds[0], "label": self._ACT_LABEL.get(kinds[0], kinds[0]),
-                         "url": f"{base}/{lesson}/index.html?attivita={i}" if base else ""})
-        return acts
-
-    def _lesson_activities(self, query):
-        """Elenco attività di una lezione (per farne vedere UNA sola agli alunni)."""
-        name = (query.get("lesson", [""])[0] or "").strip()
-        if not name or name not in _allowed_lesson_names():
-            lesson = (BASE / name).resolve() if name else None
-            try:
-                ok = bool(lesson and lesson.is_dir()
-                          and (lesson / "index.html").is_file()
-                          and str(lesson).startswith(str(BASE.resolve())))
-            except Exception:
-                ok = False
-            if not ok:
-                self._json({"ok": False, "error": "Lezione non valida."}, 400)
-                return
-            name = lesson.name
-        try:
-            from new_lesson import load_lesson
-            _, payload = load_lesson(str(BASE / name))
-        except Exception as e:  # noqa: BLE001
-            self._json({"ok": False, "error": f"Lezione non leggibile: {e}"}, 400)
-            return
-        ip, port = lan_ip(), RUNTIME_PORT
-        base = f"http://{ip}:{port}" if ip else ""
-        acts = self._acts_from_payload(payload, name, base)
-        self._json({"ok": True, "lesson": name, "activities": acts,
-                    "lan_ip": ip, "port": port})
 
     def _logs_download(self):
         """Un unico ZIP con i log utili per assistenza, senza dati degli alunni."""
@@ -958,8 +929,7 @@ class PanelHandler(_RangeHandler):
                         "reason": f"Attenzione: questo materiale è {state}."}, 409)
             return
         started, queued = start_job(
-            lambda: new_lesson.build_from_docx(src, force=force, bozza=bozza,
-                                               single=single, profilo=profilo),
+            lambda: self._genera_e_verifica(src, force, bozza, single, profilo),
             "generazione", Path(src).name if not is_url(src) else src)
         if not started:
             self._json({"started": False, "reason": "Coda piena (5 job): attendi la fine."}, 409)
@@ -979,8 +949,8 @@ class PanelHandler(_RangeHandler):
         single = bool(data.get("single"))
         profilo = normalize_profilo(data.get("profilo") or {})
         started, queued = start_job(
-            lambda: new_lesson.build_from_text(text, title=title, force=force,
-                                               bozza=bozza, single=single, profilo=profilo),
+            lambda: self._genera_e_verifica(None, force, bozza, single, profilo,
+                                            text=text, title=title),
             "testo incollato", title)
         if not started:
             self._json({"started": False, "reason": "Coda piena (5 job): attendi la fine."}, 409)
@@ -1502,6 +1472,13 @@ class PanelHandler(_RangeHandler):
             self.send_error(404, "API sconosciuta")
 
     def _classifica_post(self):
+        """Invio del risultato da parte dello studente.
+
+        E' l'UNICO endpoint raggiungibile dalla rete di classe. Restituire
+        `str(e)` significava consegnare allo studente path locali e dettagli
+        interni (SQLite, filesystem) di una macchina che non e' la sua. Il
+        dettaglio va nel log del pannello, non in risposta.
+        """
         try:
             d = self._read_json_body()
             lesson = self._check_lesson(str(d.get("lesson") or ""))
@@ -1511,12 +1488,16 @@ class PanelHandler(_RangeHandler):
             totale = max(0, min(999, int(d.get("totale") or 0)))
             tempo_min = max(0, min(600, int(d.get("tempo_min") or 0)))
             if totale <= 0:
-                raise ValueError("Nessuna attività registrata")
+                raise ValueError("Nessuna attivita' registrata")
             _classifica_add(lesson.name, studente, punti, totale,
                             bool(d.get("completata")), tempo_min)
             self._json({"ok": True})
-        except Exception as e:  # noqa: BLE001
+        except ValueError as e:
+            # errori di input: il messaggio e' utile e non rivela nulla
             self._json({"ok": False, "error": str(e)}, 400)
+        except Exception as e:  # noqa: BLE001
+            _flog(f"classifica POST: {e}")
+            self._json({"ok": False, "error": "Salvataggio non riuscito."}, 500)
 
     def _classifica_export(self, query):
         """CSV della classifica di una lezione (stesso ordine della vista)."""

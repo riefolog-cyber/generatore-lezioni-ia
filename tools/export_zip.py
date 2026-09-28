@@ -136,15 +136,19 @@ def export(lesson_name=None):
         print(f'ERRORE: cartella {lesson_name} non trovata')
         return None
     out = BASE / f'{lesson_name}_export.zip'
-    with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as z:
+    # .part + os.replace: un'interruzione lasciava uno ZIP con CRC valido solo
+    # per meta', che sembra utilizzabile ma non e'.
+    tmp = out.with_suffix('.zip.part')
+    with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as z:
         top = lesson_name
         for f in sorted(src.rglob('*')):
             if f.is_file():
-                z.write(f, f'{top}/{f.relative_to(src)}')
+                z.write(f, f'{top}/{f.relative_to(src).as_posix()}')
         # launcher autocontenuti dentro la stessa cartella lezione
         z.writestr(f'{top}/avvia_qui.py', AVVIA_PY)
         z.writestr(f'{top}/start_lesson.bat', BAT)
         z.writestr(f'{top}/LEGGIMI.txt', LEGGIMI.format(name=lesson_name))
+    os.replace(tmp, out)   # publish atomico: mai uno ZIP a meta'
     mb = out.stat().st_size / 1024 / 1024
     print(f'Export OK: {out.name} ({mb:.1f} MB)')
     print(f'  → apri {lesson_name}/start_lesson.bat oppure {lesson_name}/index.html')

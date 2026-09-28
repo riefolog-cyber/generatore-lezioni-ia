@@ -31,7 +31,10 @@ from pathlib import Path
 # Whisper viene caricato solo al primo audio trascritto e riusato per gli altri.
 _WHISPER_MODEL = None
 _WHISPER_BACKEND = None
+# Cache dei modelli caricati. E' una dict mutata da piu' thread: vedi
+# new_lesson._LLM_MORTE per il motivo del lock.
 _WHISPER_MODELS = {}
+_WHISPER_MODELS_LOCK = threading.Lock()
 _WHISPER_CACHE_DIR = Path(__file__).resolve().parent.parent / ".whisper_cache"
 _TRANSCRIBE_CANCEL = threading.Event()
 _TRANSCRIBE_PROGRESS = None
@@ -250,21 +253,24 @@ def _load_whisper_model(name, duration=0.0):
     faster-whisper non e installabile (CTranslate2 non ha wheel win_arm64).
     """
     global _WHISPER_MODEL, _WHISPER_BACKEND
-    if name in _WHISPER_MODELS:
-        _WHISPER_MODEL, _WHISPER_BACKEND = _WHISPER_MODELS[name]
-        return _WHISPER_MODEL
+    with _WHISPER_MODELS_LOCK:
+        if name in _WHISPER_MODELS:
+            _WHISPER_MODEL, _WHISPER_BACKEND = _WHISPER_MODELS[name]
+            return _WHISPER_MODEL
     if importlib.util.find_spec("faster_whisper") is not None:
         from faster_whisper import WhisperModel
         model = WhisperModel(
             name, device="cpu", compute_type="int8",
             cpu_threads=max(1, min(8, os.cpu_count() or 1)))
-        _WHISPER_MODELS[name] = (model, "faster-whisper")
+        with _WHISPER_MODELS_LOCK:
+            _WHISPER_MODELS[name] = (model, "faster-whisper")
         _WHISPER_MODEL, _WHISPER_BACKEND = model, "faster-whisper"
         return model
     if importlib.util.find_spec("whisper") is not None:
         import whisper
         model = whisper.load_model(name)
-        _WHISPER_MODELS[name] = (model, "whisper")
+        with _WHISPER_MODELS_LOCK:
+            _WHISPER_MODELS[name] = (model, "whisper")
         _WHISPER_MODEL, _WHISPER_BACKEND = model, "whisper"
         return model
     # Windows ARM: whisper.cpp, binario nativo (NEON, build anche per Adreno).
@@ -277,7 +283,8 @@ def _load_whisper_model(name, duration=0.0):
     model = WhisperCppModel(
         name, progress=_TRANSCRIBE_PROGRESS,
         cancel=_TRANSCRIBE_CANCEL, duration=duration)
-    _WHISPER_MODELS[name] = (model, "whisper-cpp")
+    with _WHISPER_MODELS_LOCK:
+        _WHISPER_MODELS[name] = (model, "whisper-cpp")
     _WHISPER_MODEL, _WHISPER_BACKEND = model, "whisper-cpp"
     return model
 

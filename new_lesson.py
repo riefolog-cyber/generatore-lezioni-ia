@@ -551,7 +551,11 @@ LLM_MODO = str(CONFIG.get("llm_modo", "due_fasi")).lower()
 
 # Rotte risultate non disponibili (cooldown/quota) durante la build corrente:
 # ritentarle a ogni modulo costa minuti di attesa senza possibilità di riuscita.
+# `set` e `dict` non sono thread-safe: i worker LLM e i modelli Whisper
+# li toccano in parallelo (aggiunte e letture si sovrappongono).
+# Non porta a corruzione, ma perde scritture.
 _LLM_MORTE = set()
+_LLM_MORTE_LOCK = threading.Lock()
 
 
 def _llm_headers():
@@ -740,7 +744,8 @@ def _llm_json(prompt, models, max_tokens=None, timeout=None):
                     print(f"  scarto {model} in {time.time() - t_req:.0f}s{extra}: "
                           f"{str(e)[:110]}", flush=True)
                     if not isinstance(e, ValueError) and _rotta_morta(str(e)):
-                        _LLM_MORTE.add(model)
+                        with _LLM_MORTE_LOCK:
+                            _LLM_MORTE.add(model)
                         print(f"  rotta {model} non disponibile: la salto nei tentativi successivi",
                               flush=True)
                         break
@@ -1223,13 +1228,12 @@ def _define_keyword(kw, m):
     """Definizione REALE di una keyword: la prima frase di testo/punti/narrazione
     del modulo che la contiene (niente definizioni inventate). Ritorna None se
     il modulo non la definisce davvero."""
-    import re as _re
     kwl = kw.lower()
     if len(kw) < 3:
         return None
     corpus = [m.get("testo") or "", m.get("narrazione") or ""] + list(m.get("punti") or [])
     for para in corpus:
-        for sent in _re.split(r"(?<=[.!?])\s+", str(para)):
+        for sent in re.split(r"(?<=[.!?])\s+", str(para)):
             s = sent.strip()
             if len(s) >= 40 and kwl in s.lower():
                 return s[:180]
@@ -1364,8 +1368,6 @@ def bloom_rubric_text(profilo, stats):
 
 # Rotazione: ogni modulo ha SEMPRE il quiz, più 2 attività prese a giro
 # da queste, così i tipi si alternano da un modulo all'altro.
-EXTRA_ROTATION = ["vf", "compila", "seq", "scenario", "errore", "flashcards"]
-
 # La classifica (trascina nella categoria) entra nella rotazione dalle slide
 # successive: compare circa ogni 4 moduli (es. al 5°), così il tipo resta una
 # sorpresa e non affolla i primi moduli.
@@ -1707,7 +1709,6 @@ def build_slides(struct, draft=False, profilo=None):
 
     # esame finale: domande dedicate di sintesi (non la copia dei quiz)
     exam = build_final_exam(moduli)
-    soglia_esame = sum(1 for _ in exam)          # 1 punto per domanda
     for j, eq in enumerate(exam):
         # la soglia è calcolata sul totale REALE delle domande emesse e
         # mostrata al docente nel report; il player la ricalcola e la applica
@@ -1815,11 +1816,11 @@ def _polish_mp3(src, bitrate="96k"):
                  "-f", "null", "-"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 text=True, timeout=120, check=False)
-            import json as _j
+            import json as _j  # noqa: F811 (locale: non usato altrove)
             m = re.search(r"\{[^}]*measured_[^}]+\}", meas.stderr or "", re.S)
             if m:
                 try:
-                    vals = _j.loads(m.group(0))
+                    vals = json.loads(m.group(0))
                     filt = _filtro_loudnorm({
                         "measured_I": vals["measured_I"],
                         "measured_TP": vals["measured_TP"],
@@ -2013,6 +2014,67 @@ def _silent_mp3(path, seconds):
         pass
 
 
+def _cache_key_audio(text, voice):
+    """Chiave della cache audio: hash di tutto cio' che cambia l'audio."""
+    return hashlib.sha1(
+        f"{CACHE_VERSION}|edge|{voice}|{EDGE_RATE}|{EDGE_BITRATE}|{text}".encode("utf-8")
+    ).hexdigest()
+
+
+def _salva_in_cache_audio(mp3, text, voice, words, cached_mp3, cached_meta):
+    """Mette una traccia in cache e restituisce la durata (0 se non nota).
+
+    Era scritto identico in due punti (generate_audio e regen_slide_audio), con
+    il rischio che le due copie divergessero: infatti `regen_slide_audio`
+    usava EDGE_VOICE invece della voce alternativa, e la cache salvata con
+    quell'hash non veniva piu' riusata da nessuno.
+
+    Ritorna anche la durata, che viene salvata a fianco dei word boundary:
+    cosi' la build successiva evita un ffprobe per traccia (50-120 ms seriali
+    ciascuno su Windows, ~2 s su 30 slide).
+    """
+    import tempfile as _tf
+    try:
+        # scrittura atomica con nome unico: piu' worker scrivono in parallelo
+        fd_c, p_c = _tf.mkstemp(dir=str(CACHE), prefix=".cache-", suffix=".mp3")
+        os.close(fd_c)
+        Path(p_c).unlink(missing_ok=True)
+        shutil.copyfile(mp3, p_c)
+        os.replace(p_c, cached_mp3)
+        dur = _ffmpeg_probe(mp3) or 0.0
+        write_text_atomic(cached_meta, json.dumps(
+            {"words": words, "dur": round(dur, 3)}, ensure_ascii=False))
+        return dur
+    except OSError:
+        return 0.0
+
+
+def _sintetizza(mp3, text, voice, _track_una_corretta=None):
+    """Cascata TTS completa: edge-tts (con retry) -> Piper -> silenzio.
+
+    Ritorna (engine, words). Unica implementazione: prima la sequenza era
+    scritta tre volte (generate_audio, regen_slide_audio, e la forma ridotta
+    del reaudio), e ogni copia aveva la sua variante di bug.
+    """
+    ok, words = False, []
+    # retry con backoff + jitter: solo errori transienti (timeout/429/5xx)
+    for attempt in range(TTS_RETRIES + 1):
+        ok, words, retryable = _try_edge_tts(text, mp3, voice)
+        if ok:
+            break
+        if not retryable:
+            break  # 401/403/voce errata: inutile riprovare
+        if attempt < TTS_RETRIES:
+            _jitter_sleep(2 * (attempt + 1))
+    if ok:
+        return "edge", words
+    ok, words = _try_piper(text, mp3)
+    if ok:
+        return "piper", words
+    _silent_mp3(mp3, _durata_stimata_slide(text))
+    return "silenzio", []
+
+
 def generate_audio(out_dir, slides):
     """Audio per OGNI slide, motore a cascata edge-tts -> Piper -> silenzio.
     Durata misurata con ffprobe; word boundary reali dall'engine quando dati,
@@ -2077,56 +2139,41 @@ def generate_audio(out_dir, slides):
         # sintesi IN PARALLELO: edge-tts è un servizio di rete, poche richieste
         # insieme accorciano molto il tempo totale; la cascata di fallback
         # (edge -> Piper -> silenzio) resta identica per ogni traccia.
-        from concurrent.futures import ThreadPoolExecutor
 
         def _track(item):
-            i, text, mp3, cached_mp3, cached_meta = item
-            ok, words = False, []
-            # retry con backoff + jitter: solo errori transienti (timeout/429/5xx)
-            for attempt in range(TTS_RETRIES + 1):
-                ok, words, retryable = _try_edge_tts(text, mp3, voice_for_text(text))
-                if ok:
-                    break
-                if not retryable:
-                    break  # 401/403/voce errata: inutile riprovare
-                if attempt < TTS_RETRIES:
-                    _jitter_sleep(2 * (attempt + 1))
-            engine = "edge"
-            if not ok:
-                engine = "piper"
-                ok, words = _try_piper(text, mp3)
-            if not ok:
-                engine = "silenzio"
-                est = _durata_stimata_slide(text)
-                _silent_mp3(mp3, est)
-            else:
-                # post-produzione: loudness uniforme tra le slide + fade + 44.1 kHz
-                _polish_mp3(mp3, EDGE_BITRATE)
+            # Un'eccezione non prevista in un worker PROPAGAVA al primo
+            # `pool.map` e uccideva l'intera build dopo 29 tracce su 40 gia'
+            # sintetizzate. Qui ogni traccia e' isolata: peggio una slide
+            # muta, che le altre 39.
+            try:
+                return _track_sintetizza(item)
+            except Exception as e:  # noqa: BLE001
+                print(f"  slide {item[0] + 1}: sintesi fallita ({str(e)[:70]}), uso silenzio",
+                      flush=True)
                 try:
-                    # Scrittura cache atomica con nome unico (evita race tra worker)
-                    import tempfile as _tf3
-                    fd_c, p_c = _tf3.mkstemp(dir=str(CACHE), prefix=".cache-", suffix=".mp3")
-                    os.close(fd_c)
-                    Path(p_c).unlink(missing_ok=True)
-                    shutil.copyfile(mp3, p_c)
-                    os.replace(p_c, cached_mp3)
-                    # durata + word boundary: la durata salvata evita un
-                    # ffprobe per slide nelle build successive (1 spawn in meno
-                    # per traccia, ~50-120 ms seriali ciascuno su Windows)
-                    _dur = _ffmpeg_probe(mp3) or 0.0
-                    if _dur > 0:
-                        durations[i] = round(_dur, 2)
-                    write_text_atomic(cached_meta, json.dumps(
-                        {"words": words, "dur": round(_dur, 3)}, ensure_ascii=False))
-                except OSError:
+                    _silent_mp3(item[2], _durata_stimata_slide(item[1]))
+                except Exception:
                     pass
-            return item, engine, words
+                return item, "silenzio", [], 0.0
+
+        def _track_sintetizza(item):
+            i, text, mp3, cached_mp3, cached_meta = item
+            voice = voice_for_text(text)
+            engine, words = _sintetizza(mp3, text, voice)
+            if engine == "silenzio":
+                return item, engine, words
+            # post-produzione: loudness uniforme tra le slide + fade + 44.1 kHz
+            _polish_mp3(mp3, EDGE_BITRATE)
+            dur = _salva_in_cache_audio(mp3, text, voice, words, cached_mp3, cached_meta)
+            return item, engine, words, dur
 
         workers = min(TTS_WORKERS, len(todo))
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            for (i, text, mp3, _cm, _cj), engine, words in pool.map(_track, todo):
+            for (i, text, mp3, _cm, _cj), engine, words, dur in pool.map(_track, todo):
                 engines[i] = engine
                 slides[i]["_words"] = words
+                if dur > 0:
+                    durations[i] = round(dur, 2)
                 if engine == "silenzio":
                     print(f"  ⚠ slide {i + 1}: audio sostituito da silenzio", flush=True)
                 else:
@@ -2153,23 +2200,48 @@ def generate_audio(out_dir, slides):
         print(f"  audio {i + 1}/{len(slides)} [{engine}]: {dur:.1f}s — {text[:44]}…", flush=True)
     # cache: se supera il limite, elimina le voci più vecchie (mp3 + json)
     try:
-        files = sorted(CACHE.glob("*.mp3"), key=lambda p: p.stat().st_mtime)
-        total = sum(f.stat().st_size for f in files) / 1048576
+        files = sorted(CACHE.glob("*.mp3"), key=lambda p: _safe_mtime(p))
+        total = sum(_safe_size(f) for f in files) / 1048576
         if total > CACHE_MAX_MB:
             for f in files:
                 if total <= CACHE_MAX_MB * 0.7:
                     break
-                sz = f.stat().st_size / 1048576
+                sz = _safe_size(f) / 1048576
                 try:
                     f.unlink()
-                    (f.with_suffix(".json")).unlink(missing_ok=True)
+                    f.with_suffix(".json").unlink(missing_ok=True)
+                    # il contatore scende SOLO se il file e' davvero sparito:
+                    # prima `total -= sz` stava fuori dal try, quindi un
+                    # errore di cancellazione (file aperto, antivirus) lasciava
+                    # la cache sopra il limite dichiarato
+                    total -= sz
                 except OSError:
                     pass
-                total -= sz
             print(f"  cache audio ridotta: ora ~{total:.0f} MB (limite {CACHE_MAX_MB} MB)")
     except Exception:
         pass
     return cached, durations
+
+
+def _safe_mtime(p):
+    """mtime di un file, 0 se non esiste piu'.
+
+    Nella pulizia della cache un file puo' sparire fra la glob e la stat (le
+    voci vengono cancellate dalla build precedente, altri thread generano):
+    l'eccezione abortiva l'intera operazione di pulizia.
+    """
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def _safe_size(p):
+    """Dimensione di un file, 0 se non esiste piu'."""
+    try:
+        return p.stat().st_size
+    except OSError:
+        return 0
 
 
 def vtt_ts(ts):
@@ -2370,7 +2442,7 @@ def _unlock_build():
         pass
 
 
-def build_from_docx(path, force=False, bozza=False, no_cache=False,
+def build_from_source(path, force=False, bozza=False, no_cache=False,
                     single=False, keep_folder=False, profilo=None):
     """Avvia la generazione (con blocco anti-concorrenza: una alla volta).
     `path` può essere un file (.docx/.pdf/.txt/.md/.html) oppure un URL
@@ -2652,7 +2724,7 @@ def build_from_text(text, title=None, force=False, bozza=False, no_cache=False,
         _unlock_build()
 
 
-def preview_from_docx(path, out_name=None, no_cache=False, profilo=None):
+def preview_from_source(path, out_name=None, no_cache=False, profilo=None):
     """Anteprima veloce: solo struttura moduli/quiz, senza audio.
     Accetta un file oppure un URL (sito web / YouTube)."""
     ext = extract_source(str(path))
@@ -2709,15 +2781,20 @@ def start_9router():
         print("  ⚠ Comando 9router non trovato: avvialo manualmente (comando: 9router)")
         return False
     flags = ["-n", "--skip-update", "-t"]
-    for shell in (False, True):
-        try:
-            subprocess.Popen(cmd + flags, cwd=str(BASE),
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=shell)
-            return True
-        except Exception:
-            continue
-    print("  ⚠ Impossibile avviare 9router.")
-    return False
+    # NB: niente `shell=True`. Su Windows con shell=True la lista viene
+    # passata a `cmd.exe /c`, e il percorso deriva da %APPDATA%: un valore
+    # contenente `&` o `^` diventerebbe esecuzione di comandi arbitrari. Il
+    # secondo giro con shell=True che c'era prima era anche inutile: il primo
+    # tentativo (shell=False) e' quello corretto e, se fallisce, fallisce
+    # anche l'altro.
+    try:
+        subprocess.Popen(cmd + flags, cwd=str(BASE),
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         shell=False)
+        return True
+    except Exception as e:
+        print(f"  ⚠ Impossibile avviare 9router: {e}")
+        return False
 
 
 def ensure_llm(timeout=NINE_ROUTER_START_TIMEOUT):
@@ -2794,7 +2871,7 @@ def watch():
                     continue
                 if f not in size or f.stat().st_size != size[f]:
                     continue          # file ancora in arrivo
-                out, ok = build_from_docx(f, force=True)
+                out, ok = build_from_source(f, force=True)
                 if out is None:      # lock occupato: si riprova al giro dopo
                     continue
                 state[f.name] = {"status": "ok" if ok else "warning",
@@ -3030,31 +3107,14 @@ def regen_slide_audio(lesson_dir, index):
         # rigenerate usavano EDGE_VOICE invece della voce alternativa e la
         # cache salvata con quell'hash non veniva più riusata da nessuno.
         _voice = voice_for_text(text)
-        ok, words, _retryable = _try_edge_tts(text, mp3, _voice)
-        engine = "edge"
-        if not ok:
-            engine = "piper"
-            ok, words = _try_piper(text, mp3)
-        if not ok:
-            engine = "silenzio"
-            _silent_mp3(mp3, _durata_stimata_slide(text))
-        else:
+        engine, words = _sintetizza(mp3, text, _voice)
+        if engine != "silenzio":
             _polish_mp3(mp3, EDGE_BITRATE)
-            try:  # aggiorna cache globale (stessa formula di generate_audio)
-                h = hashlib.sha1(
-                    f"{CACHE_VERSION}|edge|{_voice}|{EDGE_RATE}|{EDGE_BITRATE}|{text}".encode("utf-8")
-                ).hexdigest()
-                import tempfile as _tf4
-                fd_c, p_c = _tf4.mkstemp(dir=str(CACHE), prefix=".cache-", suffix=".mp3")
-                os.close(fd_c)
-                Path(p_c).unlink(missing_ok=True)
-                shutil.copyfile(mp3, p_c)
-                os.replace(p_c, CACHE / f"{h}.mp3")
-                _d = _ffmpeg_probe(mp3) or 0.0
-                write_text_atomic(CACHE / f"{h}.json", json.dumps(
-                    {"words": words, "dur": round(_d, 3)}, ensure_ascii=False))
-            except OSError:
-                pass
+            # stessa cache di generate_audio, stessa funzione: le due copie
+            # erano gia' divergenti (questa usava la formula inline)
+            _h = _cache_key_audio(text, _voice)
+            _salva_in_cache_audio(mp3, text, _voice, words,
+                                  CACHE / f"{_h}.mp3", CACHE / f"{_h}.json")
         dur = _ffmpeg_probe(mp3) or _durata_stimata_slide(text)
         if not words:
             words = _weighted_words(text, dur)
@@ -3069,12 +3129,19 @@ def regen_slide_audio(lesson_dir, index):
         lines = [(float(a), float(b), t) for a, b, t in s["words"]]
         vtt = "WEBVTT\n\n" + "\n\n".join(
             f"{n}\n{_fmt(a)} --> {_fmt(b)}\n{t}" for n, (a, b, t) in enumerate(lines, 1))
-        (cap_dir / f"narration-{index + 1:02d}.vtt").write_text(vtt, encoding="utf-8")
+        write_text_atomic(cap_dir / f"narration-{index + 1:02d}.vtt", vtt)
         save_lesson(out, payload)
         return round(dur, 2), engine
     finally:
         _unlock_build()
 
+
+
+# Alias storici: le funzioni non accettano solo .docx ma anche URL, PDF,
+# .txt, .md, .html e audio. Il nome "docx" induceva a credere il
+# contrario; gli alias restano per non rompere script esistenti.
+build_from_docx = build_from_source
+preview_from_docx = preview_from_source
 
 def main():
     try:
@@ -3108,7 +3175,7 @@ def main():
             from common import normalize_profilo as _npc
             _cli_prof = _npc({"durata": _opt("--durata"), "livello": _opt("--livello"),
                               "obiettivo": _opt("--obiettivo")})
-            build_from_docx(f, force="--force" in sys.argv, bozza="--bozza" in sys.argv,
+            build_from_source(f, force="--force" in sys.argv, bozza="--bozza" in sys.argv,
                             no_cache="--no-cache" in sys.argv,
                             single="--single" in sys.argv,
                             keep_folder="--keep-folder" in sys.argv,
@@ -3132,7 +3199,7 @@ def main():
         else:
             f = need_file(args[1], "Anteprima")
         try:
-            preview_from_docx(f, no_cache="--no-cache" in sys.argv)
+            preview_from_source(f, no_cache="--no-cache" in sys.argv)
         except Exception as e:  # noqa: BLE001
             print(f"✗ Anteprima fallita: {e}")
             sys.exit(1)

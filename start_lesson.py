@@ -89,11 +89,6 @@ class _QuietHandler(http.server.SimpleHTTPRequestHandler):
             return
         self.send_header("Cache-Control", "private, no-cache")
 
-    def end_headers(self):
-        self._cache_headers()
-        self.send_header("Accept-Ranges", "bytes")   # seek fluido nella barra audio
-        super().end_headers()
-
     def _vuole_gzip(self, ext):
         try:
             enc = (self.headers.get("Accept-Encoding") or "").lower()
@@ -204,11 +199,37 @@ class _RangeHandler(_QuietHandler):
         with f:
             f.seek(0, 2)
             size = f.tell()
-            m = re.match(r"bytes=(\d*)-(\d*)", rng.strip())
-            start = int(m.group(1) or 0) if m else 0
-            end = int(m.group(2)) if m and m.group(2) else size - 1
-            start = max(0, min(start, size - 1))
-            end = max(start, min(end, size - 1))
+            if size == 0:
+                # file vuoto: qualunque 206 prometterebbe piu' byte di quanti
+                # esistano e il browser (che si aspetta l'audio) si bloccherebbe
+                # aspettando dati che non arriveranno
+                self.send_error(416, "File vuoto")
+                return
+            m = re.fullmatch(r"bytes=(\d*)-(\d*)", rng.strip())
+            if not m:
+                return super().do_GET()
+            primo, secondo = m.group(1), m.group(2)
+            if primo == "" and secondo == "":
+                return super().do_GET()
+            if primo == "":
+                # suffisso: "bytes=-500" = ULTIMI 500 byte. Prima partiva da 0
+                # e serviva 0-500, cioe' l'inizio del file invece della coda.
+                n = int(secondo)
+                if n <= 0:
+                    self.send_error(416, "Range non soddisfacibile")
+                    return
+                start = max(0, size - n)
+                end = size - 1
+            else:
+                start = int(primo)
+                end = int(secondo) if secondo else size - 1
+                if start >= size:
+                    self.send_error(416, "Range non soddisfacibile")
+                    return
+                end = min(end, size - 1)
+            if end < start:
+                self.send_error(416, "Range non soddisfacibile")
+                return
             f.seek(start)
             self.send_response(206)
             self.send_header("Content-Type", "audio/mpeg")
@@ -258,6 +279,23 @@ def _is_safe_request_path(path, allowed_names):
     return True
 
 
+_HUB_CSS_FILE = Path(__file__).resolve().parent / "tools" / "hub.css"
+
+
+def _hub_css():
+    """Stili della pagina indice.
+
+    Erano ~15 regole CSS dentro una stringa Python: non formattate, non
+    ispezionabili, e un errore di sintassi non poteva essere rilevato da
+    nessuno. Ora stanno in `tools/hub.css`.
+    """
+    try:
+        return _HUB_CSS_FILE.read_text(encoding="utf-8")
+    except OSError:
+        # senza il file la pagina resta usabile, solo senza stile
+        return "body{font-family:system-ui,sans-serif}"
+
+
 def _hub_page():
     """Pagina indice che elenca tutte le lezioni disponibili (solo quelle,
     nient'altro del progetto è esposto)."""
@@ -272,20 +310,8 @@ def _hub_page():
     return ("<!DOCTYPE html><html lang=\"it\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
             "<title>Lezioni disponibili</title><style>"
-            "body{font-family:'Segoe UI',system-ui,sans-serif;background:#0d1220;color:#eef2ff;"
-            "margin:0;padding:40px 20px}"
-            "h1{text-align:center;font-size:26px;margin-bottom:6px}"
-            ".sub{text-align:center;color:#93a0c4;margin-bottom:30px;font-size:14px}"
-            ".grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));"
-            "gap:14px;max-width:900px;margin:0 auto}"
-            ".card{display:flex;align-items:center;gap:12px;padding:16px 18px;border-radius:14px;"
-            "background:#161d33;border:1px solid #2a3554;color:#eef2ff;text-decoration:none;"
-            "transition:transform .15s,border-color .2s,box-shadow .2s}"
-            ".card:hover{transform:translateY(-2px);border-color:#5b7bd5;"
-            "box-shadow:0 10px 26px rgba(0,0,0,.35)}"
-            ".ic{font-size:24px}.nm{font-weight:700;flex:1}.op{color:#8ecaff;font-size:13px;font-weight:700}"
-            ".empty{grid-column:1/-1;text-align:center;color:#93a0c4;padding:30px;border:1px dashed #2a3554;"
-            "border-radius:14px}</style></head><body>"
+            + _hub_css()
+            + "</style></head><body>"
             '<h1>🎓 Lezioni disponibili</h1><div class="sub">Scegli la lezione da aprire</div>'
             f'<div class="grid">{items}</div></body></html>')
 

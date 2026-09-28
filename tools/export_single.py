@@ -18,6 +18,8 @@ import re
 import sys
 from pathlib import Path
 
+from common import write_text_atomic
+
 BASE = Path(__file__).resolve().parent.parent
 
 
@@ -79,7 +81,7 @@ def export_single(lesson_dir, out_path=None):
         stem = out.name.replace("_lesson", "")
         out_path = out / f"{stem}_singola.html"
     out_path = Path(out_path)
-    out_path.write_text(html, encoding="utf-8")
+    write_text_atomic(out_path, html)
     return out_path
 
 

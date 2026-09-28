@@ -22,6 +22,7 @@ BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE / "tools"))
 sys.path.insert(0, str(BASE))
 
+from common import load_config  # noqa: E402
 from player_template import bust_cache, player_version, write_player  # noqa: E402
 
 
@@ -50,13 +51,20 @@ def rigenera(base=None, log=print):
     trovate = lezioni(base)
     if not trovate:
         return True, "Nessuna lezione da aggiornare."
-    log(f"Impronta del player: {player_version()}")
+    # il tema viene dalla configurazione: era "dark" scritto a mano, quindi il
+    # pulsante del pannello riportava ogni lezione al tema scuro anche con
+    # theme: "light" nelle impostazioni
+    try:
+        tema = load_config().get("theme", "dark")
+    except Exception:
+        tema = "dark"
+    log(f"Impronta del player: {player_version()} (tema {tema})")
     fatte = saltate = 0
     for d in trovate:
         sw = d / "sw.js"
         prima = sw.read_text(encoding="utf-8").splitlines()[0] if sw.exists() else "(assente)"
         try:
-            write_player(d, _titolo(d), tema="dark")
+            write_player(d, _titolo(d), tema=tema)
             bust_cache(d)
         except Exception as e:  # noqa: BLE001
             log(f"  ✗ {d.name}: {e}")
