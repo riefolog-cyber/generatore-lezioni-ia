@@ -11,13 +11,17 @@ il **pannello di controllo** (pagina grafica), con cui puoi:
 2. generare da **link** (sito web o video YouTube);
 3. impostare il **profilo lezione**: durata (breve/standard/approfondita),
    livello (base/intermedio/avanzato), obiettivo Bloom
-   (conoscenza/comprensione/applicazione/analisi);
+   (conoscenza/comprensione/applicazione/analisi) e accessibilità
+   (standard oppure **BES/DSA**, con meno opzioni e meno attività);
 4. impostare le **opzioni**: rigenera anche le lezioni esistenti (`--force`),
    bozza senza LLM (`--bozza`), rigenera solo l'audio di una lezione,
    generare come **file HTML unico** (senza cartella) e attivare la
    **trascrizione audio locale con Whisper**;
 5. usare le **impostazioni** del pannello per porta, limite upload, cache,
    modello Whisper, IP e PIN docente;
+6. in **Manutenzione**, «Aggiorna il player» per riscrivere grafica e script
+   delle lezioni già generate (serve dopo un aggiornamento del player: senza,
+   le lezioni continuano a servire la versione precedente);
 6. **modificare** le slide dopo la generazione (titolo, narrazione, quiz)
    con rigenerazione audio della singola slide;
 7. provare le **voci** neurali (anteprima audio) prima di generare;
@@ -128,15 +132,21 @@ start_lesson.py      server locale con porta libera (8341-8350);
                      lezioni apre l'indice per scegliere
 check_env.py         controllo ambiente
 config.json          llm_url, llm_model, llm_api_key (opzionale), voice,
-                      edge_voice, edge_voice_domande (opzionale: voci alternate),
-                      edge_rate, audio_bitrate, theme,
-                      num_moduli_min/max, porta, cache_max_mb,
-                      tts_workers, tts_retries, profilo_durata/livello/obiettivo,
-                      llm_modo (due_fasi|unica), llm_modelli_fallback,
-                      llm_max_tokens, llm_timeout, llm_deadline, llm_parallel
-classifica.json      risultati degli studenti per la classifica di classe
-                     (creato dal pannello, ignorato da git)
-classifica.sqlite3   archivio SQLite locale della classifica (rigenerabile)
+                     edge_voice, edge_voice_domande (opzionale: voci alternate),
+                     edge_rate, audio_bitrate, audio_lufs, audio_true_peak,
+                     audio_lra, audio_fade_in_s, audio_durata_minima_s,
+                     parole_per_secondo, theme,
+                     num_moduli_min/max, porta, cache_max_mb,
+                     tts_workers, tts_retries, profilo_durata/livello/obiettivo/
+                     accessibilita, llm_modo (due_fasi|unica),
+                     llm_modelli_fallback, llm_max_tokens, llm_timeout,
+                     llm_deadline, llm_parallel, llm_cache_attivita
+classifica.sqlite3   archivio SQLite locale della classifica (rigenerabile;
+                     classifica.json è la copia di compatibilità)
+rigenera_player.py   riscrive il player (grafica e script) delle lezioni già
+                     generate, senza toccare audio o contenuti. Serve dopo un
+                     aggiornamento del player: nel pannello c'è il pulsante
+                     «Aggiorna il player», altrimenti da riga di comando.
 generatore-lezioni-mappa.html   mappa interattiva del sistema (Archify):
                      apri nel browser per esplorare componenti e percorsi
 generatore-lezioni-mappa.json   sorgente dell'IR per rigenerare la mappa
@@ -148,7 +158,7 @@ tools/               common, player_template (player autogenerato),
                      sources (fonti e Whisper), export_zip, export_single,
                      class_report, selftest (QA), netdiag, qr, jobs,
                      multipart, uploads, panel_ui, panel_settings,
-                     class_repository, lesson_admin
+                     class_repository, lesson_admin, http_safety
 assets/voice/        modello Piper + cache audio
 ```
 
@@ -185,9 +195,15 @@ assets/voice/        modello Piper + cache audio
   interfaccia, coda/job, upload, impostazioni, rete e
   classifica vivono in moduli `tools/` separati e testati.
 - **Niente pagina bianca da cache**: il server della lezione invia intestazioni
-  no-cache e i file sono caricati con versione (`main.js?v=4`); se il browser
-  usa comunque un `index.html` vecchio, il player mostra un messaggio con il
-  pulsante "Ricarica la pagina" invece di restare bianco.
+  no-cache e i file sono caricati con versione (`main.js?v=<hash>`); il server
+  comprime inoltre CSS, script e dati (gzip, circa il 70% in meno sulla rete) e
+  i file con versione sono dichiarati `immutable`. Il service worker usa una
+  strategia **network-first** con la cache solo come ripiego offline, e il nome
+  della cache porta l'impronta del player (JavaScript **e** fogli di stile) e
+  della lezione: prima era una costante fissa, e continuava a servire la lezione
+  precedente a chiunque avesse già aperto il player. Se il browser usa comunque
+  un `index.html` vecchio, il player mostra un messaggio con il pulsante
+  "Ricarica la pagina" invece di restare bianco.
 - `check_env.py` distingue i blocchi veri (Python/python-docx) dagli avvisi:
   edge-tts, voce Piper e ffmpeg mancanti NON impediscono di generare (l'audio
   degrada a Piper/silenzio), avvia.py prosegue e segnala.
@@ -222,5 +238,15 @@ assets/voice/        modello Piper + cache audio
   menu ☰; persistiti per lezione nel browser.
 - **Classifica di classe**: dal pannello finale lo studente invia il risultato
   con un tap («🏆 Invia alla classifica»); il docente vede la classifica per
-  lezione nella sezione 🏆 del pannello (anche da client LAN), con export CSV
-  e inserimento manuale. Nessun servizio esterno: tutto in `classifica.json`.
+  lezione nella sezione 🏆 del pannello, con export CSV e inserimento manuale.
+  Nessun servizio esterno: l'archivio è un SQLite locale (`classifica.sqlite3`),
+  con `classifica.json` mantenuto come copia di compatibilità.
+  **La classifica contiene dati di minori**: dalla rete di classe la sua
+  consultazione e il CSV richiedono il **PIN docente**; in locale no.
+  Lo studente può sempre inviare il proprio risultato.
+- **Sicurezza del pannello**: le API sono raggiungibili solo da localhost,
+  l'header `Host` deve essere un indirizzo di questa macchina (blocca il
+  DNS-rebinding) e le POST con origine esterna vengono rifiutate. Se imposti
+  un **PIN docente** in Impostazioni, è richiesto per ogni operazione che
+  modifica qualcosa — non solo per le impostazioni. Con PIN vuoto l'unica
+  protezione è il controllo di loopback.

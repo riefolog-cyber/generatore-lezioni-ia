@@ -9,6 +9,7 @@ Mantiene la compatibilità con il vecchio ``classifica.json``:
 from __future__ import annotations
 
 import json
+import hmac
 import sqlite3
 import threading
 import time
@@ -129,16 +130,28 @@ def list_results(json_path: Path) -> list[dict]:
 
 
 def reset(json_path: Path) -> None:
+    # stesso lock di add_result: senza, reset e add_result concurrenti facevano
+    # divergere il DB dalla copia JSON (reset scriveva [], add_result scriveva
+    # l'elenco letto PRIMA della cancellazione)
     json_path = Path(json_path)
-    conn = _connect(db_path_for(json_path))
-    try:
-        with conn:
-            conn.execute("DELETE FROM risultati")
-        _write_json_compat(json_path, [])
-    finally:
-        conn.close()
+    with _WRITE_LOCK:
+        conn = _connect(db_path_for(json_path))
+        try:
+            with conn:
+                conn.execute("DELETE FROM risultati")
+            _write_json_compat(json_path, [])
+        finally:
+            conn.close()
 
 
 def authorized(pin: str | None, supplied: str | None) -> bool:
+    """True se l'operazione è autorizzata.
+
+    PIN vuoto = pannello non protetto da PIN: in quel caso l'unica barriera
+    resta il controllo di loopback sul server. Con PIN impostato il confronto
+    è in tempo costante, così il tempo di risposta non rivela il prefisso.
+    """
     expected = str(pin or "").strip()
-    return not expected or expected == str(supplied or "")
+    if not expected:
+        return True
+    return hmac.compare_digest(expected, str(supplied or "").strip())

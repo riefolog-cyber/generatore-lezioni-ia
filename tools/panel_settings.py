@@ -10,14 +10,17 @@ import json
 import os
 import re
 import tempfile
+import threading
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent.parent
 CONFIG_FILE = BASE / "config.json"
 
+_UPDATE_LOCK = threading.Lock()
+
 PUBLIC_FIELDS = {
     "porta": ("number", 1024, 65535, 8341),
-    "max_upload_mb": ("number", 1, 1000, 100),
+    "max_upload_mb": ("number", 1, 200, 100),
     "cache_max_mb": ("number", 50, 2000, 300),
     "whisper_model": ("choice", ("tiny", "base", "small"), None, "base"),
     "pin_docente": ("text", 0, 12, ""),
@@ -72,30 +75,36 @@ def public_config(path=None):
 
 
 def update_public(values, path=None):
-    """Valida e salva atomicamente; restituisce la configurazione pubblica."""
+    """Valida e salva atomicamente; restituisce la configurazione pubblica.
+
+    Il read-modify-write è sotto lock: due POST /api/settings contemporanei
+    (due tab, o un click + un CSRF) facevano perdere uno dei due aggiornamenti
+    (os.replace è atomico, quindi niente corruzione, ma perdita di dati).
+    """
     if not isinstance(values, dict):
         raise ValueError("Configurazione non valida.")
     clean = {k: _validate(k, v) for k, v in values.items() if k in PUBLIC_FIELDS}
     path = Path(path or CONFIG_FILE)
-    current = {}
-    if path.exists():
-        try:
-            current = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(current, dict):
+    with _UPDATE_LOCK:
+        current = {}
+        if path.exists():
+            try:
+                current = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(current, dict):
+                    current = {}
+            except (OSError, ValueError, TypeError):
                 current = {}
-        except (OSError, ValueError, TypeError):
-            current = {}
-    current.update(clean)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".config-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(current, f, ensure_ascii=False, indent=2)
-            f.write("\n")
-        os.replace(tmp, path)
-    finally:
+        current.update(clean)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".config-", suffix=".tmp")
         try:
-            Path(tmp).unlink(missing_ok=True)
-        except OSError:
-            pass
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(current, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+            os.replace(tmp, path)
+        finally:
+            try:
+                Path(tmp).unlink(missing_ok=True)
+            except OSError:
+                pass
     return public_config(path)

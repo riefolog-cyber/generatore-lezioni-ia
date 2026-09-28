@@ -45,6 +45,10 @@ _MODEL_ALIASES = {"tiny": "tiny", "base": "base", "small": "small"}
 # timestamp che whisper.cpp stampa su stderr durante la decodifica
 _TS_RE = re.compile(r"\[(\d+):(\d\d):(\d\d)\.(\d+)\s*-->")
 
+# tetti di sicurezza: nessun subprocess può bloccare il job per sempre
+_FFMPEG_TIMEOUT = 600   # secondi per la conversione in wav 16 kHz
+_RUN_TIMEOUT = 7200     # secondi per l'intera trascrizione
+
 
 def _log(msg):
     print(f"  whisper.cpp: {msg}", file=sys.stderr, flush=True)
@@ -109,11 +113,17 @@ def _to_wav16k(src: Path, workdir: Path) -> Path:
             "Installa ffmpeg e rilancia."
         )
     dst = workdir / "audio16k.wav"
-    res = subprocess.run(
-        [ffmpeg, "-nostdin", "-y", "-loglevel", "error", "-i", str(src),
-         "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(dst)],
-        capture_output=True, text=True,
-    )
+    try:
+        res = subprocess.run(
+            [ffmpeg, "-nostdin", "-y", "-loglevel", "error", "-i", str(src),
+             "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(dst)],
+            capture_output=True, text=True, timeout=_FFMPEG_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        # un audio corrotto può tenere ffmpeg in loop per sempre: meglio un
+        # errore esplicito che un job bloccato (l'annullamento non lo fermerebbe)
+        raise RuntimeError(
+            f"conversione audio superata dopo {_FFMPEG_TIMEOUT}s: file non valido?")
     if res.returncode != 0 or not dst.is_file() or dst.stat().st_size <= 44:
         raise RuntimeError(f"conversione audio fallita: {(res.stderr or '').strip()[:300]}")
     return dst
@@ -176,25 +186,44 @@ class WhisperCppModel:
             return bool(self._cancel and self._cancel())
 
     def _run(self, cmd, out_base: Path) -> str:
+        # stdout va in DEVNULL: l'output utile è il file JSON (-oj) e lasciare
+        # la pipe aperta senza leggerla può far bloccare il figlio quando il
+        # buffer si riempie, bloccando a sua volta questo thread per sempre.
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
         )
         last_pct = -1
-        for line in (proc.stderr or ()):
-            m = _TS_RE.search(line)
-            if not m:
-                continue
-            pos = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
-            if self._progress and self._duration > 0:
-                pct = min(99, int(pos / self._duration * 100))
-                if pct > last_pct + 2:
-                    last_pct = pct
-                    try:
-                        self._progress(pct, 0, self._duration, False, self.name)
-                    except Exception:
-                        pass
-        proc.wait()
+        try:
+            for line in (proc.stderr or ()):
+                # l'annullamento viene valutato DURANTE l'elaborazione: prima
+                # veniva controllato solo dopo wait(), quindi il pulsante
+                # "annulla" non annullava nulla (si aspettava la fine).
+                if self._cancelled():
+                    self._kill(proc)
+                    raise ValueError("Trascrizione annullata dall'utente.")
+                m = _TS_RE.search(line)
+                if not m:
+                    continue
+                pos = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+                if self._progress and self._duration > 0:
+                    pct = min(99, int(pos / self._duration * 100))
+                    if pct > last_pct + 2:
+                        last_pct = pct
+                        try:
+                            self._progress(pct, 0, self._duration, False, self.name)
+                        except Exception:
+                            pass
+            proc.wait(timeout=_RUN_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            self._kill(proc)
+            raise RuntimeError(
+                f"whisper.cpp non ha terminato entro {_RUN_TIMEOUT}s: trascrizione interrotta.")
+        except ValueError:
+            raise
+        except Exception:
+            self._kill(proc)
+            raise
         if self._cancelled():
             raise ValueError("Trascrizione annullata dall'utente.")
         if proc.returncode != 0:
@@ -205,3 +234,15 @@ class WhisperCppModel:
         data = json.loads(jf.read_text(encoding="utf-8"))
         parti = [str(s.get("text", "")).strip() for s in data.get("transcription", [])]
         return " ".join(p for p in parti if p).strip()
+
+    @staticmethod
+    def _kill(proc):
+        """Termina il figlio e, se non collabora, lo uccide."""
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass

@@ -190,10 +190,20 @@ def test_panel_qr_is_clickable_and_fullscreen():
 
 def test_panel_lan_prefers_configured_ip_and_warns_on_dual_net(monkeypatch):
     import panel
+
+    def _no_cache():
+        # l'IP LAN è in cache 30 s (prima ogni refresh del pannello faceva
+        # 2 getaddrinfo + 2 socket): il test cambia rete, quindi la svuota
+        panel._LAN_CACHE.update(at=0.0, ip=None, warn=None)
+
+    _no_cache()
     monkeypatch.setattr(panel, "_local_ips", lambda: {"192.168.0.2", "10.1.1.103"})
     monkeypatch.setattr(panel, "_default_route_ip", lambda: "10.1.1.103")
     assert panel.lan_ip() == "192.168.0.2"
     assert "10.1.1.103" in (panel.lan_warning() or "")
+    # entro i 30 s il risultato è riusato dalla cache
+    assert panel.lan_ip() == "192.168.0.2"
+    _no_cache()
     monkeypatch.setattr(panel, "_local_ips", lambda: {"10.1.1.103"})
     assert panel.lan_ip() == "10.1.1.103"
     assert "192.168.0.2" in (panel.lan_warning() or "")

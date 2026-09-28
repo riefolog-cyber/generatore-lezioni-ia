@@ -261,14 +261,20 @@ def test_player_classroom_modes_and_service_worker(tmp_path):
     assert 'id="btnModeTeacher"' not in html and 'id="btnModeExam"' in html
     assert 'id="examTimer"' in html and 'id="examBanner"' in html
     assert "btnModeTeacher" not in js and "data-mode=\"teacher\"" not in css
-    assert "const order = shuffleOpts(q.opts);" in js
+    assert "const order = stableOrder(idx, bidx, 'quiz', q.opts.length," in js
     assert "function shuffleOpts(opts)" in js
+    assert "function stableOrder(idx, bidx, kind, n, factory)" in js
     assert "String.fromCharCode(65 + pos)" in js
     assert "setLessonMode" in js and "startExam" in js and "goExam" in js
     assert "navigator.serviceWorker.register('./sw.js')" in js
-    # il nome della cache porta la versione del player: altrimenti il service
-    # worker continua a servire agli alunni una lezione vecchia
-    assert "const C='lesson-v" in sw and "caches.open" in sw
+    # Il nome della cache NON può essere una costante fissa: altrimenti il
+    # service worker continua a servire agli alunni una lezione vecchia e
+    # l'activate non cancella mai nulla. Deve portare l'impronta del player.
+    assert "const C=" in sw and "caches.open" in sw
+    assert "lesson-v4" not in sw
+    assert "ignoreSearch:true" in sw          # i ?v=<hash> matchano la precache
+    assert "ks.filter(k=>k!==C)" in sw        # activate elimina le cache vecchie
+    assert "fetch(req).then" in sw            # strategia network-first
     assert "self.skipWaiting()" in sw
 
 def test_player_lesson_dir_is_valid_js(tmp_path):

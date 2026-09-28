@@ -17,9 +17,15 @@ __pycache__/
 *.lock
 !requirements.lock
 .llm_cache/
+# cache audio TTS: rigenerabile, ma puo' valere centinaia di MB
+.tts_cache/
+.generazione.lock
 _generated.json
 .progress.json
 job_history.json
+# testo incollato dal docente: file temporaneo, resta solo se il processo
+# e' morto prima della cancellazione
+_incollato_*.txt
 .opencode/
 classifica.json
 classifica.sqlite3
@@ -41,6 +47,11 @@ archivio_backup/
 *_singola.html
 
 .whisper_cache/
+
+# script di prova temporanei usati per il debug
+prova_*.py
+_tmp*
+*_test_*.py
 
 # report di classe prodotti dagli export
 report_classe.csv

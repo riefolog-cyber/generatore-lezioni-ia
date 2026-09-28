@@ -35,9 +35,20 @@ def save_upload(base, raw_name, data, supported_ext, max_bytes):
     replaced = dest.exists()
     fd, tmp_path = tempfile.mkstemp(dir=str(base), prefix=".upload-", suffix=".tmp")
     try:
-        os.write(fd, data)
-    finally:
-        os.close(fd)
+        # os.write() può scrivere PARZIALMENTE e non lo segnala: il risultato
+        # era un file troncato senza alcun errore, da cui una lezione generata
+        # su materiale incompleto e non diagnosticabile. os.fdopen+write
+        # garantisce la scrittura completa o l'eccezione.
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
     tmp = Path(tmp_path)
     saved = False
     try:

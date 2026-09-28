@@ -11,9 +11,19 @@ Sostituisce l'avvio da terminale con una pagina grafica nel browser:
   - console di log in tempo reale durante la generazione;
   - elenco delle lezioni generate con pulsante "Apri".
 
-Sicurezza:
-  - il pannello e le API /api/* rispondono SOLO alle richieste da localhost;
-  - chiunque nella LAN vede solo l'indice delle lezioni (come prima);
+Sicurezza (vedi tools/http_safety.py):
+  - le API /api/* rispondono SOLO alle richieste da localhost; dalla LAN si
+    raggiungono solo le lezioni, l'indice e l'invio della classifica;
+  - l'header Host deve essere un indirizzo di QUESTA macchina: senza questo
+    controllo, un sito visitato dal docente potrebbe puntare il proprio
+    dominio a 127.0.0.1 (DNS-rebinding) e comandare il pannello;
+  - le POST sono rifiutate se Origin/Sec-Fetch-Site indicano un'altra origine
+    (CSRF sulle richieste "semplici" come l'upload multipart);
+  - se in Impostazioni è impostato un PIN docente, è richiesto per TUTTE le
+    operazioni che modificano qualcosa (con PIN vuoto l'unica barriera resta
+    il controllo di loopback);
+  - la classifica (nomi, puni) e il suo export CSV sono protetti dal PIN quando
+    la richiesta arriva dalla LAN, perché sono dati di minori;
   - i file del progetto (config.json, sorgenti, .git…) non vengono mai serviti.
 
 Uso:  python panel.py        (avvia il pannello e apre il browser)
@@ -28,6 +38,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -39,9 +50,10 @@ BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE / "tools"))
 sys.path.insert(0, str(BASE))
 
-from common import load_config  # noqa: E402
+from common import load_config, write_text_atomic  # noqa: E402
 from class_repository import add_result as _class_repo_add, authorized as _class_repo_authorized  # noqa: E402
 from class_repository import list_results as _class_repo_list, reset as _class_repo_reset  # noqa: E402
+from http_safety import host_allowed, same_origin_post, safe_request_path  # noqa: E402
 from sources import SUPPORTED_EXT, is_url  # noqa: E402
 from start_lesson import _RangeHandler, _hub_page, find_port, list_lessons  # noqa: E402
 
@@ -49,6 +61,10 @@ CONFIG = load_config()
 DEFAULT_PORT = int(CONFIG.get("porta", 8341))
 MAX_UPLOAD_MB = int(CONFIG.get("max_upload_mb", 100))  # configurabile
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
+# soffitto assoluto sul corpo di una richiesta: `max_upload_mb` arriva a 1000
+# dalla UI, e MAX_UPLOAD_BYTES*10 diventava ~10 GB per richiesta (tutto in RAM)
+MAX_BODY_BYTES = 512 * 1024 * 1024
+UPLOAD_FILES_PER_REQUEST = 10
 RUNTIME_PORT = DEFAULT_PORT  # valore reale, utile se find_port sceglie 8342 ecc.
 
 # Il pannello importa new_lesson UNA volta: i moduli restano in memoria anche
@@ -112,39 +128,60 @@ def _lan_selftest(ip, port):
 
 HISTORY_FILE = BASE / "job_history.json"
 
-# rate-limit build: max 20 build/ora per IP (rete scolastica / click multipli)
+# rate-limit build: max 60 build/ora per IP (rete scolastica / click multipli)
+# 20/ora era SOTTO l'uso naturale ("Carica e genera tutto" con 10 file ne fa
+# 10) e il dict cresceva senza eviction per ogni IP visto.
 _RATE = {}
-RATE_MAX = 20
+_RATE_LOCK = threading.Lock()
+RATE_MAX = 60
 RATE_WINDOW = 3600
 
 
 def _rate_ok(ip):
     now = time.time()
-    lst = [t for t in _RATE.get(ip, []) if now - t < RATE_WINDOW]
-    if len(lst) >= RATE_MAX:
+    with _RATE_LOCK:
+        lst = [t for t in _RATE.get(ip, []) if now - t < RATE_WINDOW]
+        if len(lst) >= RATE_MAX:
+            _RATE[ip] = lst
+            return False
+        lst.append(now)
         _RATE[ip] = lst
-        return False
-    lst.append(now)
-    _RATE[ip] = lst
-    return True
+        # eviction: dimentica gli IP la cui finestra è scaduta
+        if len(_RATE) > 256:
+            for k in [k for k, v in _RATE.items()
+                      if not any(now - t < RATE_WINDOW for t in v)]:
+                _RATE.pop(k, None)
+        return True
 
 
 def _history_append(kind, source, ok, secs):
+    """Read-modify-write sotto lock + scrittura atomica.
+
+    Senza lock due job che finiscono insieme perdevano righe; senza
+    os.replace un crash a metà lasciava un file troncato.
+    """
     try:
-        hist = []
-        if HISTORY_FILE.exists():
-            hist = json.loads(HISTORY_FILE.read_text(encoding="utf-8") or "[]")
-        hist.append({"t": time.strftime("%Y-%m-%d %H:%M:%S"), "kind": kind,
-                     "source": str(source)[:160], "ok": bool(ok), "secs": round(secs or 0, 1)})
-        HISTORY_FILE.write_text(json.dumps(hist[-100:], ensure_ascii=False), encoding="utf-8")
-    except OSError:
+        with _HISTORY_LOCK:
+            hist = []
+            if HISTORY_FILE.exists():
+                hist = json.loads(HISTORY_FILE.read_text(encoding="utf-8") or "[]")
+            if not isinstance(hist, list):
+                hist = []
+            hist.append({"t": time.strftime("%Y-%m-%d %H:%M:%S"), "kind": kind,
+                         "source": str(source)[:160], "ok": bool(ok),
+                         "secs": round(secs or 0, 1)})
+            write_text_atomic(HISTORY_FILE, json.dumps(hist[-100:], ensure_ascii=False))
+    except Exception:
         pass
+
+
+_HISTORY_LOCK = threading.Lock()
 
 
 def _history_clear():
     """Svuota la cronologia generazioni (pulsante nel pannello)."""
     try:
-        HISTORY_FILE.write_text("[]", encoding="utf-8")
+        write_text_atomic(HISTORY_FILE, "[]")
     except OSError:
         pass
 
@@ -165,7 +202,9 @@ class _UploadTooBig(Exception):
 # Gli studenti (anche da tablet sulla LAN) inviano il risultato del percorso;
 # il pannello lo accumula in classifica.json e mostra la classifica per lezione.
 CLASSIFICA_FILE = BASE / "classifica.json"
-_CLASSIFICA_MAX = 500          # righe massime su disco (le più nuove vincono)
+# il limite delle righe su disco vive in class_repository.MAX_ROWS: qui era
+# duplicato (_CLASSIFICA_MAX = 500) e mai usato, quindi due numeri da tenere
+# allineati senza che nessuno dei due venisse letto
 _CLASSIFICA_PANEL = 50         # righe mostrate in classifica per lezione
 
 
@@ -203,6 +242,22 @@ def _classifica_view():
     return {"classifiche": out}
 
 
+def _csv_cell(value):
+    """Cella CSV sicura: neutralizza la CSV/formula injection.
+
+    Un valore che inizia con = + - @ (o che contiene ; " o a capo) viene
+    quotato: senza questo, il nome di uno studente come
+    `=cmd|'/C calc'!A0` verrebbe eseguito da Excel all'apertura del file
+    che il docente scarica.
+    """
+    s = str(value)
+    if s and s[0] in "=+-@\t\r":
+        s = "'" + s
+    if ";" in s or '"' in s or "\n" in s:
+        s = '"' + s.replace('"', '""') + '"'
+    return s
+
+
 # ------------------------------------------------------------------ cache whitelist lezioni
 # La whitelist delle lezioni viene valutata a ogni richiesta (anche per gli mp3
 # durante la riproduzione). Un piccolo TTL evita glob su disco a ogni asset;
@@ -210,16 +265,18 @@ def _classifica_view():
 # subito disponibili senza aspettare la scadenza.
 LESSONS_CACHE_TTL = 2.0
 _lessons_cache = {"at": 0.0, "names": None, "hub": None, "singles": None}
+_LESSONS_CACHE_LOCK = threading.RLock()   # le richieste sono in thread paralleli
 
 
 def _bump_lessons_cache():
-    now = time.time()
-    if _lessons_cache["names"] is None or now - _lessons_cache["at"] > LESSONS_CACHE_TTL:
-        _lessons_cache.update(at=now,
-                              names={l.name for l in list_lessons()},
-                              singles={p.name for p in BASE.glob("*_singola.html")
-                                       if p.is_file()},
-                              hub=None)
+    with _LESSONS_CACHE_LOCK:
+        now = time.time()
+        if _lessons_cache["names"] is None or now - _lessons_cache["at"] > LESSONS_CACHE_TTL:
+            _lessons_cache.update(at=now,
+                                  names={l.name for l in list_lessons()},
+                                  singles={p.name for p in BASE.glob("*_singola.html")
+                                           if p.is_file()},
+                                  hub=None)
 
 
 def _allowed_lesson_names():
@@ -240,10 +297,15 @@ def _hub_page_cached():
 
 
 def _invalidate_lessons_cache():
-    _lessons_cache["names"] = None
-    _lessons_cache["singles"] = None
-    _lessons_cache["hub"] = None
-    _lessons_cache["at"] = 0.0
+    with _LESSONS_CACHE_LOCK:
+        _lessons_cache["names"] = None
+        _lessons_cache["singles"] = None
+        _lessons_cache["hub"] = None
+        _lessons_cache["at"] = 0.0
+    # lo snapshot di /api/state e le info delle lezioni vanno ricalcolati:
+    # dopo una generazione cambia il contenuto delle cartelle
+    _STATE_CACHE.update(at=0.0, data=None)
+    _LESSON_INFO_CACHE.clear()
 
 
 def _flog(txt):
@@ -263,17 +325,12 @@ _JOBS = JobManager(_history_append, _invalidate_lessons_cache, _flog)
 LOG = _JOBS.log
 JOB = _JOBS.state
 QUEUE = _JOBS.queue
-JOB_LOCK = _JOBS.lock
 LOG_LOCK = LOG.lock
 
 
 def _log(txt):
     with LOG_LOCK:
         LOG.append(str(txt).rstrip())
-
-
-def _run_next_queued():
-    _JOBS.run_next()
 
 
 def _material_job_pending(source_name):
@@ -337,6 +394,20 @@ def lan_ip():
     # davvero assegnato a questa macchina.
     # Se il fisso non è attivo, meglio l'IP della route predefinita (quello
     # che il telefono può davvero raggiungere da questa rete).
+    # L'IP non cambia più volte al secondo: risultato in cache 30 s, così il
+    # refresh del pannello non fa 2 getaddrinfo + 2 socket per ogni poll.
+    now = time.time()
+    if _LAN_CACHE["ip"] is not None and now - _LAN_CACHE["at"] < 30.0:
+        return _LAN_CACHE["ip"]
+    ip = _lan_ip_uncached()
+    _LAN_CACHE.update(at=now, ip=ip, warn=_lan_warning_uncached())
+    return ip
+
+
+_LAN_CACHE = {"at": 0.0, "ip": None, "warn": None}
+
+
+def _lan_ip_uncached():
     fisso = ""
     try:
         fisso = str(CONFIG.get("lan_ip_fisso") or "").strip()
@@ -362,6 +433,11 @@ def lan_ip():
 
 def lan_warning():
     """Messaggio se l'IP fisso da config non è attivo (QR a casa)."""
+    lan_ip()   # popola la cache
+    return _LAN_CACHE["warn"]
+
+
+def _lan_warning_uncached():
     try:
         fisso = str(CONFIG.get("lan_ip_fisso") or "").strip()
     except Exception:
@@ -402,19 +478,21 @@ UPLOADED = {}
 
 def _materials():
     out = []
-    for name, info in sorted(UPLOADED.items()):
+    # snapshot della lista: `_register_upload` e `_resolve_source` inseriscono
+    # in UPLOADED da altri thread mentre iteriamo (prima: RuntimeError
+    # "dictionary changed size during iteration")
+    for name in sorted(list(UPLOADED.keys())):
         p = BASE / name
-        if not p.is_file():
-            continue
         try:
-            out.append({
-                "name": name,
-                "size": p.stat().st_size,
-                "modified": p.stat().st_mtime,
-                "lesson": _lesson_for(name),
-            })
+            st = p.stat()          # una sola stat(), non due
         except OSError:
             continue
+        out.append({
+            "name": name,
+            "size": st.st_size,
+            "modified": st.st_mtime,
+            "lesson": _lesson_for(name),
+        })
     return out
 
 
@@ -453,24 +531,55 @@ def _single_files():
     return out
 
 
+_LESSON_INFO_CACHE = {}   # name -> (mtime_max, info)
+
+
 def _lesson_details(name):
+    """Info di una lezione, memoizzate per mtime del pacchetto.
+
+    `lesson_info` fa rglob + stat su ogni file e rilegge e riparsa
+    lesson-data.js: con 20 lezioni da ~60 file erano ~1200 stat() e 15
+    riparse al minuto, solo perché il pannello fa refresh ogni 4 s.
+    """
+    d = BASE / name
+    try:
+        stamp = max((p.stat().st_mtime for p in d.rglob("*")), default=0.0)
+    except OSError:
+        stamp = 0.0
+    hit = _LESSON_INFO_CACHE.get(name)
+    if hit and hit[0] == stamp:
+        return hit[1]
     try:
         from tools.lesson_admin import lesson_info
-        return lesson_info(BASE, name)
+        info = lesson_info(BASE, name)
     except Exception:
-        l = BASE / name
-        return {"name": name, "title": name.replace("_lesson", ""),
+        info = {"name": name, "title": name.replace("_lesson", ""),
                 "size": 0, "duration": 0, "modified": 0}
+    _LESSON_INFO_CACHE[name] = (stamp, info)
+    return info
+
+
+_STATE_CACHE = {"at": 0.0, "data": None}
+_STATE_TTL = 15.0
 
 
 def _state():
+    """Snapshot completo del pannello, con cache breve.
+
+    L'interfaccia fa refresh ogni 4 s: senza cache, ogni poll ripagava un
+    rglob per lezione, due getaddrinfo per l'IP LAN e le dipendenze. La
+    cache viene invalidata esplicitamente a ogni upload/generazione.
+    """
+    now = time.time()
+    if _STATE_CACHE["data"] is not None and now - _STATE_CACHE["at"] < _STATE_TTL:
+        return _STATE_CACHE["data"]
     lessons = [_lesson_details(l.name) for l in list_lessons()]
     try:
         from tools.lesson_admin import list_archived
         archived = list_archived(BASE)
     except Exception:
         archived = []
-    return {
+    data = {
         "materials": _materials(), "lessons": lessons, "archived": archived,
         "singles": _single_files(), "deps": _deps(),
         "lan_ip": lan_ip(), "port": RUNTIME_PORT,
@@ -484,6 +593,8 @@ def _state():
                     "whisper_model")},
         "voices": EDGE_VOICES,
     }
+    _STATE_CACHE.update(at=now, data=data)
+    return data
 
 
 EDGE_VOICES = [
@@ -497,8 +608,7 @@ _VOICES_CACHE = {"at": 0.0, "names": None}
 
 def _edge_voices_live():
     """Lista voci it-IT dal servizio (cache 1h), fallback alla lista statica."""
-    import time as _t
-    if _VOICES_CACHE["names"] and _t.time() - _VOICES_CACHE["at"] < 3600:
+    if _VOICES_CACHE["names"] and time.time() - _VOICES_CACHE["at"] < 3600:
         return _VOICES_CACHE["names"]
     try:
         import asyncio
@@ -511,7 +621,7 @@ def _edge_voices_live():
         names = sorted(v["ShortName"] for v in vs
                        if str(v.get("Locale", "")).startswith("it"))
         if names:
-            _VOICES_CACHE.update(at=_t.time(), names=names)
+            _VOICES_CACHE.update(at=time.time(), names=names)
             return names
     except Exception:
         pass
@@ -522,6 +632,44 @@ def _loopback(handler):
     return handler.client_address[0] in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 
 
+# ------------------------------------------------- anti DNS-rebinding / CSRF
+# Gli host ammessi sono gli indirizzi di QUESTA macchina: il pannello è
+# raggiungibile in locale e in LAN, mai via un nome di dominio arbitrario.
+# Senza questo controllo un sito visitato dal docente può puntare il proprio
+# dominio a 127.0.0.1 (DNS-rebinding) e parlare con il pannello come se fosse
+# same-origin: il check su client_address passerebbe, perché la connessione
+# arriva davvero dal loopback.
+_HOSTS_CACHE = {"at": 0.0, "hosts": None}
+_HOSTS_TTL = 30.0
+
+
+def _allowed_hosts():
+    """Insieme (lowercase, senza porta) degli host che possono servire il
+    pannello: loopback + IP locali + IP fisso configurato."""
+    now = time.time()
+    cached = _HOSTS_CACHE["hosts"]
+    if cached is not None and now - _HOSTS_CACHE["at"] < _HOSTS_TTL:
+        return cached
+    hosts = {"localhost", "127.0.0.1", "::1", "[::1]"}
+    try:
+        fisso = str(CONFIG.get("lan_ip_fisso") or "").strip()
+        if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", fisso):
+            hosts.add(fisso)
+    except Exception:
+        pass
+    for ip in _local_ips():
+        hosts.add(ip)
+    # snapshot iniziale sempre incluso: se la rete salta, gli host già noti
+    # restano ammessi e il docente non rimane fuori dal pannello
+    hosts |= (cached or set())
+    _HOSTS_CACHE.update(at=now, hosts=hosts)
+    return hosts
+
+
+def _host_ok(handler):
+    return host_allowed(handler.headers.get("Host"), _allowed_hosts(), RUNTIME_PORT)
+
+
 # ------------------------------------------------------------------ handler
 class PanelHandler(_RangeHandler):
     """Serve: pannello + API (solo localhost) + lezioni (tutti, whitelist)."""
@@ -529,23 +677,39 @@ class PanelHandler(_RangeHandler):
     # -- API ------------------------------------------------------------------
     def _api(self, path, query):
         if path == "/api/classifica":
+            if not _loopback(self) and not self._teacher_allowed():
+                # dalla rete di classe i dati degli studenti (nome, puni) sono
+                # visibili solo con il PIN docente
+                self._reject(403, "PIN docente richiesto per la classifica.")
+                return
             return self._json(_classifica_view())
         if path == "/api/classifica_export":
+            if not _loopback(self) and not self._teacher_allowed():
+                self._reject(403, "PIN docente richiesto per l'export della classifica.")
+                return
             return self._classifica_export(query)
         if not _loopback(self):
-            self.send_error(403, "API riservate a localhost")
+            self._reject(403, "API riservate a localhost")
             return
         if path == "/api/state":
             return self._json(_state())
         if path == "/api/log":
-            elapsed = (time.time() - JOB["started_at"]) if JOB.get("started_at") and JOB["running"] else None
-            return self._json({"running": JOB["running"], "kind": JOB["kind"],
-                               "source": JOB["source"], "error": JOB["error"],
-                               "done_at": JOB["done_at"], "ok": JOB["ok"],
+            s = _JOBS.snapshot()          # copia coerente sotto lock
+            started = s.get("started_at")
+            elapsed = (time.time() - started) if started and s.get("running") else None
+            try:
+                cur = int((query.get("from", ["-1"])[0] or "-1"))
+            except (TypeError, ValueError):
+                cur = -1
+            lines, total, truncated = LOG.since(cur)
+            return self._json({"running": s["running"], "kind": s["kind"],
+                               "source": s["source"], "error": s["error"],
+                               "done_at": s["done_at"], "ok": s["ok"],
                                "elapsed": round(elapsed, 1) if elapsed else None,
-                               "queued": len(QUEUE),
-                               "queue": [s for _, _, s in list(QUEUE)],
-                               "lines": list(LOG)[-200:]})
+                               "queued": len(s["queue"]),
+                               "queue": s["queue"],
+                               "cursor": total, "truncated": truncated,
+                               "lines": lines})
         if path == "/api/build":
             return self._start(self._parse_build())
         if path == "/api/reaudio":
@@ -616,6 +780,22 @@ class PanelHandler(_RangeHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _reject(self, status, reason):
+        """Rifiuta la richiesta svuotando prima il body: se il corpo resta
+        nel buffer della connessione keep-alive, la richiesta successiva su
+        quella socket legge spazzatura e la sessione HTTP si corrompe."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if 0 < length <= 8 * 1024 * 1024:
+                self.rfile.read(length)
+        except Exception:
+            self.close_connection = True
+        self.close_connection = True
+        self._json({"ok": False, "error": reason}, status)
+
+    def _origin_ok(self):
+        return same_origin_post(self.headers, _allowed_hosts())
 
     def _read_json_body(self):
         length = int(self.headers.get("Content-Length") or 0)
@@ -833,9 +1013,10 @@ class PanelHandler(_RangeHandler):
 
     def _start_reaudio(self, query):
         name = query.get("lesson", [None])[0] or ""
-        lesson = BASE / name
-        if not name or not lesson.is_dir() or not (lesson / "index.html").exists():
-            self.send_error(400, "Lezione non trovata")
+        try:
+            lesson = self._check_lesson(name)
+        except ValueError as e:
+            self._json({"ok": False, "error": str(e)}, 400)
             return
         import new_lesson
         started, queued = start_job(lambda: new_lesson.regen_audio_lesson(str(lesson)),
@@ -847,9 +1028,10 @@ class PanelHandler(_RangeHandler):
 
     def _export_single(self, query):
         name = query.get("lesson", [None])[0] or ""
-        lesson = BASE / name
-        if not name or not lesson.is_dir() or not (lesson / "index.html").exists():
-            self.send_error(400, "Lezione non trovata")
+        try:
+            lesson = self._check_lesson(name)
+        except ValueError as e:
+            self._json({"ok": False, "error": str(e)}, 400)
             return
         try:
             from export_single import export_single
@@ -931,44 +1113,45 @@ class PanelHandler(_RangeHandler):
         index = int(data.get("index", -1))
         patch = data.get("patch") or {}
         import new_lesson
-        out, payload = new_lesson.load_lesson(str(lesson))
-        slides = payload["slides"]
-        if not (0 <= index < len(slides)):
-            raise ValueError("Indice slide fuori range")
-        clean = new_lesson.validate_slide_edit(index, patch)
-        s = slides[index]
-        narration_changed = False
-        if "title" in clean:
-            s["title"] = clean["title"]
-            # aggiorna anche l'h1 del blocco se presente
-            for b in s.get("blocks", []):
-                if "h1" in b:
-                    b["h1"] = clean["title"]
-                    break
-        if "narration" in clean and clean["narration"] != s.get("narration"):
-            s["narration"] = clean["narration"]
-            narration_changed = True
-        if "quiz" in clean:
-            for b in s.get("blocks", []):
-                if "quiz" in b:
-                    if clean["quiz"] is None:
-                        s["blocks"].remove(b)
-                    else:
+        with new_lesson._lesson_lock():
+            out, payload = new_lesson.load_lesson(str(lesson))
+            slides = payload["slides"]
+            if not (0 <= index < len(slides)):
+                raise ValueError("Indice slide fuori range")
+            clean = new_lesson.validate_slide_edit(index, patch)
+            s = slides[index]
+            narration_changed = False
+            if "title" in clean:
+                s["title"] = clean["title"]
+                # aggiorna anche l'h1 del blocco se presente
+                for b in s.get("blocks", []):
+                    if "h1" in b:
+                        b["h1"] = clean["title"]
+                        break
+            if "narration" in clean and clean["narration"] != s.get("narration"):
+                s["narration"] = clean["narration"]
+                narration_changed = True
+            if "quiz" in clean:
+                for b in s.get("blocks", []):
+                    if "quiz" in b:
+                        if clean["quiz"] is None:
+                            s["blocks"].remove(b)
+                        else:
+                            q = clean["quiz"]
+                            b["quiz"] = {"q": q["domanda"],
+                                         "opts": [{"t": o["testo"], "ok": o["corretta"], "fb": ""}
+                                                  for o in q["opzioni"]],
+                                         "ok": "Esatto!", "ko": "Rileggi e riprova."}
+                        break
+                else:
+                    if clean["quiz"] is not None:
                         q = clean["quiz"]
-                        b["quiz"] = {"q": q["domanda"],
-                                     "opts": [{"t": o["testo"], "ok": o["corretta"], "fb": ""}
-                                              for o in q["opzioni"]],
-                                     "ok": "Esatto!", "ko": "Rileggi e riprova."}
-                    break
-            else:
-                if clean["quiz"] is not None:
-                    q = clean["quiz"]
-                    s.setdefault("blocks", []).append(
-                        {"quiz": {"q": q["domanda"],
-                                  "opts": [{"t": o["testo"], "ok": o["corretta"], "fb": ""}
-                                           for o in q["opzioni"]],
-                                  "ok": "Esatto!", "ko": "Rileggi e riprova."}})
-        new_lesson.save_lesson(str(out), payload)
+                        s.setdefault("blocks", []).append(
+                            {"quiz": {"q": q["domanda"],
+                                      "opts": [{"t": o["testo"], "ok": o["corretta"], "fb": ""}
+                                               for o in q["opzioni"]],
+                                      "ok": "Esatto!", "ko": "Rileggi e riprova."}})
+            new_lesson.save_lesson(str(out), payload)
         _invalidate_lessons_cache()
         self._json({"ok": True, "narration_changed": narration_changed,
                     "warning": ("Testo narrazione modificato: l'audio è invariato. "
@@ -1048,8 +1231,22 @@ class PanelHandler(_RangeHandler):
         self.wfile.write(body)
 
     # -- upload materiale -------------------------------------------------------
+    def _max_body_bytes(self):
+        """Tetto assoluto sul corpo della richiesta, indipendente da
+        `max_upload_mb`.
+
+        Prima era `MAX_UPLOAD_BYTES * 10 + 2 MB` e `max_upload_mb` era
+        ammesso fino a 1000 dalla UI: una singola richiesta poteva chiedere
+        ~10 GB, tutto bufferizzato in un bytearray (con il `body.split()` che
+        lo duplicava). ThreadingHTTPServer non ha pool: bastava una manciata di
+        richieste per esaurire la RAM. Qui il limite per-corpo resta legato
+        alla config, ma con un soffitto assoluto.
+        """
+        return min(MAX_UPLOAD_BYTES * 10 + 2 * 1024 * 1024, MAX_BODY_BYTES)
+
     def _read_limited(self, length):
         """Lettura a chunk 64KB con limite: evita un singolo read() enorme."""
+        cap = self._max_body_bytes()
         buf = bytearray()
         remaining = length
         while remaining > 0:
@@ -1058,9 +1255,10 @@ class PanelHandler(_RangeHandler):
                 break
             buf.extend(chunk)
             remaining -= len(chunk)
-            if len(buf) > MAX_UPLOAD_BYTES * 10 + 2 * 1024 * 1024:
+            if len(buf) > cap:
                 raise _UploadTooBig(
-                    f"Caricamento troppo grande: massimo {MAX_UPLOAD_MB} MB per file e 10 file per richiesta.")
+                    f"Caricamento troppo grande: massimo {MAX_UPLOAD_MB} MB per file "
+                    f"e {UPLOAD_FILES_PER_REQUEST} file per richiesta.")
         return bytes(buf)
 
     def _parse_upload_body(self):
@@ -1069,16 +1267,17 @@ class PanelHandler(_RangeHandler):
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0:
             raise ValueError("Richiesta senza corpo da caricare.")
-        if length > MAX_UPLOAD_BYTES * 10 + 2 * 1024 * 1024:
+        if length > self._max_body_bytes():
             raise _UploadTooBig(
-                f"Caricamento troppo grande: massimo {MAX_UPLOAD_MB} MB per file e 10 file per richiesta.")
+                f"Caricamento troppo grande: massimo {MAX_UPLOAD_MB} MB per file "
+                f"e {UPLOAD_FILES_PER_REQUEST} file per richiesta.")
         from tools.multipart import parse_multipart
         return parse_multipart(self._read_limited(length), ctype)
 
     def _upload(self):
         files = self._parse_upload_body()
-        if len(files) > 10:
-            raise ValueError("Carica al massimo 10 file per volta.")
+        if len(files) > UPLOAD_FILES_PER_REQUEST:
+            raise ValueError(f"Carica al massimo {UPLOAD_FILES_PER_REQUEST} file per volta.")
         saved = []
         for raw_name, data in files:
             saved.append(self._save_uploaded_file(raw_name, data))
@@ -1103,6 +1302,9 @@ class PanelHandler(_RangeHandler):
 
     # -- GET ------------------------------------------------------------------
     def do_GET(self):
+        if not _host_ok(self):
+            self._reject(403, "Host non consentito.")
+            return
         parsed = urllib.parse.urlparse(self.path)
         path, query = parsed.path, urllib.parse.parse_qs(parsed.query)
         if path.startswith("/api/"):
@@ -1122,30 +1324,28 @@ class PanelHandler(_RangeHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        # anti-traversal: decodifica, blocca .., \ e verifica path risolto dentro BASE
+        # anti-traversal: guardia CONDIVISA con start_lesson (era duplicata
+        # qui con criteri leggermente diversi: due implementazioni da tenere
+        # allineate, con drift garantito)
+        target = safe_request_path(path, BASE)
+        if target is None:
+            self.send_error(404, "Non disponibile")
+            return
         try:
-            dec = urllib.parse.unquote(path)
+            parts = [p for p in urllib.parse.unquote(path).strip("/").split("/") if p]
         except Exception:
             self.send_error(404, "Non disponibile")
             return
-        if "\x00" in dec or "\\" in dec:
-            self.send_error(404, "Non disponibile")
-            return
-        parts = [p for p in dec.strip("/").split("/") if p]
-        if parts and ".." in parts:
-            self.send_error(404, "Non disponibile")
-            return
         first = parts[0] if parts else ""
-        if first and first not in _allowed_lesson_names() and first not in _allowed_single_names():
-            self.send_error(404, "Non disponibile")
-            return
-        if parts:
+        if first:
+            # valutati UNA volta sola: la whitelist cambia a ogni rigenerazione
+            names = _allowed_lesson_names()
+            if first not in names and first not in _allowed_single_names():
+                self.send_error(404, "Non disponibile")
+                return
             try:
-                target = (BASE / "/".join(parts)).resolve()
-                # deve restare dentro BASE
-                target.relative_to(BASE.resolve())
                 # se first è una lezione, deve restare dentro BASE/first
-                if first in _allowed_lesson_names():
+                if first in names:
                     target.relative_to((BASE / first).resolve())
             except Exception:
                 self.send_error(404, "Non disponibile")
@@ -1153,13 +1353,31 @@ class PanelHandler(_RangeHandler):
         super().do_GET()
 
     def do_POST(self):
+        if not _host_ok(self):
+            self._reject(403, "Host non consentito.")
+            return
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/classifica":
             # UNA SOLA API aperta alla LAN: gli studenti inviano il risultato
-            # del percorso (nessun dato sensibile, valori sanitized e limitati)
+            # del percorso (nessun dato sensibile, valori sanitized e limitati).
+            # Resta comunque soggetta al controllo origine: altrimenti un
+            # qualsiasi sito potrebbe far inviare righe arbitrarie.
+            if not self._origin_ok():
+                self._reject(403, "Origine non consentita.")
+                return
             return self._classifica_post()
         if not _loopback(self):
-            self.send_error(403, "API riservate a localhost")
+            self._reject(403, "API riservate a localhost")
+            return
+        if not self._origin_ok():
+            self._reject(403, "Origine non consentita.")
+            return
+        # Ogni POST reached è una mutazione: se il docente ha impostato un PIN
+        # (impostazioni -> "PIN docente"), viene richiesto per TUTTE, non solo
+        # per due endpoint. Con PIN vuoto l'unica protezione resta il loopback,
+        # quindi l'installazione predefinita non cambia comportamento.
+        if not self._teacher_allowed():
+            self._reject(403, "PIN docente non valido.")
             return
         if parsed.path == "/api/build":
             if not _rate_ok(self.client_address[0]):
@@ -1264,11 +1482,20 @@ class PanelHandler(_RangeHandler):
         elif parsed.path == "/api/clear_history":
             _history_clear()
             self._json({"ok": True})
+        elif parsed.path == "/api/refresh_player":
+            # Il player (CSS/JS/SW) e' scritto come file statici dentro ogni
+            # cartella lezione e non si aggiorna da solo quando si modifica
+            # tools/player_template.py: senza questo pulsante gli studenti
+            # continuano a vedere una versione vecchia. Non tocca audio,
+            # sottotitoli o contenuti.
+            import rigenera_player
+
+            rigenera_player.rigenera(BASE, log=lambda m: _log(m))
+            _invalidate_lessons_cache()
+            self._json({"ok": True,
+                        "messaggio": "Player aggiornato in tutte le lezioni."})
         elif parsed.path == "/api/reset_classifica":
-            if not _class_repo_authorized(CONFIG.get("pin_docente"),
-                                          self.headers.get("X-Teacher-Pin")):
-                self._json({"ok": False, "error": "PIN docente non valido."}, 403)
-                return
+            # PIN già verificato sopra per tutte le POST
             _classifica_reset()
             self._json({"ok": True})
         else:
@@ -1303,7 +1530,7 @@ class PanelHandler(_RangeHandler):
         rows = entry["rows"] if entry else []
         lines = ["posizione;studente;punti;percentuale;completata;tempo_min;quando"]
         for i, r in enumerate(rows):
-            lines.append(";".join(str(x) for x in (
+            lines.append(";".join(_csv_cell(x) for x in (
                 i + 1, r.get("studente", ""), f'{r.get("punti", 0)}/{r.get("totale", 0)}',
                 f'{r.get("pct", 0)}%', "si" if r.get("completata") else "no",
                 r.get("tempo_min", 0), r.get("t", ""))))

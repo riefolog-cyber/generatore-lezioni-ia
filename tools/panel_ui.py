@@ -180,6 +180,14 @@ transition:border-color .2s,background .2s}
       </select></label>
       <label>Obiettivo <select id="profObiettivo">
         <option value="auto" selected>Auto (misto per modulo)</option>
+        <option value="conoscenza">Conoscenza (riconoscere, definire)</option>
+        <option value="comprensione">Comprensione (spiegare, confrontare)</option>
+        <option value="applicazione">Applicazione (usare una regola)</option>
+        <option value="analisi">Analisi (distinguere, scomporre)</option>
+      </select></label>
+      <label>Accessibilità <select id="profAccess">
+        <option value="standard" selected>Standard</option>
+        <option value="bes">BES / DSA (meno opzioni, carico ridotto)</option>
       </select></label>
     </div>
     <details class="adv">
@@ -306,9 +314,12 @@ transition:border-color .2s,background .2s}
     <button class="bigbtn" id="btnFocusPick" type="button"
             title="Scegli la lezione da far vedere agli alunni: la vedranno intera, dall'inizio alla fine">📚 Scegli la lezione da mostrare</button>
     <div class="upmsg" id="focusNow" style="font-size:12px;margin-top:10px" hidden></div>
-    <h2 style="margin-top:14px">Cronologia generazioni
+    <h2 style="margin-top:14px">Manutenzione
+      <button class="mini" onclick="refreshPlayer()" type="button"
+              title="Riscrive CSS, JavaScript e il service worker di tutte le lezioni già generate, senza toccare audio o contenuti. Serve dopo un aggiornamento del player: senza, gli alunni continuano a vedere la versione precedente.">🎨 Aggiorna il player</button>
       <button class="mini ghost" onclick="clearHistory()" type="button" title="Cancella la cronologia generazioni">🗑 Svuota</button></h2>
     <div id="hist" style="margin-top:8px;font-size:12px;color:var(--mut)"><div>Nessun job ancora.</div></div>
+    <div id="maintMsg" style="margin-top:8px;font-size:12px"></div>
   </div>
 
 
@@ -393,10 +404,45 @@ let serverRetryStep = 0;
 const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 const escAttr = s => esc(s).replace(/`/g,'&#96;');
 
+// ---------------------------------------------------------------- PIN docente
+// Il PIN protegge TUTTE le operazioni che modificano qualcosa (non solo due
+// endpoint): viene mandato su ogni richiesta al pannello e, se il server lo
+// rifiuta, chiesto una volta sola e ricordato per la sessione.
+let TEACHER_PIN = '';
+try { TEACHER_PIN = sessionStorage.getItem('teacher-pin') || ''; } catch (e) {}
+
+function withPin(opts) {
+  opts = opts || {};
+  if (!TEACHER_PIN) return opts;
+  const h = Object.assign({}, opts.headers || {}, {'X-Teacher-Pin': TEACHER_PIN});
+  return Object.assign({}, opts, {headers: h});
+}
+
+async function askPin() {
+  const pin = prompt('Inserisci il PIN docente:');
+  if (pin === null) throw new Error('Operazione annullata.');
+  TEACHER_PIN = pin;
+  try { sessionStorage.setItem('teacher-pin', pin); } catch (e) {}
+  return pin;
+}
+
+async function pfetch(path, opts) {
+  // fetch con PIN + retry una volta se il server chiede il PIN.
+  opts = withPin(opts);
+  let r = await fetch(path, opts);
+  if (r.status !== 403) return r;
+  let msg = '';
+  try { msg = (await r.clone().json()).error || ''; } catch (e) {}
+  if (!/PIN docente/.test(msg)) return r;
+  await askPin();
+  opts = withPin(opts);
+  return fetch(path, opts);
+}
+
 async function api(path, opts) {
   let r;
   try {
-    r = await fetch('/api/' + path, opts);
+    r = await pfetch('/api/' + path, opts);
   } catch (e) {
     const err = new Error('Server non raggiungibile. Riavvia AVVIA.bat e attendi alcuni secondi.');
     err.offline = true;
@@ -428,17 +474,8 @@ function depChips(d) {
 }
 
 async function teacherPost(path, body) {
-  const send = pin => api(path, { method:'POST', headers:Object.assign(
-    {'Content-Type':'application/json'}, pin ? {'X-Teacher-Pin':pin} : {}),
-    body:JSON.stringify(body || {}) });
-  try { return await send(''); }
-  catch (e) {
-    if (!/PIN docente non valido/.test(e.message)) throw e;
-    const pin = prompt('Inserisci il PIN docente:');
-    if (pin === null) throw new Error('Operazione annullata.');
-    return send(pin);
-  }
-}
+  return api(path, { method: 'POST', headers: {'Content-Type': 'application/json'},
+                     body: JSON.stringify(body || {}) }); }
 
 async function loadSettings() {
   try {
@@ -464,6 +501,9 @@ $('#btnSaveSettings').onclick = async () => {
     if ($('#clearPin').checked) body.pin_docente = '';
     else if (pin && pin !== '••••') body.pin_docente = pin;
     const j = await teacherPost('settings', body);
+    if (body.pin_docente !== undefined) TEACHER_PIN = body.pin_docente || '';
+    else if (pin && pin !== '••••') TEACHER_PIN = pin;
+    try { sessionStorage.setItem('teacher-pin', TEACHER_PIN); } catch (e) {}
     msg.textContent = j.restart_required ? 'Salvate: riavvia per applicare la porta.' : '✓ Impostazioni salvate';
     msg.className = 'upmsg ok';
     refresh();
@@ -505,13 +545,7 @@ function exportClassifica() {
 }
 async function resetClassifica() {
   if (!confirm('Azzerare TUTTA la classifica di classe? I risultati degli studenti andranno persi.')) return;
-  let r = await fetch('/api/reset_classifica', { method: 'POST' });
-  if (r.status === 403) {
-    const pin = prompt('Inserisci il PIN docente per azzerare la classifica:');
-    if (pin === null) return;
-    r = await fetch('/api/reset_classifica', { method: 'POST',
-      headers: {'X-Teacher-Pin': pin} });
-  }
+  const r = await pfetch('/api/reset_classifica', { method: 'POST' });
   if (!r.ok) { alert('Svuotamento fallito: PIN non valido.'); return; }
   loadClassifica();
 }
@@ -621,12 +655,14 @@ function addLog(lines) {
 }
 
 async function pollLog() {
-  let last = 0;
+  // cursore MONOTONO assoluto fornito dal server: prima si indicizzava
+  // s.lines (finestra scorrevole di 200 righe dentro un deque di 500), quindi
+  // in ogni build lunga le righe saltavano o comparivano due volte.
+  let cursor = -1;
   for (;;) {
-    const s = await api('log');
-    const lines = s.lines.slice(last);
-    last = s.lines.length;
-    if (lines.length) addLog(lines);
+    const s = await api('log?from=' + cursor);
+    if (s.lines && s.lines.length) addLog(s.lines);
+    if (s.cursor != null) cursor = s.cursor;
     const info = [];
     if (s.running && s.elapsed != null) info.push(s.elapsed + 's');
     if (s.queued) info.push('coda: ' + s.queued + (s.queue && s.queue[0] ? ' (' + s.queue[0] + ')' : ''));
@@ -651,19 +687,21 @@ async function startJob(path, payload) {
     const j = await api(path, { method: 'POST', headers: {'Content-Type': 'application/json'},
                      body: JSON.stringify(payload) });
     if (j.queued) addLog(['⏳ accodato: partirà dopo quello in corso']);
-    else await pollLog();
-  } catch (e) { addLog(['✗ ' + e.message]); await refresh(); return; }
+    // pollLog gira comunque, anche in coda: senza questo `busy` restava true
+    // per sempre e i pulsanti "Svuota coda" / "Annulla" morivano.
+    await pollLog();
+  } catch (e) { addLog(['✗ ' + e.message]); busy = false; await refresh(); }
 }
 
 async function startJobs(items, payloadFn) {
   for (const item of items) {
     await startJob('build', payloadFn(item));
-    if (busy) break;
+    if (busy) break;   // primo job partito (in coda o in corso): il resto dopo
   }
 }
 
 $('#btnCancelQ').onclick = async () => {
-  await fetch('/api/cancel_queue', { method: 'POST' });
+  await pfetch('/api/cancel_queue', { method: 'POST' });
 };
 $('#btnCancelJob').onclick = async () => {
   if (!confirm('Annullare la trascrizione audio attuale?')) return;
@@ -673,7 +711,8 @@ $('#btnCancelJob').onclick = async () => {
 
 function profilo() {
   return { durata: $('#profDurata').value, livello: $('#profLivello').value,
-           obiettivo: $('#profObiettivo').value };
+           obiettivo: $('#profObiettivo').value,
+           accessibilita: $('#profAccess').value };
 }
 
 async function gen(name) {
@@ -729,7 +768,7 @@ async function selectFocus(name) {
   // la lezione scelta diventa anche quella "in classe": il QR principale
   // della card Condividi punterà a lei, così alunni e docente sono allineati
   try {
-    const r = await fetch('/api/lesson_action', {
+    const r = await pfetch('/api/lesson_action', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ lesson: name, action: 'share' })
     });
@@ -805,8 +844,19 @@ async function refreshProg() {
 }
 async function clearHistory() {
   if (!confirm('Cancellare la cronologia generazioni?')) return;
-  await fetch('/api/clear_history', { method: 'POST' });
+  await pfetch('/api/clear_history', { method: 'POST' });
   loadLan();
+}
+async function refreshPlayer() {
+  if (!confirm('Riscrivere il player (grafica, script) di tutte le lezioni?\n\n'
+             + 'Audio, sottotitoli e contenuti non vengono toccati.')) return;
+  const m = $('#maintMsg');
+  m.textContent = 'Aggiorno il player…';
+  try {
+    const j = await teacherPost('refresh_player', {});
+    m.textContent = j.messaggio || 'Player aggiornato.';
+    refresh();
+  } catch (e) { m.textContent = '✗ ' + e.message; }
 }
 setInterval(() => { if (busy) refreshProg(); }, 2000);
 
@@ -995,7 +1045,7 @@ async function doUpload(andGenerate) {
   const fd = new FormData();
   pendingFiles.forEach(f => fd.append('file', f));
   try {
-    const r = await fetch('/api/upload', { method: 'POST', body: fd });
+    const r = await pfetch('/api/upload', { method: 'POST', body: fd });
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || ('Errore ' + r.status));
     const names = j.names || [j.name];
@@ -1009,7 +1059,7 @@ async function doUpload(andGenerate) {
       // generazione, così più materiali vengono preparati con una sola azione.
       busy = true;
       for (const name of names) {
-        const res = await fetch('/api/build', { method: 'POST', headers: {'Content-Type': 'application/json'},
+        const res = await pfetch('/api/build', { method: 'POST', headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({ source: name, force: $('#forceAll').checked,
             bozza: $('#bozzaAll').checked, single: $('#singleAll').checked,
             whisper: $('#whisperAudio').checked, profilo: profilo() }) });
@@ -1069,7 +1119,7 @@ $('#btnVoice').onclick = async () => {
   msg.hidden = true; au.hidden = true;
   msg.textContent = 'Sintesi…'; msg.hidden = false; msg.className = 'upmsg';
   try {
-    const r = await fetch('/api/tts_preview', { method: 'POST',
+    const r = await pfetch('/api/tts_preview', { method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ text: $('#voiceTxt').value, voice: $('#voiceSel').value, rate: $('#rateSel').value }) });
     if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || ('Errore ' + r.status)); }
@@ -1121,7 +1171,7 @@ async function saveEditor(reaudio) {
              ...(quiz ? { quiz } : {}) } };
   msg.textContent = 'Salvataggio…'; msg.hidden = false; msg.className = 'upmsg';
   try {
-    const r = await fetch('/api/save_slide', { method: 'POST',
+    const r = await pfetch('/api/save_slide', { method: 'POST',
       headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) throw new Error(j.error || ('Errore ' + r.status));
@@ -1129,7 +1179,7 @@ async function saveEditor(reaudio) {
     msg.className = 'upmsg ok';
     if (reaudio) {
       msg.textContent = '✔ Salvato. Rigenero audio slide…';
-      const r2 = await fetch('/api/reaudio_slide?lesson=' + encodeURIComponent(ED.lesson) + '&index=' + ED.idx, { method: 'POST' });
+      const r2 = await pfetch('/api/reaudio_slide?lesson=' + encodeURIComponent(ED.lesson) + '&index=' + ED.idx, { method: 'POST' });
       const j2 = await r2.json().catch(() => ({}));
       if (!r2.ok) throw new Error(j2.reason || j2.error || ('Errore ' + r2.status));
       busy = true; pollLog();
@@ -1141,7 +1191,7 @@ async function saveEditor(reaudio) {
 async function moveEditor(d) {
   const to = ED.idx + d;
   if (to < 0 || to >= ED.slides.length) return;
-  const r = await fetch('/api/move_slide', { method: 'POST', headers: {'Content-Type': 'application/json'},
+  const r = await pfetch('/api/move_slide', { method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ lesson: ED.lesson, from: ED.idx, to }) });
   if (!r.ok) { alert('Spostamento fallito'); return; }
   ED.idx = to; openEditor(ED.lesson);
@@ -1149,7 +1199,7 @@ async function moveEditor(d) {
 async function addEditor() {
   const t = prompt('Titolo nuova slide:'); if (t === null) return;
   const n = prompt('Narrazione (voce legge questo testo):') || '';
-  const r = await fetch('/api/add_slide', { method: 'POST', headers: {'Content-Type': 'application/json'},
+  const r = await pfetch('/api/add_slide', { method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ lesson: ED.lesson, title: t, narration: n }) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok || !j.ok) { alert('Aggiunta fallita: ' + (j.error || r.status)); return; }
@@ -1157,7 +1207,7 @@ async function addEditor() {
 }
 async function delEditor() {
   if (!confirm('Eliminare la slide ' + (ED.idx + 1) + '?')) return;
-  const r = await fetch('/api/delete_slide', { method: 'POST', headers: {'Content-Type': 'application/json'},
+  const r = await pfetch('/api/delete_slide', { method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ lesson: ED.lesson, index: ED.idx }) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok || !j.ok) { alert('Eliminazione fallita: ' + (j.error || r.status)); return; }

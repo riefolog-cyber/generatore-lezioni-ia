@@ -13,10 +13,51 @@ import logging.handlers
 import os
 import re
 import sys
+import tempfile
 import urllib.request
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent.parent
+
+
+def write_text_atomic(path, text):
+    """Scrive un file di testo senza mai lasciarlo a metà.
+
+    Scrive in un temporaneo nella stessa cartella e poi `os.replace`, che su
+    Windows e su POSIX è atomico: se il processo muore (o il PC si spegne)
+    durante la scrittura, il file di destinazione resta quello vecchio e
+    integro invece di essere troncato. Costo ~1 ms su NTFS.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".w-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def safe_join(base, rel):
+    """join di un percorso relativo VINCOLATO dentro `base`.
+
+    Ritorna None se il risultato uscirebbe dalla cartella base (path traversal
+    nei dati della lezione: `audio`, `caption`, ecc.).
+    """
+    if not rel:
+        return None
+    try:
+        p = (Path(base) / str(rel).lstrip("/\\")).resolve()
+        p.relative_to(Path(base).resolve())
+    except (ValueError, OSError):
+        return None
+    return p
 
 DEFAULT_CONFIG = {
     "llm_url": "http://localhost:20128/v1",
@@ -39,6 +80,14 @@ DEFAULT_CONFIG = {
     "num_moduli_max": 7,
     "porta": 8341,
     "max_upload_mb": 100,
+    # normalizzazione audio: prima erano numeri magici in new_lesson.py
+    # (2.8 parole/sec compariva 4 volte, i filtri ffmpeg erano scritti 3 volte)
+    "audio_lufs": -17,
+    "audio_true_peak": -1.5,
+    "audio_lra": 9,
+    "audio_fade_in_s": 0.04,
+    "audio_durata_minima_s": 2.0,
+    "parole_per_secondo": 2.8,
     "pin_docente": "",
     "llm_contesto_caratteri": 18000,
     "cache_max_mb": 300,
@@ -49,6 +98,7 @@ DEFAULT_CONFIG = {
     "profilo_durata": "standard",
     "profilo_livello": "intermedio",
     "profilo_obiettivo": "auto",
+    "profilo_accessibilita": "standard",
     # IP fisso mostrato come indirizzo LAN in classe (es. "192.168.0.2"):
     # utile con router senza internet, dove l'auto-rilevamento fallisce.
     # Vuoto = rilevamento automatico.
@@ -58,21 +108,27 @@ DEFAULT_CONFIG = {
 PROFILO_DURATE = ("breve", "standard", "approfondita")
 PROFILO_LIVELLI = ("base", "intermedio", "avanzato")
 PROFILO_OBIETTIVI = ("conoscenza", "comprensione", "applicazione", "analisi", "auto")
+PROFILO_ACCESSIBILITA = ("standard", "bes")
 
 
 def normalize_profilo(data):
-    """Valida il profilo lezione (durata/livello/obiettivo Bloom)."""
+    """Valida il profilo lezione (durata/livello/obiettivo Bloom/accessibilità)."""
     d = data if isinstance(data, dict) else {}
     durata = str(d.get("durata") or d.get("profilo_durata") or "standard").lower()
     livello = str(d.get("livello") or d.get("profilo_livello") or "intermedio").lower()
     obiettivo = str(d.get("obiettivo") or d.get("profilo_obiettivo") or "auto").lower()
+    access = str(d.get("accessibilita") or d.get("profilo_accessibilita")
+                 or "standard").lower()
     if durata not in PROFILO_DURATE:
         durata = "standard"
     if livello not in PROFILO_LIVELLI:
         livello = "intermedio"
     if obiettivo not in PROFILO_OBIETTIVI:
         obiettivo = "comprensione"
-    return {"durata": durata, "livello": livello, "obiettivo": obiettivo}
+    if access not in PROFILO_ACCESSIBILITA:
+        access = "standard"
+    return {"durata": durata, "livello": livello, "obiettivo": obiettivo,
+            "accessibilita": access}
 
 
 def _clamp_int(value, default, lo, hi):
@@ -83,16 +139,31 @@ def _clamp_int(value, default, lo, hi):
     return max(lo, min(hi, v))
 
 
+_CFG_CACHE = None  # (cfg, mtime, path) — ricalcolata solo se il file cambia
+
+
 def load_config():
-    cfg = dict(DEFAULT_CONFIG)
+    """Legge config.json. Il risultato è messo in cache per mtime del file:
+    è chiamata 13+ volte per build e ogni chiamata rileggeva e riparsava il
+    JSON. La semantica "leggi a caldo" resta: se il file cambia, la cache
+    viene invalidata al chiamante successivo."""
+    global _CFG_CACHE
     p = BASE / "config.json"
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    if _CFG_CACHE is not None and _CFG_CACHE[1] == mtime:
+        return _CFG_CACHE[0]
+
+    cfg = dict(DEFAULT_CONFIG)
     if p.exists():
         try:
             user = json.loads(p.read_text(encoding="utf-8"))
             if isinstance(user, dict):
                 cfg.update({k: v for k, v in user.items() if v is not None})
-        except Exception:
-            pass
+        except Exception as exc:  # config corrotto: si prosegue coi default, ma si dice
+            print(f"⚠ config.json non leggibile ({exc}): uso i valori predefiniti")
     # Override da variabili d'ambiente (Docker/CI senza toccare config.json)
     for env_key, cfg_key in (
         ("LLM_URL", "llm_url"), ("LLM_MODEL", "llm_model"),
@@ -108,7 +179,7 @@ def load_config():
     cfg["audio_bitrate"] = _clamp_int(cfg.get("audio_bitrate", 96), 96, 32, 320)
     cfg["porta"] = _clamp_int(cfg.get("porta", 8341), 8341, 1024, 65535)
     cfg["max_upload_mb"] = _clamp_int(
-        cfg.get("max_upload_mb", 100), 100, 1, 1000)
+        cfg.get("max_upload_mb", 100), 100, 1, 200)
     cfg["cache_max_mb"] = _clamp_int(cfg.get("cache_max_mb", 300), 300, 50, 2000)
     cfg["llm_contesto_caratteri"] = _clamp_int(
         cfg.get("llm_contesto_caratteri", 18000), 18000, 2000, 60000)
@@ -126,6 +197,7 @@ def load_config():
     prof = normalize_profilo(cfg)
     cfg["profilo_durata"], cfg["profilo_livello"], cfg["profilo_obiettivo"] = \
         prof["durata"], prof["livello"], prof["obiettivo"]
+    _CFG_CACHE = (cfg, mtime, p)
     return cfg
 
 
@@ -177,6 +249,7 @@ def setup_logging(name="lezioni", max_bytes=2 * 1024 * 1024, backup=3):
     if logger.handlers:
         return logger
     logger.setLevel(logging.INFO)
+    logger.propagate = False  # niente record duplicati sul root logger
     fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", "%Y-%m-%d %H:%M:%S")
     fh = logging.handlers.RotatingFileHandler(
         logfile, maxBytes=max_bytes, backupCount=backup, encoding="utf-8")
@@ -286,16 +359,16 @@ def validate_lesson(out_dir, slides):
         if s.get("audio") is None:
             errs.append(f"slide {i + 1}: audio mancante")
         else:
-            ap = out_dir / s["audio"][2:]
-            if not ap.exists():
+            ap = safe_join(out_dir, s["audio"])
+            if ap is None or not ap.exists():
                 errs.append(f"slide {i + 1}: file audio mancante {s['audio']}")
             elif s.get("duration", 0) <= 0:
                 errs.append(f"slide {i + 1}: durata non misurata")
             if s["audio"] in seen_audio:
                 errs.append(f"audio duplicato: {s['audio']}")
             seen_audio.add(s["audio"])
-            cap_rel = (s.get("caption") or "")[2:]
-            cp = out_dir / cap_rel if cap_rel else None
+            cap_rel = s.get("caption") or ""
+            cp = safe_join(out_dir, cap_rel) if cap_rel else None
             if not cap_rel or not cp.exists():
                 errs.append(f"slide {i + 1}: sottotitoli mancanti {s.get('caption')}")
             elif cp.stat().st_size < 20:
@@ -342,9 +415,9 @@ def write_report(out_dir, errs, stats, extra=None):
     html = f"""<!DOCTYPE html><html lang="it"><meta charset="utf-8">
 <title>Report — {esc(out_dir.name)}</title>
 <body style="font-family:sans-serif;max-width:720px;margin:2rem auto;background:#0d1420;color:#eaf1ff">
-<h1>{stato}</h1><h2>{out_dir.name}</h2>
+<h1>{stato}</h1><h2>{esc(out_dir.name)}</h2>
 <table border="1" cellpadding="6">{rows}</table>
 <h3>Dettagli</h3>{err_html}{extra_html}
 <p>Apri <a href="index.html" style="color:#4f8cff">index.html</a> per vedere la lezione.</p>
 </body></html>"""
-    (out_dir / "report.html").write_text(html, encoding="utf-8")
+    write_text_atomic(out_dir / "report.html", html)

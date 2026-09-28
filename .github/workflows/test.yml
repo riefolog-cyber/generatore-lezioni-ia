@@ -7,7 +7,38 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          # allineato alla versione di sviluppo (3.12): su 3.11 la suite passava
+          # e il progetto girava su 3.12, quindi i due ambienti divergevano
+          python-version: "3.12"
       - run: pip install -r requirements.txt -r requirements-extra.txt -r requirements-dev.txt
       - run: python -m pytest tests/ -q
       - run: python check_env.py
+
+  browser:
+    # I test di rendering (il foglio di stile che il browser applica davvero,
+    # la logica di valutazione con i click) NON possono essere saltati: se il
+    # browser manca il job deve fallire, altrimenti la regressione "pagina
+    # bianca" tornerebbe in circolo senza che nessuno se ne accorga.
+    # windows-latest ha Edge preinstallato.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt -r requirements-extra.txt -r requirements-dev.txt
+      - name: browser presente
+        run: |
+          $paths = @(
+            "C:\Program Files\Google\Chrome\Application\chrome.exe",
+            "C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            "C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+            "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+          )
+          $found = $paths | Where-Object { Test-Path $_ }
+          if (-not $found) { throw "Nessun Chrome/Edge: i test di rendering non girerebbero" }
+          Write-Host "Browser: $found"
+      - name: test di rendering
+        env:
+          CI_BROWSER_REQUIRED: "1"
+        run: python -m pytest tests/test_player_css.py tests/test_grading.py -q

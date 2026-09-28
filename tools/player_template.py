@@ -16,8 +16,12 @@ Uso:  write_player(out_dir, titolo, tema='dark'|'light')
 """
 import colorsys
 import hashlib
+import json
 import re
 from pathlib import Path
+
+from common import write_text_atomic
+
 
 # ------------------------------------------------------------- palette temi
 # Entrambe le palette finiscono nel CSS: il toggle del player cambia
@@ -28,27 +32,90 @@ THEMES = {
         'text': '#eaf1ff', 'muted': '#9db0d0', 'line': '#26365a',
         'cardsh': 'rgba(0, 0, 0, .45)',
         'dot': 'rgba(150, 178, 224, .08)',
-        'ok': '#3ddc84', 'ko': '#ff6b6b',
+        'ok': '#3ddc84', 'ko': '#ff6b6b', 'warn': '#ffd166',
     },
     'light': {
         'bg': '#eef2fb', 'bg2': '#e3eaf7', 'card': '#ffffff', 'card2': '#f1f5fd',
         'text': '#17233b', 'muted': '#5a6a8a', 'line': '#d5dff0',
         'cardsh': 'rgba(25, 45, 85, .14)',
         'dot': 'rgba(35, 65, 125, .07)',
-        'ok': '#128a4a', 'ko': '#d64545',
+        'ok': '#128a4a', 'ko': '#d64545', 'warn': '#8a5a00',
     },
 }
 
 
+def _srgb_lum(hexcolor):
+    """Luminanza relativa WCAG di un colore esadecimale."""
+    c = hexcolor.lstrip('#')
+    if len(c) == 3:
+        c = ''.join(ch * 2 for ch in c)
+    try:
+        rgb = [int(c[i:i + 2], 16) / 255.0 for i in (0, 2, 4)]
+    except ValueError:
+        rgb = [0.5, 0.5, 0.5]
+    out = []
+    for v in rgb:
+        out.append(v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4)
+    return 0.2126 * out[0] + 0.7152 * out[1] + 0.0722 * out[2]
+
+
+def contrast_ratio(fg, bg):
+    """Rapporto di contrasto WCAG tra due colori esadecimali (1.0-21.0)."""
+    a, b = _srgb_lum(fg), _srgb_lum(bg)
+    hi, lo = max(a, b), min(a, b)
+    return (hi + 0.05) / (lo + 0.05)
+
+
 def _accent_from_title(titolo):
-    """Palette accent derivata dal titolo: ogni lezione ha la sua tinta."""
+    """Palette accent derivata dal titolo: ogni lezione ha la sua tinta.
+
+    Restituisce tre valori:
+      accent     — il colore decorativo: aurora, gradienti, bordi, bagliori
+      accent2    — la tinta complementare per i gradienti
+      accent-ink — il colore di TESTO da mettere SOPRA l'accent
+
+    Il principio: **la vivacità dipende dalla saturazione, la leggibilità dalla
+    luminosità**. Le due cose vanno regolate separatamente. Prima la versione
+    corretta del contrasto fissava anche la saturazione a 0,5 durante
+    l'aggiustamento, e il verde acceso della lezione originale diventava
+    verdolino spento; l'altra estremità (saturation 0,88 fisso) dava pulsanti con
+    testo bianco a 1,53:1, illeggibili.
+
+    Qui si parte da una saturazione alta e si tocca SOLO la luminosità finché
+    il testo non raggiunge 4,5:1, scegliendo tra bianco e nero pieno (il nero
+    pieno dà più margine del grigio-azzurro del tema, quindi serve meno
+    schiacciamento del colore).
+    """
     h = int(hashlib.sha1((titolo or 'lezione').encode('utf-8')).hexdigest(), 16)
     hue = h % 360
-    r, g, b = colorsys.hls_to_rgb(hue / 360, 0.55, 0.88)
-    r2, g2, b2 = colorsys.hls_to_rgb(((hue + 40) % 360) / 360, 0.55, 0.88)
+    sat = 0.74                       # vivace, ma non neon: niente frange sui proiettori
+    lum = 0.62
+    r, g, b = colorsys.hls_to_rgb(hue / 360, lum, sat)
     a = '#%02x%02x%02x' % (int(r * 255), int(g * 255), int(b * 255))
+    r2, g2, b2 = colorsys.hls_to_rgb(((hue + 40) % 360) / 360, lum - 0.08, sat * 0.92)
     a2 = '#%02x%02x%02x' % (int(r2 * 255), int(g2 * 255), int(b2 * 255))
-    return a, a2
+
+    def _ink_su(colore):
+        """Tinta di testo leggibile su `colore`: bianco o nero, il migliore."""
+        return ('#ffffff', contrast_ratio('#ffffff', colore)) \
+            if contrast_ratio('#ffffff', colore) >= contrast_ratio('#000000', colore) \
+            else ('#000000', contrast_ratio('#000000', colore))
+
+    ink, best = _ink_su(a)
+    # Se nessuna delle due tinte raggiunge 4,5:1 si regola la LUMINOSITA' (e
+    # solo quella) finché non la raggiunge: la saturazione resta intatta, quindi
+    # il colore resta vivo.
+    if best < 4.5:
+        for _ in range(16):
+            # ogni passo allontana la luminosità dal punto di equilibrio (0,18)
+            lum = lum * 0.86 if lum > 0.18 else lum * 1.30
+            lum = min(0.94, max(0.04, lum))
+            r, g, b = colorsys.hls_to_rgb(hue / 360, lum, sat)
+            a = '#%02x%02x%02x' % (int(r * 255), int(g * 255), int(b * 255))
+            ink, best = _ink_su(a)
+            if best >= 4.5:
+                break
+    return a, a2, ink
 
 
 def _esc(s):
@@ -56,30 +123,68 @@ def _esc(s):
     return _html.escape(s or '', quote=True)
 
 
+def player_version():
+    """Impronta del player (JS + CSS + temi): cambia a ogni modifica del template.
+
+    Serve al service worker: il nome della cache porta questo numero, quindi a
+    ogni aggiornamento del player la vecchia cache viene eliminata invece di
+    continuare a servire una lezione (o un index.html) superati.
+
+    Il CSS entra nell'impronta con temi neutri, non con l'accent della lezione:
+    altrimenti ogni lezione avrebbe una cache diversa, e soprattutto un
+    ritocco di stile (che qui è successo: il contrasto dei pulsanti) non
+    cambierebbe nulla e la vecchia grafica resterebbe in cache.
+    """
+    global _PLAYER_VERSION
+    if _PLAYER_VERSION is None:
+        h = hashlib.sha1()
+        h.update(_js().encode('utf-8'))
+        h.update(repr(THEMES).encode('utf-8'))
+        h.update(_css(dict(THEMES['dark'], accent='#808080', accent2='#808080',
+                           accentink='#ffffff')).encode('utf-8'))
+        _PLAYER_VERSION = h.hexdigest()[:8]
+    return _PLAYER_VERSION
+
+
+_PLAYER_VERSION = None
+
+
 def _theme_block(name, t, accent):
-    """Un blocco CSS di variabili per un tema. `accent` è condiviso dai due temi."""
-    m = dict(t, accent=accent[0], accent2=accent[1])
+    """Un blocco CSS di variabili per un tema. `accent` è condiviso dai due temi.
+
+    `accent[2]` è `--accent-ink`: il colore di testo che garantisce almeno
+    4,5:1 sul pulsante con sfondo accent. Senza, il testo era bianco fisso e
+    su certi titoli il contrasto scendeva a 1,53:1.
+    """
+    m = dict(t, accent=accent[0], accent2=accent[1], accentink=accent[2])
     return (name + " {\n"
             + "  --bg:%(bg)s; --bg2:%(bg2)s; --card:%(card)s; --card2:%(card2)s;\n"
               "  --text:%(text)s; --muted:%(muted)s; --line:%(line)s; --cardsh:%(cardsh)s;\n"
-              "  --dot:%(dot)s; --ok:%(ok)s; --ko:%(ko)s;\n"
-              "  --accent:%(accent)s; --accent2:%(accent2)s;\n"
+              "  --dot:%(dot)s; --ok:%(ok)s; --ko:%(ko)s; --warn:%(warn)s;\n"
+              "  --accent:%(accent)s; --accent2:%(accent2)s; --accent-ink:%(accentink)s;\n"
             "}") % m
 
 
 def _css(t):
     dark, light = THEMES['dark'], THEMES['light']
-    return (_theme_block(":root, [data-theme=\"dark\"]", dark, (t['accent'], t['accent2']))
+    acc = (t['accent'], t['accent2'], t.get('accentink') or '#ffffff')
+    return (_theme_block(":root, [data-theme=\"dark\"]", dark, acc)
             + "\n"
-            + _theme_block("[data-theme=\"light\"]", light, (t['accent'], t['accent2']))
+            + _theme_block("[data-theme=\"light\"]", light, acc)
             + """
 /* ------------------------------------------------ base + sfondo aurora */
+/* testo solo per lettori di schermo */
+.sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; }
 body {
   color: var(--text);
   font-family: "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", sans-serif;
-  display: flex; flex-direction: column; min-height: 100vh;
+  display: flex; flex-direction: column;
+  /* 100dvh, non 100vh: sui browser mobili 100vh non include l'area sotto la
+     barra degli indirizzi, quindi i controlli in fondo finivano tagliati. */
+  min-height: 100vh; min-height: 100dvh;
   transition: background .35s ease, color .35s ease;
   background: var(--bg); overflow-x: hidden;
 }
@@ -90,6 +195,16 @@ body::before {
     radial-gradient(950px 600px at 104% 4%, var(--blob2), transparent 60%),
     radial-gradient(760px 520px at 50% 118%, var(--blob3), transparent 66%);
   animation: aurora 30s ease-in-out infinite alternate;
+  /* L'aurora sta DIETRO a tre backdrop-filter (header, barra audio, nav):
+     finché il gradiente si muove il blur deve rileggerlo e rifiltrarlo a
+     ogni frame, per sempre. Con `body.idle` (nessuna interazione da 2,5 s)
+     l'animazione si ferma: da 3 blur/frame continui a 0 su slide ferma. */
+  animation-play-state: running;
+  will-change: opacity;
+}
+body.idle body::before { animation-play-state: paused; }
+@media (prefers-reduced-motion: reduce) {
+  body::before { animation: none; }
 }
 body::after {
   content: ''; position: fixed; inset: 0; z-index: 0; pointer-events: none;
@@ -169,12 +284,15 @@ header .spacer { flex: 1; }
 #hdrop #accMenu { position: static; flex-direction: row; gap: 8px;
   border-top: 1px solid var(--line); padding-top: 8px; margin-top: 4px; }
 #pbar { position: relative; z-index: 5; height: 4px; background: color-mix(in srgb, var(--line) 55%, transparent); }
+/* scaleX invece di width: animare la LARGHEZZA forza il layout (reflow) a ogni
+   frame della transizione; scaleX resta sul compositorio. */
 #pfill {
-  height: 100%; width: 0%; border-radius: 0 4px 4px 0;
+  height: 100%; width: 100%; border-radius: 0 4px 4px 0;
   background: linear-gradient(90deg, var(--accent), var(--accent2));
   background-size: 200% 100%;
   animation: progshine 3s linear infinite;
-  transition: width .5s cubic-bezier(.2, .7, .3, 1);
+  transform: scaleX(0); transform-origin: left center;
+  transition: transform .5s cubic-bezier(.2, .7, .3, 1);
   box-shadow: 0 0 14px color-mix(in srgb, var(--accent) 60%, transparent);
 }
 @keyframes progshine {
@@ -192,7 +310,9 @@ main { position: relative; z-index: 1; flex: 1; display: flex; min-height: 0; }
   background: linear-gradient(165deg, var(--card) 0%, var(--card2) 135%);
   border: 1px solid color-mix(in srgb, var(--line) 85%, transparent);
   border-radius: 22px; padding: 34px 40px;
-  box-shadow: 0 30px 80px var(--cardsh),
+  /* 80px di blur su un elemento a tutto schermo: il paint della card costava
+     piu' del contenuto. 46px danno la stessa separazione visiva. */
+  box-shadow: 0 24px 46px var(--cardsh),
               0 2px 0 color-mix(in srgb, var(--accent) 22%, transparent) inset;
   transition: background .3s ease, border-color .3s ease;
 }
@@ -222,10 +342,26 @@ main { position: relative; z-index: 1; flex: 1; display: flex; min-height: 0; }
 }
 #slide h2::before { content: ''; width: 5px; height: 20px; border-radius: 3px;
   background: linear-gradient(var(--accent), var(--accent2)); }
-#slide p { font-size: 16px; line-height: 1.7; color: var(--text); margin: 8px 0; }
+/* ------------------------------------------------ leggibilità (proiettore)
+   Il corpo testo era 16px fissi: a 3 m da uno schermo da 55" equivalgono a
+   ~1,6 mm di altezza, cioè poco più di 5 mm — sotto la soglia di leggibilità
+   (la regola pratica è 1/30 dell'altezza dello schermo). Qui la dimensione
+   scala con la larghezza del viewport, così su un proiettore da 1920 px il
+   corpo passa a 21 px e su un tablet da 1024 px resta comodo.
+   `--slide-fs` è l'unica leva: i livelli di ingrandimento manuale (tasto F)
+   la moltiplicano, non la sovrascrivono. */
+:root { --slide-fs: var(--slide-fs-base); }
+#slide { font-size: var(--slide-fs); }
+/* lunghezza della riga: 940px di larghezza a 16px davano ~106 caratteri per
+   riga, oltre i 75 oltre i quali l'occhio perde il ritorno a inizio riga.
+   68ch con lo spazio di respiro del padding. */
+#slide p, #slide li, #slide blockquote, .scn .situ, .erra .brano, .vfq {
+  max-width: 68ch;
+}
+#slide p { font-size: 1em; line-height: 1.72; color: var(--text); margin: 8px 0; }
 .callout {
   display: inline-flex; align-items: center; gap: 8px;
-  font-size: 12px; font-weight: 800; letter-spacing: .09em;
+  font-size: .74em; font-weight: 800; letter-spacing: .09em;
   text-transform: uppercase; color: var(--accent);
   background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 15%, transparent),
     color-mix(in srgb, var(--accent2) 12%, transparent));
@@ -235,7 +371,7 @@ main { position: relative; z-index: 1; flex: 1; display: flex; min-height: 0; }
 .callout::before { content: '✦'; font-size: 11px; }
 #slide ul { margin: 12px 0 6px 6px; list-style: none; }
 #slide li {
-  font-size: 15.5px; line-height: 1.62; margin: 8px 0; padding-left: 26px; position: relative;
+  font-size: .97em; line-height: 1.65; margin: 8px 0; padding-left: 26px; position: relative;
 }
 #slide li::before {
   content: ''; position: absolute; left: 4px; top: .68em; width: 7px; height: 7px;
@@ -337,6 +473,13 @@ main { position: relative; z-index: 1; flex: 1; display: flex; min-height: 0; }
 .vfcard.answered::before { opacity: .9; }
 .vfq { font-size: 16px; font-weight: 600; margin-bottom: 12px; line-height: 1.5; padding-right: 6px; }
 .vfrow { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+/* non solo colore: lo stato porta anche un simbolo, cosic' funziona per chi
+   non distingue il rosso dal verde (daltonismo) e a bassa luminosita' */
+.vfbtn::after { font-size: 1.05em; font-weight: 900; }
+.vfbtn[data-ok="1"]::after { content: "✓"; color: var(--ok); }
+.vfbtn[data-ok="0"]::after { content: "✕"; color: var(--ko); }
+.vfbtn[data-ok="1"] { border-color: var(--ok); border-width: 2px; }
+.vfbtn[data-ok="0"] { border-color: var(--ko); border-width: 2px; }
 .vfbtn {
   display: flex; align-items: center; justify-content: center; gap: 8px;
   border: 1px solid var(--line); background: var(--card); color: var(--text);
@@ -398,7 +541,11 @@ main { position: relative; z-index: 1; flex: 1; display: flex; min-height: 0; }
 .fclabel { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); font-weight: 800; }
 .fcterm { font-weight: 800; font-size: 15.5px; margin-top: 8px; line-height: 1.35;
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-.fcdef { font-size: 12.5px; line-height: 1.5; margin-top: 8px; overflow: hidden; }
+/* la definizione completa si legge premendo: prima veniva tagliata a meta'
+   senza nessun indizio, quindi lo studente restava con una definizione
+   monca e non poteva sapere che il resto esisteva */
+.fcdef { font-size: 12.5px; line-height: 1.55; margin-top: 8px;
+  overflow-y: auto; max-height: 9em; }
 .fchint { margin-top: auto; font-size: 11px; color: var(--muted); font-style: italic; }
 .fcdots { display: flex; gap: 7px; justify-content: center; margin-top: 12px; }
 .fcdots span { width: 9px; height: 9px; border-radius: 50%; background: var(--line); cursor: pointer; transition: background .2s, transform .2s; }
@@ -411,9 +558,12 @@ main { position: relative; z-index: 1; flex: 1; display: flex; min-height: 0; }
 .fcverify { margin-top: 18px; border-top: 2px dashed var(--line); padding-top: 14px; display: flex; flex-direction: column; gap: 10px; }
 .fcverify > p { font-weight: 700; }
 .fcrow { display: grid; grid-template-columns: minmax(110px, 190px) 1fr; gap: 10px; align-items: center; }
+/* su telefono la griglia a due colonne schiacciava le opzioni a 100 px */
+@media (max-width: 560px) { .fcrow { grid-template-columns: 1fr; gap: 6px; } }
 .fcrow > .fcterm { margin: 0; font-size: 14px; }
 .fcrowopts { display: flex; gap: 7px; flex-wrap: wrap; }
-.opt.small { font-size: 12px; padding: 7px 11px; border-radius: 9px; text-align: left; }
+.opt.small { font-size: 12px; padding: 9px 12px; border-radius: 9px; text-align: left;
+  white-space: normal; line-height: 1.4; }
 
 /* ------------------------------------------------ glossario strutturato */
 .glos > p { font-weight: 600; }
@@ -477,7 +627,7 @@ main { position: relative; z-index: 1; flex: 1; display: flex; min-height: 0; }
 .cmpmsg.ko { color: var(--ko); }
 
 /* ------------------------------------------------ scenario decisionale */
-.scn .situ { font-size: 16px; line-height: 1.7; padding: 15px 18px; border-radius: 13px;
+.scn .situ { font-size: 1em; line-height: 1.72; padding: 15px 18px; border-radius: 13px;
   background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 10%, transparent),
     color-mix(in srgb, var(--accent2) 8%, transparent));
   border-left: 3px solid var(--accent); margin-bottom: 14px; font-weight: 500; }
@@ -507,7 +657,7 @@ main { position: relative; z-index: 1; flex: 1; display: flex; min-height: 0; }
   border-radius: 9px; padding: 9px 12px; font-size: 14px; cursor: pointer; font-weight: 600;
 }
 .erra .fixbox button {
-  border: none; background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff;
+  border: none; background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--accent-ink);
   border-radius: 10px; padding: 9px 18px; cursor: pointer; font-size: 14px; font-weight: 800;
   box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 40%, transparent);
   transition: transform .15s;
@@ -557,7 +707,7 @@ main { position: relative; z-index: 1; flex: 1; display: flex; min-height: 0; }
 }
 #btnPlay {
   width: 42px; height: 42px; border-radius: 50%; border: none; cursor: pointer;
-  background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff; font-size: 16px;
+  background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--accent-ink); font-size: 16px;
   flex: 0 0 auto; box-shadow: 0 4px 16px color-mix(in srgb, var(--accent) 45%, transparent);
   transition: transform .15s;
 }
@@ -569,19 +719,26 @@ main { position: relative; z-index: 1; flex: 1; display: flex; min-height: 0; }
   transition: border-color .2s, color .2s, box-shadow .2s, transform .15s;
 }
 .abar:hover { border-color: var(--accent); transform: translateY(-1px); }
-.abar.active { color: var(--accent); border-color: var(--accent);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent),
-              0 0 14px color-mix(in srgb, var(--accent) 35%, transparent); }
+/* stato attivo dei toggle: usato dai tasti velocita e play continuo */
+.abar.on { color: var(--accent-ink); background: var(--accent);
+  border-color: var(--accent); font-weight: 800; }
 #seek { flex: 1; height: 7px; border-radius: 4px;
   background: color-mix(in srgb, var(--line) 75%, transparent); position: relative; cursor: pointer;
   overflow: hidden; }
-#fill { position: absolute; inset: 0 auto 0 0; width: 0%; border-radius: 4px;
-  background: linear-gradient(90deg, var(--accent), var(--accent2)); }
+#fill { position: absolute; inset: 0; border-radius: 4px;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  transform: scaleX(0); transform-origin: left center; will-change: transform; }
 #tt { font-size: 12.5px; color: var(--muted); min-width: 92px; text-align: right;
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
-#cap { min-height: 22px; font-size: 14px; color: var(--muted); font-weight: 600;
+#cap { min-height: 22px; font-size: .82em; color: var(--muted); font-weight: 600;
   text-align: center; flex: 1; }
-@media (max-width: 760px) { #cap { display: none; } }
+/* I sottotitoli NON spariscono su schermi piccoli: sotto i 760 px passavano
+   a display:none, cioè lo studente su telefono restava senza la trascrizione
+   della lezione. Su schermi stretti vanno a capo, non eliminati. */
+@media (max-width: 760px) {
+  #cap { font-size: .78em; min-height: 32px; }
+  #audioBar { flex-wrap: wrap; }
+}
 #audioErr { color: var(--warn, #ffd166); font-size: 12px; font-weight: 600; flex: 0 0 auto;
   border: 1px solid color-mix(in srgb, var(--warn, #ffd166) 40%, transparent);
   border-radius: 999px; padding: 3px 10px;
@@ -590,7 +747,7 @@ main { position: relative; z-index: 1; flex: 1; display: flex; min-height: 0; }
   background: color-mix(in srgb, var(--warn, #ffd166) 16%, transparent);
   border: 1px solid color-mix(in srgb, var(--warn, #ffd166) 40%, transparent); font-size: 13px; font-weight: 700; }
 #audioUnlock[hidden] { display: none !important; }
-#audioUnlock button { border: none; background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff;
+#audioUnlock button { border: none; background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--accent-ink);
   border-radius: 8px; padding: 6px 12px; cursor: pointer; font-weight: 800; font-family: inherit; }
 
 /* ------------------------------------------------ ricerca */
@@ -624,9 +781,14 @@ main { position: relative; z-index: 1; flex: 1; display: flex; min-height: 0; }
   background: var(--card2); }
 
 /* ------------------------------------------------ accessibilità */
-html[data-fs="1"] #slide { font-size: 112%; }
-html[data-fs="2"] #slide { font-size: 126%; }
-html[data-fs="3"] #slide { font-size: 142%; }
+/* I livelli di ingrandimento moltiplicano `--slide-fs`: prima scrivevano
+   `font-size` in percentuale e sovrascrivevano la scala con il viewport,
+   quindi su proiettore ("livello 0") il testo restava illeggibile. */
+html[data-fs="1"] { --slide-fs: calc(var(--slide-fs-base) * 1.14); }
+html[data-fs="2"] { --slide-fs: calc(var(--slide-fs-base) * 1.30); }
+html[data-fs="3"] { --slide-fs: calc(var(--slide-fs-base) * 1.48); }
+:root { --slide-fs-base: clamp(16px, 0.95vw + 8px, 22px); }
+#slide { font-size: var(--slide-fs); }
 html[data-contrast="1"] { --text: #ffffff; --muted: #e6e6e6; --bg: #000000; --bg2: #0a0a0a;
   --card: #111111; --card2: #1a1a1a; --line: #555555; --accent: #ffd166; --accent2: #8ecaff; }
 html[data-contrast="1"] body { background: #000; }
@@ -658,9 +820,16 @@ html[data-contrast="1"] header, html[data-contrast="1"] nav, html[data-contrast=
 #examBanner { margin: 8px auto; max-width: 940px; padding: 9px 14px; border-radius: 10px;
   background: color-mix(in srgb, var(--warn) 13%, transparent); border: 1px solid var(--warn);
   color: var(--text); font-size: 13px; font-weight: 700; }
+/* Modalità esame: il banner promette "feedback nascosto fino alla fine", ma
+   nascondevano solo i TESTI: `.opt.correct`/.opt.wrong` restavano visibili, e
+   l'opzione giusta veniva evidenziata in verde a ogni domanda. In un test a
+   15 minuti le domande successive erano già state rivelate. */
 html[data-mode="exam"] .fb, html[data-mode="exam"] .vffb,
 html[data-mode="exam"] .seqmsg, html[data-mode="exam"] .cmpmsg,
 html[data-mode="exam"] .clmsg { display: none !important; }
+html[data-mode="exam"] .opt.correct, html[data-mode="exam"] .opt.wrong,
+html[data-mode="exam"] .chip.ok, html[data-mode="exam"] .chip.no { display: none !important; }
+html[data-mode="exam"] .opt .letter { color: inherit !important; }
 html[data-mode="exam"] #map { opacity: .35; pointer-events: none; }
 
 /* ------------------------------------------------ export docente */
@@ -676,8 +845,6 @@ html[data-mode="exam"] #map { opacity: .35; pointer-events: none; }
 .namerow input { border: 1.5px solid var(--line); background: var(--card2); color: var(--text);
   border-radius: 9px; padding: 9px 12px; font-size: 14px; font-family: inherit; min-width: 180px; }
 .namerow input:focus { border-color: var(--accent); outline: none; }
-.ripmsg { margin-top: 12px; font-size: 14px; font-weight: 700; color: var(--accent);
-  animation: rise .25s both; }
 
 /* ------------------------------------------------ nav */
 nav {
@@ -696,28 +863,28 @@ nav button {
 nav button:hover { border-color: var(--accent); }
 nav button.primary {
   background: linear-gradient(135deg, var(--accent), var(--accent2));
-  border: none; color: #fff; box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 40%, transparent);
+  border: none; color: var(--accent-ink); box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 40%, transparent);
 }
 nav button.primary:hover { transform: translateY(-2px); }
 nav button:disabled { opacity: .35; cursor: default; transform: none !important; box-shadow: none !important; }
 button:active:not(:disabled) { transform: scale(.96); }
 #dots { display: flex; gap: 7px; flex-wrap: wrap; justify-content: center; align-items: center; }
-#dots span { position: relative;
+#dots button { position: relative; padding: 0; border: none; font: inherit;
   width: 12px; height: 12px; border-radius: 50%;
   background: var(--line); background-clip: padding-box;
   border: 5px solid transparent; /* area di tocco allargata, pallino invariato */
   cursor: pointer; transition: background .2s, transform .2s, box-shadow .2s;
 }
-#dots span:hover { transform: scale(1.3); }
-#dots span.on {
+#dots button:hover { transform: scale(1.3); }
+#dots button.on {
   background: linear-gradient(135deg, var(--accent), var(--accent2));
   transform: scale(1.3);
   box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 60%, transparent);
 }
-#dots span.done { background: var(--ok); }
-#dots span.rv { box-shadow: 0 0 0 2px color-mix(in srgb, var(--ko) 75%, transparent); }
-#dots span.rv::after { content: '🔖'; position: absolute; top: -11px; right: -6px; font-size: 10px; }
-#dots span.done.on { background: linear-gradient(135deg, var(--accent), var(--accent2)); }
+#dots button.done { background: var(--ok); }
+#dots button.rv { box-shadow: 0 0 0 2px color-mix(in srgb, var(--ko) 75%, transparent); }
+#dots button.rv::after { content: '🔖'; position: absolute; top: -11px; right: -6px; font-size: 10px; }
+#dots button.done.on { background: linear-gradient(135deg, var(--accent), var(--accent2)); }
 
 /* streak: serie di risposte corrette consecutive */
 #streak.streak { color: #ff9f43; border-color: color-mix(in srgb, #ff9f43 50%, transparent);
@@ -734,7 +901,7 @@ button:active:not(:disabled) { transform: scale(.96); }
 }
 .modnav button:hover { border-color: var(--accent); color: var(--text); transform: translateY(-1px); }
 .modnav button.on {
-  color: #fff; border-color: transparent;
+  color: var(--accent-ink); border-color: transparent;
   background: linear-gradient(135deg, var(--accent), var(--accent2));
   box-shadow: 0 3px 12px color-mix(in srgb, var(--accent) 40%, transparent);
 }
@@ -770,7 +937,7 @@ button:active:not(:disabled) { transform: scale(.96); }
 }
 .fin .actrow button:hover { border-color: var(--accent); transform: translateY(-2px); }
 .fin .actrow button.primary {
-  border: none; color: #fff;
+  border: none; color: var(--accent-ink);
   background: linear-gradient(135deg, var(--accent), var(--accent2));
   box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 40%, transparent);
 }
@@ -781,7 +948,7 @@ button:active:not(:disabled) { transform: scale(.96); }
 .chal .sc { color: var(--accent); }
 .chal .start {
   border: none; cursor: pointer; margin: 6px 0; font-family: inherit;
-  background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--accent-ink);
   border-radius: 14px; padding: 13px 26px; font-size: 15px; font-weight: 800;
   box-shadow: 0 6px 22px color-mix(in srgb, var(--accent) 45%, transparent);
   transition: transform .15s;
@@ -819,6 +986,7 @@ button:active:not(:disabled) { transform: scale(.96); }
 .clmsg { margin-top: 10px; font-weight: 800; color: var(--ok); animation: rise .3s both; }
 @keyframes shakeX { 0%,100% { transform: translateX(0); } 25% { transform: translateX(-5px); } 75% { transform: translateX(5px); } }
 .clpill.shake { animation: shakeX .35s; border-color: var(--ko); }
+  /* il colore da solo non basta: lo shake e il bordo spesso segnalano l'errore */
 
 /* ------------------------------------------------ mappa del percorso */
 #map { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-start; justify-content: center;
@@ -827,15 +995,24 @@ button:active:not(:disabled) { transform: scale(.96); }
 #map .st { display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 74px; cursor: pointer; }
 #map .stico { width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center;
   justify-content: center; font-size: 16px; border: 2px solid var(--line); background: var(--card);
+  position: relative;
   transition: border-color .2s, box-shadow .2s, transform .2s; }
 #map .stlab { font-size: 10.5px; color: var(--muted); font-weight: 700; text-align: center; max-width: 100px; }
 #map .st.reached .stico { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 16%, transparent); }
-#map .st.now .stico { border-color: var(--accent); transform: scale(1.1);
-  animation: pulseS 1.6s ease-in-out infinite alternate; }
+/* pulseS su un pseudo-elemento, non su box-shadow: animare box-shadow
+   richiede un repaint dell'elemento e del suo alone a ogni frame, per sempre.
+   Sul pseudo-elemento dedicato è una questione di compositorio. */
+#map .st.now .stico { border-color: var(--accent); transform: scale(1.1); }
+#map .st.now .stico::after {
+  content: ''; position: absolute; inset: -3px; border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  animation: pulseS 1.6s ease-in-out infinite alternate;
+  pointer-events: none;
+}
 #map .st.now .stlab { color: var(--text); }
 @keyframes pulseS {
-  from { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent); }
-  to   { box-shadow: 0 0 0 5px color-mix(in srgb, var(--accent) 45%, transparent); }
+  from { opacity: .85; transform: scale(.9); }
+  to   { opacity: .35; transform: scale(1.25); }
 }
 
 /* ------------------------------------------------ badge */
@@ -865,7 +1042,7 @@ button:active:not(:disabled) { transform: scale(.96); }
 .bdcard .bdico { font-size: 26px; }
 .bdcard .bdnome { font-weight: 800; font-size: 13px; margin-top: 4px; }
 .bdcard .bddesc { font-size: 11px; color: var(--muted); margin-top: 2px; }
-.bdbox button.primary { border: none; color: #fff; border-radius: 10px; padding: 9px 18px;
+.bdbox button.primary { border: none; color: var(--accent-ink); border-radius: 10px; padding: 9px 18px;
   cursor: pointer; font-weight: 800; font-family: inherit;
   background: linear-gradient(135deg, var(--accent), var(--accent2)); }
 
@@ -900,9 +1077,28 @@ button:active:not(:disabled) { transform: scale(.96); }
 #slide > * { animation: rise .5s both; }
 #slide > *:nth-child(2) { animation-delay: .05s; }
 #slide > *:nth-child(3) { animation-delay: .1s; }
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* l'anello di focus usa --text, non --accent: sull'accent chiaro (tema light)
+   il contrasto dell'anello scendeva a 1,53:1 e l'indicatore di tastiera
+   diventava praticamente invisibile. --text è sempre >= 7:1 sul fondo. */
+:focus-visible { outline: 3px solid var(--text); outline-offset: 2px; }
+/* Coarse pointer = dito: sotto i 44px i bersagli di tocco sono troppo piccoli
+   per un bambino. Non si applica al mouse (pointer: fine), dove un bottone
+   piccolo è comodo. */
+@media (pointer: coarse) {
+  nav button, .opt, .vfbtn, .match .chip, .fcctrl button, .cmpmenu button,
+  .bdbox button, .fin button, .actrow button, .abar, #btnPlay,
+  #hdrop button, .accMenu button, #dots button, #fcard, .bdcard button {
+    min-height: 44px;
+  }
+  #dots button { min-width: 44px; }
+  .fcctrl button, .cmpmenu button, .bdbox button, .fin button,
+  .actrow button, .abar { padding: 11px 18px; }
+  #btnPlay { width: 48px; height: 48px; font-size: 19px; }
+  .match .chip { padding: 14px 16px; }
+}
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
+  html { scroll-behavior: auto !important; }
 }
 @media (max-width: 640px) {
   #slide { padding: 22px 20px; }
@@ -995,7 +1191,21 @@ function saveStreak() {
 let sessStart = Date.now(), sessMs = 0;
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) sessMs += Date.now() - sessStart; else sessStart = Date.now();
+  // scheda in secondo piano: aurora ferma, niente consumo a video acceso
+  document.body.classList.toggle('idle', document.hidden || isIdle());
 });
+// --- gating dell'aurora: si riattiva a ogni interazione, si ferma dopo 2,5 s
+let _idleTimer = null, _lastAct = Date.now();
+function isIdle() { return Date.now() - _lastAct > 2500; }
+function wake() {
+  _lastAct = Date.now();
+  document.body.classList.remove('idle');
+  clearTimeout(_idleTimer);
+  _idleTimer = setTimeout(() => document.body.classList.add('idle'), 2500);
+}
+['pointerdown', 'keydown', 'wheel', 'touchstart'].forEach(ev =>
+  document.addEventListener(ev, wake, { passive: true }));
+wake();
 let slideEnteredAt = Date.now(), lastAnswerAt = 0;
 var LOG = [];   // var: accessibile anche da console/test (window.LOG)
 function logAnswer(slideIdx, tipo, esito) {
@@ -1005,9 +1215,59 @@ function logAnswer(slideIdx, tipo, esito) {
              esito: !!esito,
              tempo: Math.round((now - (lastAnswerAt || slideEnteredAt)) / 1000) });
   lastAnswerAt = now;
+  // Segnalibro automatico su errore. Prima la slide finiva nel percorso di
+  // ripasso solo se lo studente premeva a mano 🔖: in una lezione da 40
+  // attività, le slide in cui aveva sbagliato restavano fuori dal ripasso,
+  // cioè il ripasso non guardava dove l'errore era avvenuto.
+  if (!esito && tipiAttivita(slideIdx)) markReview(slideIdx, true);
+}
+function tipiAttivita(i) {
+  return (slides[i] && slides[i].blocks || []).some(b =>
+    ACT_TYPES.some(t => b[t]) || (b.quiz && b.quiz.q));
 }
 let animDir = 'init', celebrated = false;
-const rate = 1;   // velocità fissa: il selettore 1× è stato rimosso
+// Velocità di riproduzione: LEGGIMI.md prometteva 0,8×/1×/1,25× ma il codice
+// aveva `const rate = 1` fisso e il selettore rimosso: la promessa non era
+// stata mantenuta. Serve anche come supporto BES/DSA (e in aula, per rivedere
+// un passaggio velocemente).
+// NOTA: le funzioni che toccano `audio` vengono richiamate piu' in basso,
+// DOPO `const audio = new Audio()`: dichiarate qui, il `audio.addEventListener`
+// would eseguirebbe prima dell'inizializzazione ("Cannot access 'audio' before
+// initialization") e l'intero player si fermava.
+const RATE_VALORI = [0.8, 1, 1.25, 1.5];
+let rateIdx = 1;
+try {
+  const salvata = +(localStorage.getItem(DATA_KEY + '-rate') || 1);
+  const k = RATE_VALORI.indexOf(salvata);
+  if (k >= 0) rateIdx = k;
+} catch (e) {}
+function applyRate() {
+  const r = RATE_VALORI[rateIdx];
+  const b = _safe('btnSpeed');
+  if (b) {
+    b.textContent = (r === 1 ? '1' : String(r)) + '×';
+    b.classList.toggle('on', r !== 1);
+    b.title = 'Velocita audio: ' + r + '× (clic per cambiare)';
+  }
+  try { localStorage.setItem(DATA_KEY + '-rate', String(r)); } catch (e) {}
+  if (typeof audio !== 'undefined' && audio) audio.playbackRate = r;
+}
+
+// Riproduzione continua: al termine dell'audio passa da solo alla slide
+// successiva. Promessa dal manuale e mai implementata: chi ascoltava senza
+// toccare lo schermo restava fermo sulla stessa slide.
+let autoNext = true;
+try { autoNext = localStorage.getItem(DATA_KEY + '-autonext') !== '0'; } catch (e) {}
+function applyAutoNext() {
+  const b = _safe('btnAuto');
+  if (b) {
+    b.classList.toggle('on', autoNext);
+    b.title = autoNext ? 'Riproduzione continua: attiva (alla fine l\'audio passa alla slide seguente)'
+                       : 'Riproduzione continua: spenta (resta sulla slide)';
+  }
+  try { localStorage.setItem(DATA_KEY + '-autonext', autoNext ? '1' : '0'); } catch (e) {}
+}
+
 var RIPASSO = [], RIPASSO_POS = 0;   // percorso di ripasso sulle slide segnalate 🔖
 let lastSlideTime = null;            // per il tempo per slide del report docente
 const slideTimes = {};               // slide (0-based) -> ms trascorsi
@@ -1133,12 +1393,60 @@ function el(tag, cls, text) {
   if (text !== undefined) e.textContent = text;
   return e;
 }
+// Escape HTML per l'UNICO punto in cui il player scrive markup costruito
+// (la stampa del report). Tutto il resto passa da el() -> textContent, quindi
+// non è iniettabile: qui invece si concatena dentro document.write, e i dati
+// (titolo della slide generato dall'LLM, nome dello studente da localStorage)
+// arrivano da sorgenti esterne.
+function escHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+// Cella CSV: neutralizza la formula injection (= + - @ iniziali).
+function csvCell(v) {
+  let s = String(v == null ? '' : v);
+  if (s && '=+-@\t\r'.indexOf(s[0]) >= 0) s = "'" + s;
+  return '"' + s.replace(/"/g, '""') + '"';
+}
 function shuffle(a) {
   for (let i = a.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [a[i], a[j]] = [a[j], a[i]];
   }
   return a;
+}
+// Ordine delle opzioni STABILE fra le visite alla stessa slide.
+// Prima shuffle() veniva rieseguito a ogni render(): lo studente rispondeva,
+// premeva Indietro e poi Avanti, e le opzioni erano in ordine diverso —
+// rispondeva alla posizione, non al contenuto. Il guard "la risposta giusta
+// non è sempre la prima" di shuffleOpts era vanificato proprio dal re-shuffle.
+// La cache è per (slide, blocco, tipo) e si invalida solo se i dati cambiano.
+const ORDER_CACHE = new Map();
+const ORDER_CACHE_MAX = 400;
+function stableOrder(idx, bidx, kind, n, factory) {
+  const key = idx + ':' + bidx + ':' + kind + ':' + n;
+  let v = ORDER_CACHE.get(key);
+  if (v === undefined) {
+    v = factory();
+    ORDER_CACHE.set(key, v);
+    // tetto di memoria: 400 voci sono ~400 array di 4-8 interi, qualche KB.
+    // NON si svuota a ogni cambio slide: farlo rimescolava le opzioni a ogni
+    // visita (il test `test_ordine_opzioni_stabile` lo intercetta).
+    if (ORDER_CACHE.size > ORDER_CACHE_MAX) {
+      ORDER_CACHE.delete(ORDER_CACHE.keys().next().value);
+    }
+  }
+  return v;
+}
+function blockKey(idx, bidx, kind) { return idx + ':' + bidx + ':' + kind; }
+function clearOrder(idx, bidx) {
+  // svuota SOLO il blocco modificato dal docente (salvataggio dal pannello
+  // editor), non gli altri
+  const pre = idx + ':' + bidx + ':';
+  for (const k of Array.from(ORDER_CACHE.keys())) {
+    if (k.startsWith(pre)) ORDER_CACHE.delete(k);
+  }
 }
 function shuffleOpts(opts) {
   const order = shuffle(opts.map((o, k) => k));
@@ -1154,11 +1462,31 @@ function shuffleOpts(opts) {
 
 // ------------------------------------------------------------ dots + stat
 const dots = $('#dots');
+// I pallini di navigazione erano <span> con onclick: irraggiungibili con la
+// tastiera, quindi la lezione non si poteva percorrere senza mouse. Ora sono
+// <button> con "roving tabindex": Tab entra nel gruppo una volta sola e le
+// frecce muovono la selezione, come in uno slider.
 slides.forEach((s, i) => {
-  const d = document.createElement('span');
+  const d = document.createElement('button');
+  d.type = 'button';
   d.title = (s.icon || '') + ' ' + s.title;
+  d.setAttribute('aria-label', 'Vai a: ' + (s.title || ('slide ' + (i + 1))));
+  d.tabIndex = i === cur ? 0 : -1;
   d.onclick = () => go(i);
   dots.appendChild(d);
+});
+dots.addEventListener('keydown', e => {
+  const k = e.key;
+  if (k !== 'ArrowRight' && k !== 'ArrowLeft' && k !== 'Home' && k !== 'End') return;
+  e.preventDefault();
+  let n = cur;
+  if (k === 'ArrowRight') n = Math.min(slides.length - 1, cur + 1);
+  else if (k === 'ArrowLeft') n = Math.max(0, cur - 1);
+  else if (k === 'Home') n = 0;
+  else n = slides.length - 1;
+  go(n);
+  const d = dots.children[cur];
+  if (d) { d.tabIndex = 0; d.focus(); }
 });
 function doneCount() {
   let n = 0;
@@ -1168,6 +1496,7 @@ function doneCount() {
 function paintDots() {
   [...dots.children].forEach((d, i) => {
     d.className = i === cur ? 'on' : (results[i] ? 'done' : '');
+    d.tabIndex = i === cur ? 0 : -1;
     if (review.has(i)) d.classList.add('rv');
   });
   const n = doneCount();
@@ -1235,23 +1564,63 @@ function grade(i) {
 // Punto d'aggancio per integrazioni esterne: non invia nulla di per sé.
 // Un adattatore può sostituire questo hook quando richiesto.
 function reportProgress(_p) { /* nessun invio esterno predefinito */ }
-function paintScore() {
-  let e = 0, t = 0;
+// Punteggio HONESTO: il denominatore è SEMPRE il totale delle attività.
+//
+// Prima le attività saltate venivano escluse dal denominatore
+// (`if (!attempted(i)) continue`): rispondere correttamente a 3 attività su 10
+// e ignorare le altre 7 dava 3/3 = 100% di precisione, medaglia d'oro e 5
+// stelle. Il numero che il docente leggeva come voto premiava la selezione,
+// non l'apprendimento. Ora:
+//   punti     = e / t   (t fisso: saltare costa 0 punti)
+//   precisione = e / tSvolte  (come va letta: "di quelle che hai provato")
+//   copertura  = tSvolte / t  (quanto hai percorso)
+function scoreMetrics() {
+  let e = 0, t = 0, tSvolte = 0, svolte = 0;
   for (const i of activeIdx) {
-    if (!attempted(i)) continue;
     const g = grade(i);
-    e += g.e; t += g.t;
+    t += g.t;
+    if (attempted(i)) { e += g.e; tSvolte += g.t; svolte++; }
   }
+  return {
+    e: e, t: t, tSvolte: tSvolte, svolte: svolte, totaleAtt: activeIdx.length,
+    pct: t ? Math.round(e / t * 100) : 0,
+    pctSvolte: tSvolte ? Math.round(e / tSvolte * 100) : 0,
+    copertura: t ? Math.round(tSvolte / t * 100) : 0,
+    completo: activeIdx.length > 0 && svolte >= activeIdx.length
+  };
+}
+// esito dell'esame finale, calcolato davvero (prima era solo una stringa
+// "soglia 70%" scritta nella slide, mai confrontata con nulla)
+function examMetrics() {
+  const idx = examIdx();
+  if (!idx.length) return null;
+  let e = 0, t = 0;
+  idx.forEach(i => { const g = grade(i); e += g.e; t += g.t; });
+  const svolte = idx.filter(i => attempted(i)).length;
+  const soglia = Math.ceil(t * 0.7);
+  return { e: e, t: t, svolte: svolte, totale: idx.length, soglia: soglia,
+           pct: t ? Math.round(e / t * 100) : 0, superato: e >= soglia };
+}
+function examIdx() {
+  const out = [];
+  for (let i = 0; i < slides.length; i++) {
+    if ((slides[i].blocks || []).some(b => b.quiz && b.quiz.exam)) out.push(i);
+  }
+  return out;
+}
+function paintScore() {
+  SCORE_REV++;
+  const M = scoreMetrics();
   const st = $('#score');
-  if (st && t > 0) { st.hidden = false; st.textContent = '⭐ ' + e + '/' + t; }
+  if (st && M.t > 0) { st.hidden = false; st.textContent = '⭐ ' + M.e + '/' + M.t; }
   else if (st) st.hidden = true;
   reportProgress(buildProgress());
   // streak: si aggiorna SOLO quando la slide completa è stata corretta (esito
   // affidabile); una slide errata o incompleta azzera la serie
   const sc = _safe('streak');
   if (sc) {
-    if (t > 0) {
-      STREAK.cur = e === t ? STREAK.cur + 1 : 0;
+    if (M.tSvolte > 0) {
+      STREAK.cur = M.e === M.tSvolte ? STREAK.cur + 1 : 0;
       if (STREAK.cur > STREAK.best) { STREAK.best = STREAK.cur; saveStreak(); }
     }
     if (STREAK.cur >= 2) { sc.hidden = false; sc.textContent = '🔥 ' + STREAK.cur + ' di fila'; }
@@ -1286,8 +1655,19 @@ function goRipasso() {
   }
 }
 
+// L'utente ha chiesto meno movimento? Allora niente animazioni in JS, niente
+// confetti, niente re-layout per misurare. Prima questa preferenza era rispettata
+// solo dal CSS: i confetti (JavaScript) partivano comunque, e il fallback
+// dell'animazione di ingresso forzava un reflow di tutti i blocchi a ogni slide.
+const REDUCED_MOTION = !!(window.matchMedia
+  && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
 // ------------------------------------------------------------ confetti
 function confetti() {
+  // 90 coriandoli a schermo intero, lanciati a ogni ritorno al pannello
+  // finale (il pannello si ri-costruiva a ogni visita).
+  if (REDUCED_MOTION || confetti._t) return;
+  confetti._t = true;
   const colors = ['#ffd166', '#ff6b6b', '#3ddc84', '#4d9fff', '#b983ff', '#ff9f43'];
   for (let i = 0; i < 90; i++) {
     const c = el('div', 'confetti');
@@ -1304,29 +1684,42 @@ function confetti() {
 // ------------------------------------------------------------ mappa del percorso
 // Le "stazioni" sono le aperture dei moduli (stesse di modnavBar): verde =
 // raggiunta, lampeggiante = dove sei ora. Un tacco su una stazione porta lì.
+// Le stazioni sono costruite UNA volta sola: la struttura non cambia mai,
+// cambiano solo le classi .reached/.now. Prima venivano ricreate a ogni
+// navigazione (~21 nodi + 8 closure per cambio slide).
+let _mapBuilt = false, _mapStations = null;
 function paintMap() {
   const map = _safe('map');
   if (!map) return;
-  map.innerHTML = '';
-  if (!MODNAV.length || slides.length < 6) return;   // percorsi brevi: niente mappa
-  MODNAV.forEach(m => {
-    const st = el('div', 'st');
-    const ico = el('div', 'stico', (slides[m.i] && slides[m.i].icon) || '📘');
-    st.appendChild(ico);
-    st.appendChild(el('div', 'stlab', 'M' + m.n + ' · ' + m.label.slice(0, 22)));
-    if (cur >= m.i) st.classList.add('reached');
-    if (cur === m.i) st.classList.add('now');
-    st.onclick = () => go(m.i);
-    st.title = m.label;
-    map.appendChild(st);
-  });
-  const stEnd = el('div', 'st');
-  stEnd.appendChild(el('div', 'stico', '🏁'));
-  stEnd.appendChild(el('div', 'stlab', 'Fine'));
-  if (cur === LAST) stEnd.classList.add('now');
-  else if (doneCount() === activeIdx.length && activeIdx.length) stEnd.classList.add('reached');
-  stEnd.onclick = () => go(LAST);
-  map.appendChild(stEnd);
+  if (!_mapBuilt) {
+    _mapBuilt = true;
+    _mapStations = [];
+    if (MODNAV.length && slides.length >= 6) {
+      MODNAV.forEach(m => {
+        const st = el('div', 'st');
+        st.appendChild(el('div', 'stico', (slides[m.i] && slides[m.i].icon) || '📘'));
+        st.appendChild(el('div', 'stlab', 'M' + m.n + ' · ' + m.label.slice(0, 22)));
+        st.onclick = () => go(m.i);
+        st.title = m.label;
+        map.appendChild(st);
+        _mapStations.push({ el: st, i: m.i });
+      });
+      const stEnd = el('div', 'st');
+      stEnd.appendChild(el('div', 'stico', '🏁'));
+      stEnd.appendChild(el('div', 'stlab', 'Fine'));
+      stEnd.onclick = () => go(LAST);
+      map.appendChild(stEnd);
+      _mapStations.push({ el: stEnd, i: LAST });
+    }
+    return;
+  }
+  if (!_mapStations || !_mapStations.length) return;
+  const finito = activeIdx.length > 0 && doneCount() === activeIdx.length;
+  for (let k = 0; k < _mapStations.length; k++) {
+    const s = _mapStations[k];
+    s.el.classList.toggle('now', cur === s.i);
+    s.el.classList.toggle('reached', s.i === LAST ? (cur === LAST || finito) : (cur >= s.i));
+  }
 }
 
 // ------------------------------------------------------------ badge collezionabili
@@ -1382,15 +1775,28 @@ function badgesGrid() {
 }
 function checkBadges() {
   const done = activeIdx.filter(i => attempted(i));
-  if (done.length >= 1) unlockBadge('primo');
+  // I badge che misuravano solo NAVIGAZIONE premiavano il click, non
+  // l'apprendimento: "prima risposta" si sblocava anche sbagliando, "a metà
+  // percorso" bastava aprire 5 attività, "fulmine" ricompensava la velocità
+  // (cioè l'andare a caso). Ora richiedono anche CORRETTEZZA.
+  if (done.length >= 1 && done.some(i => { const g = grade(i); return g.t > 0 && g.e > 0; }))
+    unlockBadge('primo');
   if (STREAK.cur >= 3) unlockBadge('serie3');
   if (STREAK.cur >= 5) unlockBadge('serie5');
-  if (activeIdx.length && done.length >= Math.ceil(activeIdx.length / 2)) unlockBadge('metà');
+  if (activeIdx.length && done.length >= Math.ceil(activeIdx.length / 2)) {
+    // metà percorso: almeno metà delle attività svolte, e almeno la metà giuste
+    let e = 0, t = 0;
+    done.forEach(i => { const g = grade(i); e += g.e; t += g.t; });
+    if (t > 0 && e >= t * 0.5) unlockBadge('metà');
+  }
   if (activeIdx.length && done.length === activeIdx.length) {
     unlockBadge('tutte');
-    if (done.every(i => { const g = grade(i); return g.t > 0 && g.e === g.t; })) unlockBadge('perfetto');
+    const allOk = done.every(i => { const g = grade(i); return g.t > 0 && g.e === g.t; });
+    if (allOk) unlockBadge('perfetto');
+    // "veloce" solo se il percorso è stato anche capito: 10 minuti con tutte
+    // le risposte corrette è padronanza, 10 minuti sbagliando è fortuna
     const totS = sessMs + (document.hidden ? 0 : Date.now() - sessStart);
-    if (totS < 10 * 60 * 1000) unlockBadge('veloce');
+    if (totS < 10 * 60 * 1000 && allOk) unlockBadge('veloce');
   }
 }
 function badgesSummary() {
@@ -1502,6 +1908,9 @@ function challengeWidget() {
 // ------------------------------------------------------------ export docente
 function buildExport() {
   const doneS = activeIdx.filter(i => attempted(i));
+  const M = scoreMetrics();
+  const EX = examMetrics();
+  const esameIdx = examIdx();
   let e = 0, t = 0;
   const perSlide = [];
   doneS.forEach(i => {
@@ -1510,12 +1919,36 @@ function buildExport() {
     perSlide.push({ slide: i + 1, titolo: slides[i].title || '', punti: g.e, totale: g.t });
   });
   const totMs = sessMs + (document.hidden ? 0 : Date.now() - sessStart);
+  // errori più frequenti per tipo di attività: il dato didatticamente più utile
+  // per il docente (su cosa sbaglia di più), prima assente dall'export
+  const perTipo = {};
+  LOG.forEach(r2 => {
+    const k = r2.tipo || '?';
+    perTipo[k] = perTipo[k] || { tipo: k, giuste: 0, sbagliate: 0 };
+    if (r2.esito) perTipo[k].giuste++; else perTipo[k].sbagliate++;
+  });
+  const errori = Object.values(perTipo).sort((a, b) => b.sbagliate - a.sbagliate);
   return { lezione: data.titolo, studente: studentName || 'Studente',
            data: new Date().toISOString().slice(0, 10),
-           attivita_svolte: doneS.length + '/' + activeIdx.length,
-           punti: e + '/' + t, precisione: (t ? Math.round(e / t * 100) : 0) + '%',
+           attivita_svolte: M.svolte + '/' + M.totaleAtt,
+           punti: M.e + '/' + M.t,
+           precisione: (M.t ? Math.round(M.e / M.t * 100) : 0) + '%',
+           precisione_sulle_svolte: (M.tSvolte ? Math.round(M.e / M.tSvolte * 100) : 0) + '%',
+           copertura: M.copertura + '%',
+           esame: EX ? { esito: EX.e + '/' + EX.t, pct: EX.pct + '%',
+                         soglia: EX.soglia + '/' + EX.t,
+                         superato: EX.superato, domande: EX.svolte + '/' + EX.totale } : null,
+           esame_ripreso: esameIdx.some(i => { const b2 = (slides[i].blocks || [])
+             .find(b3 => b3.quiz && b3.quiz.exam); return b2 && b2.quiz.ripresa; }),
+           // segnalibri "da rivedere": non saputi dal docente, che è il vuoto
+           // più grande dell'export
+           segnalibri: [...review].map(i => ({ slide: i + 1,
+             titolo: (slides[i] && slides[i].title) || '' })),
+           errori_per_tipo: errori,
            streak_record: STREAK.best,
-           tempo_min: Math.max(1, Math.round(totMs / 60000)),
+           // tempo reale: il minimo a 1 minuto gonfiava la classifica
+           // (3 secondi e 2 minuti risultavano identici)
+           tempo_min: Math.round(totMs / 60000 * 10) / 10,
            slide_corrente: cur + 1,
            per_slide: perSlide.map(p2 => {
              const ms = slideTimes[p2.slide - 1];
@@ -1525,20 +1958,15 @@ function buildExport() {
 }
 // Riepilogo compatto dei progressi, disponibile per adattatori esterni.
 function buildProgress() {
-  let e = 0, t = 0, done = 0;
-  for (const i of activeIdx) {
-    if (!attempted(i)) continue;
-    done++;
-    const g = grade(i);
-    e += g.e; t += g.t;
-  }
+  const M = scoreMetrics();
   const totMs = sessMs + (document.hidden ? 0 : Date.now() - sessStart);
-  return { done: done, total: activeIdx.length, punti: e, totale: t,
-           pct: t ? Math.round(e / t * 100) : 0,
-           completata: done >= activeIdx.length && activeIdx.length > 0,
-           slide: cur + 1, di: slides.length,
-           studente: studentName || 'Studente',
-           tempo_s: Math.round(totMs / 1000) };
+  return { done: M.svolte, total: M.totaleAtt, punti: M.e, totale: M.t,
+            pct: M.pct, pct_svolte: M.pctSvolte, copertura: M.copertura,
+            esame: examMetrics(),
+            completata: M.completo,
+            slide: cur + 1, di: slides.length,
+            studente: studentName || 'Studente',
+            tempo_s: Math.round(totMs / 1000) };
 }
 function downloadFile(name, content, mime) {
   const b = new Blob([content], { type: mime });
@@ -1555,26 +1983,29 @@ function perSlideCsv(R) {
 function exportReport(kind) {
   const R = buildExport();
   if (kind === 'csv') {
-    const csv = ['studente;slide;tipo;esito;tempo_s'].concat(
-      R.risposte.map(r2 => [r2.studente, r2.slide, r2.tipo, r2.esito ? '1' : '0', r2.tempo].join(';')))
+    const csv = ['"studente";"slide";"tipo";"esito";"tempo_s"'].concat(
+      R.risposte.map(r2 => [csvCell(r2.studente), csvCell(r2.slide), csvCell(r2.tipo),
+                           r2.esito ? '1' : '0', csvCell(r2.tempo)].join(';')))
       .concat(perSlideCsv(R)).join('\n');
-    downloadFile('report-' + R.studente.replace(/[^\w]+/g, '_') + '.csv', '\ufeff' + csv, 'text/csv;charset=utf-8');
+    downloadFile('report-' + R.studente.replace(/[^\w]+/g, '_') + '.csv', '﻿' + csv, 'text/csv;charset=utf-8');
   } else if (kind === 'json') {
     downloadFile('report-' + R.studente.replace(/[^\w]+/g, '_') + '.json',
       JSON.stringify(R, null, 2), 'application/json');
   } else if (kind === 'stampa') {
-    const rows = R.per_slide.map(p2 => '<tr><td>' + p2.slide + '</td><td>' + p2.titolo + '</td><td>' + p2.punti + '/' + p2.totale + '</td></tr>').join('');
+    const rows = R.per_slide.map(p2 => '<tr><td>' + escHtml(p2.slide) + '</td><td>'
+      + escHtml(p2.titolo) + '</td><td>' + escHtml(p2.punti) + '/' + escHtml(p2.totale)
+      + '</td></tr>').join('');
     const w = window.open('', '_blank');
-    w.document.write('<html><head><title>Report - ' + R.studente + '</title><style>'
+    w.document.write('<html><head><title>Report - ' + escHtml(R.studente) + '</title><style>'
       + 'body{font-family:Segoe UI,sans-serif;padding:28px;color:#111}'
       + 'h1{font-size:20px}table{border-collapse:collapse;width:100%;margin-top:12px}'
       + 'td,th{border:1px solid #ccc;padding:7px 10px;font-size:13px;text-align:left}'
       + 'th{background:#f3f3f3}</style></head><body>'
-      + '<h1>Report lezione - ' + R.lezione + '</h1>'
-      + '<p><b>Studente:</b> ' + R.studente + ' - <b>Data:</b> ' + R.data
-      + ' - <b>Tempo:</b> ' + R.tempo_min + ' min</p>'
-      + '<p><b>Attività svolte:</b> ' + R.attivita_svolte + ' - <b>Punti:</b> ' + R.punti
-      + ' - <b>Precisione:</b> ' + R.precisione + '</p>'
+      + '<h1>Report lezione - ' + escHtml(R.lezione) + '</h1>'
+      + '<p><b>Studente:</b> ' + escHtml(R.studente) + ' - <b>Data:</b> ' + escHtml(R.data)
+      + ' - <b>Tempo:</b> ' + escHtml(R.tempo_min) + ' min</p>'
+      + '<p><b>Attività svolte:</b> ' + escHtml(R.attivita_svolte) + ' - <b>Punti:</b> ' + escHtml(R.punti)
+      + ' - <b>Precisione:</b> ' + escHtml(R.precisione) + '</p>'
       + '<table><tr><th>Slide</th><th>Titolo</th><th>Punti</th></tr>' + rows + '</table>'
       + '<script>setTimeout(() => window.print(), 350)<\/script></body></html>');
     w.document.close();
@@ -1582,17 +2013,32 @@ function exportReport(kind) {
 }
 
 // ------------------------------------------------------------ pannello finale
+// Il pannello veniva ricostruito da zero a ogni visita all'ultima slide
+// (~100 nodi, ricomputazione di tutti i punteggi). Viene riusato finche' i
+// dati non cambiano: si invalida a ogni variazione di risultato.
+let _finishCache = null, _finishKey = '';
+// SCORE_REV aumenta a ogni ricalcolo del punteggio: la sola lunghezza di
+// `results` non basta, perché un risultato può cambiare da errato a giusto
+// senza che se ne aggiunga uno nuovo.
+let SCORE_REV = 0;
 function finishPanel() {
+  const key = SCORE_REV + '|' + slides.length;
+  if (_finishCache && _finishKey === key) return _finishCache;
+  _finishKey = key;
+  _finishCache = buildFinishPanel();
+  return _finishCache;
+}
+function buildFinishPanel() {
   const wrap = el('div', 'fin');
   const chal = challengeWidget();
   if (chal) wrap.appendChild(chal);
-  let done = 0, e = 0, t = 0;
-  for (const i of activeIdx) {
-    if (!attempted(i)) continue;
-    done++;
-    const g = grade(i);
-    e += g.e; t += g.t;
-  }
+  // metriche oneste: il denominatore è sempre il totale delle attività, e la
+  // copertura è mostrata SEPARATAMENTE. Prima, saltare un'attività la escludeva
+  // dal denominatore: 3 risposte giuste su 3 svolte (e 7 ignorate) davano 100%
+  // di precisione, medaglia d'oro e 5 stelle.
+  const M = scoreMetrics();
+  const EX = examMetrics();
+  const done = M.svolte, e = M.e, t = M.t, pct = M.pct;
   wrap.appendChild(el('div', 'callout', '🏁 Risultati del percorso'));
   if (activeIdx.length === 0) {
     wrap.appendChild(el('p', null, 'Questa lezione non ha attività interattive: navigala pure con Avanti.'));
@@ -1600,16 +2046,22 @@ function finishPanel() {
   }
   const row = el('div', 'sumrow');
   const c1 = el('div', 'sumcard');
-  c1.appendChild(el('div', 'big', done + ' / ' + activeIdx.length));
-  c1.appendChild(el('div', 'lab', 'attività svolte'));
+  c1.appendChild(el('div', 'big', e + ' / ' + t));
+  c1.appendChild(el('div', 'lab', 'punti conquistati'));
   const c2 = el('div', 'sumcard');
-  c2.appendChild(el('div', 'big', '⭐ ' + e + ' / ' + t));
-  c2.appendChild(el('div', 'lab', 'punti conquistati'));
-  const pct = t ? Math.round(e / t * 100) : 0;
+  c2.appendChild(el('div', 'big', pct + '%'));
+  c2.appendChild(el('div', 'lab', 'precisione sul totale'));
   const c3 = el('div', 'sumcard');
-  c3.appendChild(el('div', 'big', pct + '%'));
-  c3.appendChild(el('div', 'lab', 'precisione'));
+  c3.appendChild(el('div', 'big', done + ' / ' + M.totaleAtt));
+  c3.appendChild(el('div', 'lab', 'attività svolte'));
   row.appendChild(c1); row.appendChild(c2); row.appendChild(c3);
+  // esame finale: esito e soglia calcolati davvero
+  if (EX) {
+    const cx = el('div', 'sumcard ' + (EX.superato ? 'ok' : 'ko'));
+    cx.appendChild(el('div', 'big', EX.e + ' / ' + EX.t));
+    cx.appendChild(el('div', 'lab', 'esame (soglia ' + EX.soglia + ')'));
+    row.appendChild(cx);
+  }
   // serie record personale (streak) accanto alle altre statistiche
   if (STREAK.best >= 2) {
     const c4 = el('div', 'sumcard');
@@ -1618,18 +2070,26 @@ function finishPanel() {
     row.appendChild(c4);
   }
   wrap.appendChild(row);
-  const medal = el('div', 'medal', pct >= 90 ? '🥇' : pct >= 70 ? '🥈' : pct >= 50 ? '🥉' : '💪');
+  // medaglia e stelle solo se il percorso è stato davvero svolto tutto:
+  // altrimenti premiano chi ha risposto a meno domande
+  const completo = M.completo;
+  const medal = el('div', 'medal',
+    !completo ? '📖' : pct >= 90 ? '🥇' : pct >= 70 ? '🥈' : pct >= 50 ? '🥉' : '💪');
   wrap.appendChild(medal);
   const s = el('div', 'stars');
-  const filled = pct >= 90 ? 5 : pct >= 70 ? 4 : pct >= 50 ? 3 : 2;
+  const filled = !completo ? 0 : pct >= 90 ? 5 : pct >= 70 ? 4 : pct >= 50 ? 3 : 2;
   for (let i = 0; i < 5; i++) s.appendChild(el('span', i < filled ? '' : 'off', '⭐'));
   wrap.appendChild(s);
   const bsum = badgesSummary();
   if (bsum) wrap.appendChild(bsum);
   wrap.appendChild(el('p', null,
-    done < activeIdx.length
-      ? 'Hai completato ' + done + ' attività su ' + activeIdx.length + ': torna indietro e svolgi le altre per migliorare il risultato.'
-      : (pct >= 90 ? 'Percorso perfetto: padroni del tema! 🎉' : 'Hai completato tutte le attività: riascolta i moduli e riprova per punteggi migliori.')));
+    !completo
+      ? 'Hai svolto ' + done + ' attività su ' + M.totaleAtt + ' (' + M.copertura + '% del percorso). '
+        + 'Le stelle e la medaglia si sbloccano svolgendole tutte: tornare indietro e '
+        + 'completare le mancanti aumenta il punteggio.'
+      : (pct >= 90 ? 'Percorso completo e ottimo: padroni del tema! 🎉'
+                   : 'Percorso completo: hai svolto tutte le attività. '
+                     + 'Riascolta i moduli e riprova per un punteggio migliore.')));
   const acts = el('div', 'actrow');
   const again = el('button', 'primary', '🔄 Rigioca il percorso');
   if (again) again.onclick = () => { if (lessonMode === 'exam') return; results = {}; celebrated = false; const sc = _btn('score'); if (sc) sc.hidden = true; go(0); };
@@ -1659,7 +2119,8 @@ function finishPanel() {
             body: JSON.stringify({ lesson: window.LESSON_DIR, studente: p.studente,
                                    punti: p.punti, totale: p.totale,
                                    completata: p.completata,
-                                   tempo_min: Math.max(1, Math.round(p.tempo_s / 60)) }) });
+                                   copertura: p.copertura,
+                                   tempo_min: Math.round(p.tempo_s / 6) / 10 }) });
           const j = await r.json().catch(() => ({}));
           cbtn.textContent = (r.ok && j.ok) ? '✓ Inviato in classifica!' : '✗ Invio fallito (aperto da file? usa il server)';
         } catch (e) {
@@ -1689,7 +2150,11 @@ function finishPanel() {
   nmrow.appendChild(nmIn);
   wrap.appendChild(nmrow);
   wrap.appendChild(acts);
-  if (done >= activeIdx.length && !celebrated) {
+  // i coriandoli si scattano a percorso COMPLETO e con un punteggio
+  // decente: prima bastava aver aperto tutte le slide, quindi uno studente
+  // con 2 risposte giuste su 11 riceveva lo stesso spettacolo di chi ha
+  // capito tutto
+  if (done >= activeIdx.length && pct >= 50 && !celebrated) {
     celebrated = true;
     setTimeout(confetti, 350);
   }
@@ -1753,17 +2218,31 @@ function render(i) {
   box.style.animationTimingFunction = 'cubic-bezier(.2, .7, .3, 1)';
   if (s.icon) box.appendChild(el('div', 'icon', s.icon));
   if (s.banner) box.appendChild(el('div', 'banner', s.banner));
-  const blocks = (s.blocks || []).map(b => renderBlock(b, i));
+  // bidx = indice del blocco nella slide: serve a dare a ogni attività un
+  // proprio ordine stabile fra le visite (vedi stableOrder).
+  // I blocchi senza tipo riconosciuto restituiscono null: vanno scartati qui,
+  // altrimenti `b.style` su un nodo non-Elemento fa eccezione.
+  const blocks = (s.blocks || [])
+    .map((b, bi) => renderBlock(b, i, bi))
+    .filter(Boolean);
   blocks.forEach((b, k) => {
-    b.style.animationDelay = (k * 75) + 'ms';
+    // l'animazione di ingresso si applica solo se l'utente non ha chiesto
+    // riduzione del movimento: sotto prefers-reduced-motion ogni blocco leggeva
+    // offsetHeight (nel CSS `animation: none` faceva fallire l'animazione e il
+    // fallback forzava un reflow di tutti i blocchi a ogni cambio slide)
+    if (!REDUCED_MOTION) b.style.animationDelay = (k * 75) + 'ms';
     box.appendChild(b);
   });
   if (MODNAV.some(m => m.i === i)) {
     const nav = modnavBar(i);
-    nav.style.animation = 'rise .4s both';
+    if (!REDUCED_MOTION) nav.style.animation = 'rise .4s both';
     box.insertBefore(nav, box.firstChild);
   }
   if (i === LAST) box.appendChild(finishPanel());
+  // annuncia SOLO il titolo della slide al lettore di schermo
+  const ann = _safe('slideAnnounce');
+  if (ann) ann.textContent = (s.title || ('Slide ' + (i + 1))) + ' — '
+    + (i + 1) + ' di ' + slides.length;
   // quando la slide completa un'attività interattiva, riparte la lettura:
   // la voce accompagna anche il feedback (non solo la teoria)
   if (window.__attivo && !RIPASSO.length) {
@@ -1782,13 +2261,13 @@ function render(i) {
   const prog = _btn('prog');
   if (prog) prog.textContent = (i + 1) + ' / ' + slides.length;
   const pf = _btn('pfill');
-  if (pf) pf.style.width = ((i + 1) / slides.length * 100) + '%';
+  if (pf) pf.style.transform = 'scaleX(' + ((i + 1) / slides.length) + ')';
   paintDots();
   loadAudio(i, true);
   savePos();
 }
 
-function renderBlock(b, idx) {
+function renderBlock(b, idx, bidx) {
   if (b.callout) return el('div', 'callout', b.callout);
   if (b.h1) return el('h1', null, b.h1);
   if (b.h2) return el('h2', null, b.h2);
@@ -1804,17 +2283,31 @@ function renderBlock(b, idx) {
     b.list.forEach(it => ul.appendChild(el('li', null, it)));
     return ul;
   }
-  if (b.quiz) return blockQuiz(b.quiz, idx);
-  if (b.scenario) return blockScenario(b.scenario, idx);
+  if (b.quiz) return blockQuiz(b.quiz, idx, bidx);
+  if (b.scenario) return blockScenario(b.scenario, idx, bidx);
   if (b.vf) return blockVf(b.vf, idx);
-  if (b.seq) return blockSeq(b.seq, idx);
+  if (b.seq) return blockSeq(b.seq, idx, bidx);
   if (b.compila) return blockCompila(b.compila, idx);
-  if (b.errore) return blockErrore(b.errore, idx);
-  if (b.match) return blockMatch(b.match, idx);
+  if (b.errore) return blockErrore(b.errore, idx, bidx);
+  if (b.match) return blockMatch(b.match, idx, bidx);
   if (b.flashcards) return blockFlashcards(b.flashcards, idx);
   if (b.classifica) return blockClassify(b.classifica, idx);
   if (b.glossario) return blockGlossario(b.glossario, idx);
-  return document.createTextNode('');
+  // tipo di blocco sconosciuto (o vuoto): niente da mostrare.
+  // Restituiva un TextNode vuoto, che in render() finiva in
+  // `b.style.animationDelay` -> TypeError e slide BLANKCA.
+  return null;
+}
+
+// Scaffold progressivo: l'aiuto cresce con gli errori invece di comparire
+// tutto subito (o mai, com'era: esisteva solo in 1 attività su 11).
+function scaffolding(nErrori) {
+  const w = el('div', 'adapt');
+  const msg = nErrori <= 1
+    ? '💡 Quale parola della domanda ti ha tratto in inganno? Rileggila e prova di nuovo.'
+    : '💡 Quale concetto chiede esattamente la domanda? Torna al modulo e trova quel passaggio.';
+  w.appendChild(el('span', null, msg));
+  return w;
 }
 
 function answerFeedback(good, okTxt, koTxt, fbTxt) {
@@ -1824,12 +2317,14 @@ function answerFeedback(good, okTxt, koTxt, fbTxt) {
   return f;
 }
 
-function blockQuiz(q, idx) {
+function blockQuiz(q, idx, bidx) {
   const w = el('div', 'quiz');
   w.appendChild(el('q', null, q.q));
   // Ordine casuale coerente: la lettera segue la posizione mostrata e il
   // dataset conserva l'indice reale per valutare correttamente la risposta.
-  const order = shuffleOpts(q.opts);
+  // L'ordine è memorizzato per (slide, blocco): resta identico fra Indietro e
+  // Avanti, così lo studente risponde al contenuto e non alla posizione.
+  const order = stableOrder(idx, bidx, 'quiz', q.opts.length, () => shuffleOpts(q.opts));
   order.forEach((k, pos) => {
     const o = q.opts[k];
     const btn = el('button', 'opt');
@@ -1858,9 +2353,24 @@ function blockQuiz(q, idx) {
       fb.innerHTML = '';
       fb.appendChild(answerFeedback(good, q.ok, q.ko, opt.fb || ''));
       if (!good) {
-        const ad = el('div', 'adapt', '💡 Difficoltà? Torna alla slide del modulo per rileggere il passaggio, poi riprova al prossimo giro.');
+        // LA RISPOSTA GIUSTA CON LA SUA MOTIVAZIONE. Prima si mostrava solo
+        // il feedback dell'opzione sbagliata scelta: lo studente sapeva perché
+        // la sua era errata, ma non perché quella giusta è giusta — che è
+        // l'informazione che trasforma una risposta corretta in apprendimento.
+        const gi = q.opts.findIndex(o => o.ok);
+        const fbOk = el('div', 'fb ok giusto');
+        fbOk.appendChild(el('div', 'verdict', '✓ La risposta giusta: ' + q.opts[gi].t));
+        if (q.opts[gi].fb) fbOk.appendChild(el('div', 'item', q.opts[gi].fb));
+        fb.appendChild(fbOk);
+        // scaffolding progressivo: l'aiuto cresce con gli errori
+        fb.appendChild(scaffolding(1));
+        // il pulsante torna al MODULO di questo quiz, non alla slide
+        // precedente (dall'esame finale portava al glossario)
+        const ad = el('div', 'adapt', '💡 Vuoi rivedere il passaggio? Torna al modulo, rileggi e poi riprova.');
         const back = el('button', 'abar', '← Rileggi il modulo');
-        back.onclick = (e) => { e.stopPropagation(); try { go(Math.max(0, (typeof cur !== 'undefined' ? cur : 1) - 1)); } catch (_) {} };
+        const dest = (typeof q.modulo_slide === 'number' && q.modulo_slide >= 0)
+          ? q.modulo_slide : Math.max(0, idx - 1);
+        back.onclick = (e) => { e.stopPropagation(); go(dest); };
         ad.appendChild(back);
         w.appendChild(ad);
       }
@@ -1872,10 +2382,10 @@ function blockQuiz(q, idx) {
   return w;
 }
 
-function blockScenario(s, idx) {
+function blockScenario(s, idx, bidx) {
   const m = el('div', 'scn');
   m.appendChild(el('div', 'situ', s.situazione));
-  shuffleOpts(s.opts).forEach((k, pos) => {
+  stableOrder(idx, bidx, 'scn', s.opts.length, () => shuffleOpts(s.opts)).forEach((k, pos) => {
     const o = s.opts[k];
     const btn = el('button', 'opt');
     btn.appendChild(el('span', 'letter', String.fromCharCode(65 + pos)));
@@ -1927,7 +2437,10 @@ function blockVf(items, idx) {
         const correct = (lbl.indexOf('Vero') >= 0) === !!item.ok;
         const other = [...row.querySelectorAll('.vfbtn')].find(x => x !== btn);
         btn.classList.add(correct ? 'ok' : 'ko');
-        if (!correct && other) other.classList.add('ok');
+        // data-ok: il simbolo ✓/✗ oltre al colore, cosic' l'esito si legge
+        // anche per chi non distingue il rosso dal verde
+        btn.dataset.ok = correct ? '1' : '0';
+        if (!correct && other) { other.classList.add('ok'); other.dataset.ok = '1'; }
         results[idx] = results[idx] || {};
         results[idx].vf = results[idx].vf || [];
         results[idx].vf.push(correct);
@@ -1944,13 +2457,14 @@ function blockVf(items, idx) {
   return w;
 }
 
-function blockSeq(s, idx) {
+function blockSeq(s, idx, bidx) {
   const m = el('div', 'seq');
   m.appendChild(el('p', null, s.instr || "Clicca i passaggi nell'ordine corretto."));
   const pool = el('div', 'seqpool');
   const line = el('div', 'seqline');
   line.appendChild(el('div', 'seqlabel', 'Il tuo ordine'));
-  const order = shuffle(s.passi.map((p, k) => k));
+  const order = stableOrder(idx, bidx, 'seq', s.passi.length,
+                            () => shuffle(s.passi.map((p, k) => k)));
   let placed = 0, wrongTries = 0;
   order.forEach(k => {
     const c = el('button', 'seqchip', s.passi[k]);
@@ -1983,6 +2497,10 @@ function blockSeq(s, idx) {
   return m;
 }
 
+function idxOfBlank(w, blank) {
+  return [...w.children].findIndex(n => n.contains && n.contains(blank));
+}
+
 function blockCompila(items, idx) {
   const w = el('div', 'cmp');
   items.forEach(item => {
@@ -2004,9 +2522,22 @@ function blockCompila(items, idx) {
         b.onclick = e2 => {
           e2.stopPropagation();
           blank.textContent = tt;
-          blank.classList.add('done', tt === blank.dataset.risposta ? 'ok' : 'ko');
+          const good = tt === blank.dataset.risposta;
+          blank.classList.add('done', good ? 'ok' : 'ko');
           closeCmp();
           paintCompila(w, idx);
+          // FEEDBACK DIDATTICO: quando sbaglia, il vuoto si riempie da solo con
+          // la risposta corretta e spiega PERCHÉ. Prima restava la parola
+          // sbagliata in rosso, senza sapere quale fosse giusta né perché:
+          // lo studente registrava il proprio errore e chiudeva il menu.
+          if (!good) {
+            blank.textContent = blank.dataset.risposta;
+            blank.classList.remove('ko');
+            const fb = el('div', 'cmpfb',
+              'La parola giusta è “' + blank.dataset.risposta + '”. '
+              + 'Rileggi la frase con questa parola: che cosa cambia nel significato?');
+            w.insertBefore(fb, w.children[idxOfBlank(w, blank) + 1] || null);
+          }
         };
         cmpMenu.appendChild(b);
       });
@@ -2042,15 +2573,17 @@ function paintCompila(w, idx) {
   paintDots();
 }
 
-function blockMatch(s, idx) {
+function blockMatch(s, idx, bidx) {
   const m = el('div', 'match');
   m.appendChild(el('p', null, s.instr || 'Abbina ogni concetto alla definizione corretta.'));
   const wrap = el('div', 'pairs');
   const left = el('div', 'col L'), right = el('div', 'col R');
   left.appendChild(el('div', 'collabel', 'Concetti'));
   right.appendChild(el('div', 'collabel', 'Definizioni'));
-  const terms = shuffle(s.pairs.map((p, k) => ({ t: p.term, k })));
-  const defs = shuffle(s.pairs.map((p, k) => ({ t: p.def, k })));
+  const terms = stableOrder(idx, bidx, 'matchL', s.pairs.length,
+                            () => shuffle(s.pairs.map((p, k) => ({ t: p.term, k }))));
+  const defs = stableOrder(idx, bidx, 'matchR', s.pairs.length,
+                           () => shuffle(s.pairs.map((p, k) => ({ t: p.def, k }))));
   terms.forEach(o => { const c = el('button', 'chip', o.t); c.dataset.k = o.k; c.dataset.side = 'L'; left.appendChild(c); });
   defs.forEach(o => { const c = el('button', 'chip', o.t); c.dataset.k = o.k; c.dataset.side = 'R'; right.appendChild(c); });
   wrap.appendChild(left); wrap.appendChild(right);
@@ -2309,7 +2842,7 @@ function blockGlossario(g, idx) {
   return m;
 }
 
-function blockErrore(s, idx) {
+function blockErrore(s, idx, bidx) {
   const m = el('div', 'erra');
   const badPhrase = (s.sbagliato || '').trim();
   const norm = wd => wd.replace(/[.,;:!?»«()]/g, '').toLowerCase();
@@ -2357,9 +2890,12 @@ function blockErrore(s, idx) {
   // 2) opzioni di correzione come pulsanti chiari (niente menu a tendina)
   const fix = el('div', 'fixbox');
   fix.appendChild(el('span', 'flab', '3. Correzione giusta:'));
-  const distract = shuffle(words.filter(wd => !isBadWord(wd) && wd.length > 3))
-    .slice(0, badPhrase ? 1 : 3);
-  const opts = shuffle([s.correzione, ...distract]);
+  const _wordsAll = words.filter(wd => !isBadWord(wd) && wd.length > 3);
+  const _nDistract = badPhrase ? 1 : 3;
+  const distract = stableOrder(idx, bidx, 'errDist', _nDistract,
+                               () => shuffle(_wordsAll).slice(0, _nDistract));
+  const opts = stableOrder(idx, bidx, 'errOpts', _nDistract + 1,
+                           () => shuffle([s.correzione, ...distract]));
   const expl = el('div', 'expl');
   const hintBox = el('div', 'why');
   hintBox.hidden = true;
@@ -2429,7 +2965,39 @@ function blockErrore(s, idx) {
 // ---------------------------------------------------------------- audio
 const audio = new Audio();
 audio.preload = 'auto';
-audio.playbackRate = rate;
+// Riproduzione continua: al termine dell'audio si passa alla slide seguente.
+//
+// MA SOLO sulle slide di contenuto. Su una slide con attivita' la narrazione
+// finisce mentre lo studente sta ancora leggendo la domanda, e veniva
+// catapultato sulla slide successiva: non aveva piu' il tempo di rispondere,
+// e il pulsante "Avanti" non serviva a niente. Ora sulle attivita' si resta
+// fermi finche' lo studente non sceglie (o non preme Avanti).
+function slideHaAttivita(i) {
+  // Qualcosa da fare qui? Comprende anche le flashcard, che non sono
+  // conteggiate nel punteggio (sono esercizio facoltativo) ma sono comunque
+  // cliccabili: su quelle slide l'avanzamento automatico sarebbe sgradito.
+  return (slides[i] && slides[i].blocks || []).some(b =>
+    ACT_TYPES.some(t => b[t]) || b.flashcards || (b.quiz && b.quiz.q));
+}
+audio.addEventListener('ended', () => {
+  if (!autoNext || lessonMode === 'exam') return;
+  if (cur < LAST && !slideHaAttivita(cur)) go(cur + 1);
+});
+// velocità: applicata qui, ora che `audio` esiste
+applyRate(); applyAutoNext();
+if (_safe('btnSpeed')) _safe('btnSpeed').onclick = () => {
+  rateIdx = (rateIdx + 1) % RATE_VALORI.length;
+  applyRate();
+};
+if (_safe('btnAuto')) _safe('btnAuto').onclick = () => { autoNext = !autoNext; applyAutoNext(); };
+if (_safe('btnGloss')) {
+  // il glossario stava solo come slide: da un telefono, per usarlo si
+  // attraversava l'intera lezione. Ora è sempre a portata di un tocco.
+  _safe('btnGloss').onclick = () => {
+    const i = slides.findIndex(s => (s.title || '').startsWith('Glossario'));
+    go(i >= 0 ? i : LAST);
+  };
+}
 const preAudio = new Audio();   // usato SOLO per scaldare la cache del browser
 preAudio.preload = 'auto';
 let preloadedUrl = null;
@@ -2462,7 +3030,9 @@ function loadAudio(i, autoplay) {
   }
   audio.pause();
   audio.src = s.audio || '';
-  audio.playbackRate = rate;
+  // la velocità scelta va riapplicata a ogni slide: impostarla solo all'avvio
+  // non bastava, `loadAudio` risetta l'elemento audio a ogni cambio slide
+  audio.playbackRate = RATE_VALORI[rateIdx];
   audio.muted = audioMuted;
   dur = s.duration || 0;
   wordTimings = s.words || [];
@@ -2563,26 +3133,66 @@ try {
   }
 } catch (e) { setLessonMode('student'); }
 
+// Ultimo valore scritto: evita 3 scritture DOM a ogni frame (180/s). La
+// didascalia sta dentro #audioBar, che ha un backdrop-filter: scriverla a
+// 60 Hz forzava il re-blur del fondo anche a slide ferma.
+// I riferimenti DOM sono messi in cache e i sottotitoli si cercano con un
+// indice che avanza: `chunks.find` era O(n) a 60 Hz su una lezione lunga.
+let _lastPct = -1, _lastSec = -1, _lastCap = null;
+let _elFill = null, _elTT = null, _elCap = null, _capIdx = 0;
+function cacheAudioEls() {
+  _elFill = _btn('fill'); _elTT = _btn('tt'); _elCap = _btn('cap');
+  _capIdx = 0;
+}
 function tick() {
   const t = audio.currentTime || 0;
   const p = dur ? Math.min(100, t / dur * 100) : 0;
-  const fill = _btn('fill'); if (fill) fill.style.width = p + '%';
-  const tt = _btn('tt'); if (tt) tt.textContent = fmt(t) + ' / ' + fmt(dur);
-  const c = chunks.find(ch => t >= ch.a && t < ch.b);
-  const cap = _btn('cap'); if (cap) cap.textContent = c ? c.t.join(' ') : '';
+  const sec = Math.floor(t);
+  if (p !== _lastPct) {
+    if (_elFill) _elFill.style.transform = 'scaleX(' + (p / 100) + ')';
+    _lastPct = p;
+  }
+  if (sec !== _lastSec) {
+    if (_elTT) _elTT.textContent = fmt(t) + ' / ' + fmt(dur);
+    _lastSec = sec;
+  }
+  // indice monotono sui sottotitoli: si sposta in avanti e riparte dal basso
+  if (_capIdx >= chunks.length || t < chunks[_capIdx].a) _capIdx = 0;
+  while (_capIdx < chunks.length - 1 && t >= chunks[_capIdx].b) _capIdx++;
+  const c = chunks[_capIdx];
+  const capTxt = (c && t >= c.a && t < c.b) ? c.t.join(' ') : '';
+  if (capTxt !== _lastCap) {
+    if (_elCap) _elCap.textContent = capTxt;
+    _lastCap = capTxt;
+  }
   raf = requestAnimationFrame(tick);
 }
-audio.onplay = () => { setPlayIcon(); raf = requestAnimationFrame(tick); };
+audio.onplay = () => {
+  setPlayIcon();
+  _lastPct = -1; _lastSec = -1; _lastCap = null;
+  cacheAudioEls();
+  raf = requestAnimationFrame(tick);
+};
 audio.onpause = () => { setPlayIcon(); cancelAnimationFrame(raf); };
 audio.onerror = () => {
   const aerr = _btn('audioErr');
   if (aerr && audio.src) aerr.hidden = false;
   setPlayIcon();
 };
-function markReview(i) {
+function markReview(i, silenzioso) {
+  if (review.has(i)) return;
   review.add(i); saveReview();
   const d = _btn('dots') && _btn('dots').children[i];
   if (d) d.classList.add('rv');
+  if (!silenzioso) {
+    const chip = _btn('rvw');
+    if (chip) {
+      chip.hidden = false;
+      chip.textContent = '🔖 segnalato: da rivedere';
+      clearTimeout(chip._t);
+      chip._t = setTimeout(() => { chip.hidden = true; }, 2600);
+    }
+  }
 }
 function unmarkReview(i) {
   review.delete(i); saveReview();
@@ -2619,12 +3229,12 @@ if (btnZoom) btnZoom.onclick = () => {
   setTimeout(() => { zoomLock = false; }, 250);
 };
 applyFs(fsLvl);
-function toggleContrast() {
-  const on = document.documentElement.dataset.contrast === '1';
-  if (on) delete document.documentElement.dataset.contrast;
-  else document.documentElement.dataset.contrast = '1';
-  try { localStorage.setItem('lesson-contrast', on ? '0' : '1'); } catch (e) {}
+function applyContrast(on) {
+  if (on) document.documentElement.dataset.contrast = '1';
+  else delete document.documentElement.dataset.contrast;
+  try { localStorage.setItem('lesson-contrast', on ? '1' : '0'); } catch (e) {}
 }
+function toggleContrast() { applyContrast(document.documentElement.dataset.contrast !== '1'); }
 (function restoreContrast() {
   let c = '0';
   try { c = localStorage.getItem('lesson-contrast') || '0'; } catch (e) {}
@@ -2636,6 +3246,32 @@ if (btnAcc && accMenu) {
     if (!accMenu.hidden && !accMenu.contains(e.target) && e.target !== btnAcc) accMenu.hidden = true;
   });
 }
+// L'alto contrasto era raggiungibile SOLO con Ctrl+Alt+T (una scorciatoia
+// che né studenti né docenti conoscono). Ora c'è un bottone che dice cosa fa.
+const btnContrast = _safe('btnContrast');
+if (btnContrast) {
+  btnContrast.onclick = () => {
+    applyContrast(document.documentElement.dataset.contrast !== '1');
+  };
+  const paintC = () => {
+    const on = document.documentElement.dataset.contrast === '1';
+    btnContrast.textContent = on ? '◑' : '◐';
+    btnContrast.classList.toggle('on', on);
+    btnContrast.title = on ? 'Alto contrasto ATTIVO (clic per disattivare)' : 'Alto contrasto (Ctrl+Alt+T)';
+  };
+  paintC();
+  if (btnContrast._apply) btnContrast._apply(paintC);
+}
+// se il sistema chiede più contrasto, applicalo senza chiedere
+try {
+  if (window.matchMedia && window.matchMedia('(prefers-contrast: more)').matches
+      && !localStorage.getItem('lesson-contrast')) {
+    applyContrast(true);
+  }
+} catch (e) {}
+
+// velocità audio, play continuo e glossario vengono applicati piu' in basso,
+// subito dopo la creazione di `audio`: vedi la sezione "audio".
 // menu header (Stampa / Tema / Accessibilità con etichette)
 (function headerMenu() {
   const btn = _btn('btnMenu'), drop = _btn('hdrop');
@@ -2654,6 +3290,7 @@ if (btnAcc && accMenu) {
 
 // ---------------------------------------------------------------- nav
 function go(i) {
+  // `prev` serve per la direzione dell'animazione e per il tempo per slide
   const prev = cur;
   cur = Math.max(0, Math.min(LAST, i));
   paintMap();
@@ -2690,37 +3327,49 @@ document.addEventListener('click', e => {
     $('#sres').innerHTML = '';
   }
 });
+// Indice di ricerca costruito UNA volta: prima, a ogni keystroke si
+// ricostruiva l'elenco dei testi di tutte le slide e si riapplicava
+// toLowerCase() a tutto (30-80 ms di blocco main thread su lezioni lunghe).
+const SEARCH_IDX = slides.map((s, i) => {
+  const texts = [];
+  (s.blocks || []).forEach(b => {
+    ['p', 'h1', 'h2', 'quote', 'callout'].forEach(k => { if (b[k]) texts.push(b[k]); });
+    if (b.list) texts.push(b.list.join(' '));
+    if (b.quiz) texts.push(b.quiz.q + ' ' + b.quiz.opts.map(o => o.t).join(' '));
+    if (b.classifica) (b.classifica.items || []).forEach(i2 => texts.push(i2.t));
+    if (b.glossario) (b.glossario.groups || []).forEach(gr =>
+      (gr.terms || []).forEach(t => texts.push(t.t + ' ' + t.d)));
+  });
+  return { i: i, icon: s.icon || '📄', title: s.title || ('Slide ' + (i + 1)),
+           hay: ((s.title || '') + ' ' + texts.join(' ')).toLowerCase() };
+});
+let _searchDeb = null;
 $('#sinput').addEventListener('input', e => {
-  const q = e.target.value.trim().toLowerCase();
+  // stesso debounce (140 ms) già usato dal glossario: coerenza interna
+  clearTimeout(_searchDeb);
+  const raw = e.target.value;
+  _searchDeb = setTimeout(() => runSearch(raw.trim().toLowerCase()), 140);
+});
+function runSearch(q) {
   const res = $('#sres') || sbox;   // se manca #sres (cache), degrada su sbox
   res.innerHTML = '';
   if (q.length < 2) return;
   let hits = 0;
-  for (let i = 0; i < slides.length && hits < 8; i++) {
-    const s = slides[i];
-    const texts = [];
-    (s.blocks || []).forEach(b => {
-      ['p', 'h1', 'h2', 'quote', 'callout'].forEach(k => { if (b[k]) texts.push(b[k]); });
-      if (b.list) texts.push(b.list.join(' '));
-      if (b.quiz) texts.push(b.quiz.q + ' ' + b.quiz.opts.map(o => o.t).join(' '));
-      if (b.classifica) (b.classifica.items || []).forEach(i2 => texts.push(i2.t));
-      if (b.glossario) (b.glossario.groups || []).forEach(gr =>
-        (gr.terms || []).forEach(t => texts.push(t.t + ' ' + t.d)));
-    });
-    if ((s.title || '').toLowerCase().includes(q) ||
-        texts.some(t => t.toLowerCase().includes(q))) {
+  for (let k = 0; k < SEARCH_IDX.length && hits < 8; k++) {
+    const e = SEARCH_IDX[k];
+    if (e.hay.includes(q)) {
       hits++;
-      const btn = el('button', null, (s.icon || '📄') + ' ' + (s.title || ('Slide ' + (i + 1))));
-      btn.onclick = () => { go(i); sbox.classList.remove('open'); res.innerHTML = ''; };
+      const btn = el('button', null, e.icon + ' ' + e.title);
+      btn.onclick = () => { go(e.i); sbox.classList.remove('open'); res.innerHTML = ''; };
       res.appendChild(btn);
     }
   }
   if (!hits) res.appendChild(el('div', 'nores', 'Nessun risultato'));
   else unlockBadge('esploratore');
-});
+}
 // ------------------------------------------------------------ stampa / PDF
 function printLesson() {
-  const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  const esc = escHtml;   // unica implementazione (vedi helper DOM)
   const printHead = (cls, txt) => '<' + cls + '>' + esc(txt) + '</' + cls + '>';
   let body = '';
   slides.forEach((s, i) => {
@@ -2752,7 +3401,7 @@ function printLesson() {
     body += '</div>';
   });
   const w = window.open('', '_blank');
-  const escTitle = String(document.title||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const escTitle = escHtml(document.title);
   w.document.write('<html><head><title>' + escTitle + ' — versione stampabile</title><style>'
     + 'body{font-family:Segoe UI,sans-serif;padding:30px;color:#111;max-width:820px;margin:auto}'
     + 'h1{font-size:22px}h2{font-size:17px;margin:18px 0 6px;border-bottom:2px solid #3a55a0;padding-bottom:4px}'
@@ -2911,10 +3560,33 @@ if (FOCUS) {
   rip.appendChild(lbl); rip.appendChild(daCapo); rip.appendChild(chiudi);
   document.body.appendChild(rip);
   setTimeout(() => { if (rip.parentNode) rip.remove(); }, 10000);
-} else {
-  render(cur);   // percorso normale, prima slide
-}
-paintMap();    // mappa del percorso alla prima apertura
+  } else {
+    render(cur);   // percorso normale, prima slide
+  }
+  paintMap();    // mappa del percorso alla prima apertura
+
+// ------------------------------------------------------------ superficie di test
+// Esposta VOLUTAMENTE, come già fatto per LOG e review. Serve ai test per
+// verificare la logica di valutazione (denominatore fisso, soglia d'esame,
+// ordine stabile delle opzioni) che prima non aveva alcuna copertura: sono
+// cambiamenti che incidono sui voti dello studente, e un errore lì non si vede
+// guardando la pagina. Utile anche in console per il docente.
+Object.defineProperty(window, 'LESSON_STATE', {
+  get: function () {
+    return { results: results, cur: cur, slides: slides, activeIdx: activeIdx,
+             review: review, STREAK: STREAK, LOG: LOG, lessonMode: lessonMode };
+  }
+});
+window.LESSON_API = {
+  scoreMetrics: scoreMetrics, examMetrics: examMetrics, examIdx: examIdx,
+  grade: grade, attempted: attempted, stableOrder: stableOrder,
+  shuffleOpts: shuffleOpts, renderBlock: renderBlock,
+  paintScore: paintScore, paintDots: paintDots, go: go,
+  buildExport: buildExport, buildProgress: buildProgress,
+  audio: audio, slideHaAttivita: slideHaAttivita,
+  autoNext: function () { return autoNext; },
+  setAutoNext: function (v) { autoNext = !!v; applyAutoNext(); }
+};
 """
 
 
@@ -2926,15 +3598,19 @@ def write_player(out_dir: Path, titolo: str, tema: str = 'dark'):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     t = dict(THEMES.get(tema, THEMES['dark']))
-    t['accent'], t['accent2'] = _accent_from_title(titolo)
+    t['accent'], t['accent2'], t['accentink'] = _accent_from_title(titolo)
     html = f"""<!DOCTYPE html>
 <html lang="it" data-theme="{_esc(tema)}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_esc(titolo)}</title>
+<meta name="theme-color" content="#0b111d">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="{_esc(titolo[:12])}">
+<link rel="manifest" href="manifest.json">
 <link rel="stylesheet" href="main.css?v=4">
-<script>window.LESSON_DIR = {__import__('json').dumps(out_dir.name)};</script>
+<script>window.LESSON_DIR = {json.dumps(out_dir.name)};</script>
 </head>
 <body>
 <header>
@@ -2958,7 +3634,11 @@ def write_player(out_dir: Path, titolo: str, tema: str = 'dark'):
       <button id="btnAcc" title="Accessibilità: testo più grande, alto contrasto (Ctrl+Alt+T)"><span class="ic">♿</span><span>Accessibilità</span></button>
       <button id="btnBadges" title="I tuoi badge collezionabili"><span class="ic">🏅</span><span>Badge</span></button>
       <div id="accMenu" hidden>
-        <button id="btnZoom" class="abar" title="Dimensione testo">A</button>
+        <button id="btnZoom" class="abar" title="Dimensione del testo (F)">A</button>
+        <button id="btnContrast" class="abar" title="Alto contrasto (Ctrl+Alt+T)">◐</button>
+        <button id="btnSpeed" class="abar" title="Velocita di riproduzione dell'audio">1×</button>
+        <button id="btnAuto" class="abar" title="Riproduzione continua: passa da solo alla slide successiva">⏭</button>
+        <button id="btnGloss" class="abar" title="Glossario sempre raggiungibile">📖</button>
       </div>
     </div>
   </div>
@@ -2975,11 +3655,20 @@ def write_player(out_dir: Path, titolo: str, tema: str = 'dark'):
 <div id="examBanner" hidden></div>
 <div id="pbar"><div id="pfill"></div></div>
 <div id="map"></div>
-<main><div id="stage"><div id="slide" aria-live="polite"></div></div></main>
+<main><div id="stage"><div id="slide"></div></div></main>
+<!-- regione live DEDICATA: prima era aria-live sul contenitore della slide,
+     quindi il lettore di schermo annunciava l'intero testo del capitolo a ogni
+     cambio (oltre 100 parole, interrotto a metà) invece del titolo. -->
+<div id="slideAnnounce" class="sr" aria-live="polite" aria-atomic="true"></div>
 <div id="audioBar">
-  <button id="btnPlay" title="Riproduci / pausa (Spazio)">▶</button>
-  <button id="btnRestart" class="abar" title="Riascolta dall'inizio (R)">⟲</button>
-  <div id="seek"><div id="fill"></div></div>
+  <!-- aria-label sui controlli a solo glifo: al lettore di schermo "▶" e "⟲"
+       non dicono nulla. -->
+  <button id="btnPlay" title="Riproduci / pausa (Spazio)"
+          aria-label="Riproduci o metti in pausa l'audio">▶</button>
+  <button id="btnRestart" class="abar" title="Riascolta dall'inizio (R)"
+          aria-label="Riascolta la slide dall'inizio">⟲</button>
+  <div id="seek" role="slider" tabindex="0" aria-label="Posizione dell'audio"
+       aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="fill"></div></div>
   <span id="tt">0:00 / 0:00</span>
   <span id="cap"></span>
   <span id="audioErr" hidden title="Traccia audio non disponibile per questa slide">⚠ audio</span>
@@ -3010,31 +3699,44 @@ def write_player(out_dir: Path, titolo: str, tema: str = 'dark'):
 </div>
 </body>
 </html>"""
-    (out_dir / 'index.html').write_text(html, encoding='utf-8')
-    (out_dir / 'main.css').write_text(_css(t), encoding='utf-8')
-    (out_dir / 'main.js').write_text(_js(), encoding='utf-8')
+    write_text_atomic(out_dir / 'index.html', html)
+    write_text_atomic(out_dir / 'main.css', _css(t))
+    write_text_atomic(out_dir / 'main.js', _js())
     # PWA offline: manifest + service worker (cachizza la lezione aperta)
     try:
-        (out_dir / 'manifest.json').write_text(
+        write_text_atomic(out_dir / 'manifest.json',
             '{"name": %s, "short_name": %s, "display": "standalone", '
-            '"start_url": "./index.html", "background_color": "#0b111d"}'
-            % (__import__('json').dumps(titolo), __import__('json').dumps(titolo[:12])),
-            encoding='utf-8')
-        (out_dir / 'sw.js').write_text(
-            # NB: il nome della cache cambia a ogni versione del player, così
-            # l'alunno non resta su una lezione vecchia: altrimenti il
-            # service worker continua a servire i file già in cache.
-            "const C='lesson-v4';\n"
-            "self.addEventListener('install',e=>{e.waitUntil(caches.open(C).then(c=>c.addAll("
+            '"start_url": "./index.html", "background_color": "#0b111d", '
+            '"theme_color": "#0b111d"}'
+            % (json.dumps(titolo), json.dumps(titolo[:12])))
+        # NB: il nome della cache porta l'impronta del player e quella della
+        # lezione, così (a) a ogni aggiornamento del player la cache vecchia
+        # viene eliminata, (b) due lezioni non condividono lo stesso bucket.
+        # Soprattutto: la strategia è NETWORK-FIRST, quindi il service worker
+        # non può continuare a servire un index.html precedente annullando
+        # bust_cache(); la cache serve solo da ripiego quando la rete (o il
+        # server locale) non risponde.
+        cache_name = "lesson-%s-%s" % (
+            player_version(),
+            hashlib.sha1((titolo or "lezione").encode("utf-8")).hexdigest()[:8])
+        write_text_atomic(out_dir / 'sw.js',
+            "const C=%s;\n" % json.dumps(cache_name)
+            + "self.addEventListener('install',e=>{e.waitUntil(caches.open(C).then(c=>c.addAll("
             "['./index.html','./main.css','./main.js','./lesson-data.js']).catch(()=>{}))"
             ".then(()=>self.skipWaiting()));});\n"
+            # elimina TUTTE le cache che non sono quella corrente
             "self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(ks=>Promise.all("
             "ks.filter(k=>k!==C).map(k=>caches.delete(k)))));self.clients.claim();});\n"
-            "self.addEventListener('fetch',e=>{const req=e.request; if(req.method!=='GET') return;"
-            "e.respondWith(caches.match(req).then(r=>r||fetch(req).then(res=>{const copy=res.clone();"
-            "caches.open(C).then(c=>c.put(req,copy)).catch(()=>{}); return res;})"
-            ".catch(()=>req.mode==='navigate'?caches.match('./index.html'):Response.error())));});\n",
-            encoding='utf-8')
+            # network-first: la rete (o il server) ha la precedenza, la cache
+            # è il ripiego offline. ignoreSearch matcha './main.js?v=<hash>'
+            # con la voce precaricata './main.js'.
+            "self.addEventListener('fetch',e=>{const req=e.request; if(req.method!=='GET') return;\n"
+            "const same=new URL(req.url).origin===self.location.origin; if(!same) return;\n"
+            "e.respondWith(fetch(req).then(res=>{if(res&&res.ok&&res.type==='basic'){"
+            "const copy=res.clone();caches.open(C).then(c=>c.put(req,copy)).catch(()=>{});} return res;})"
+            ".catch(()=>caches.match(req,{ignoreSearch:true})"
+            ".then(r=>r||req.mode==='navigate'?caches.match('./index.html',{ignoreSearch:true})"
+            ":Response.error())));});\n")
     except OSError:
         pass
 
@@ -3047,11 +3749,21 @@ def bust_cache(out_dir: Path):
     idx = out_dir / 'index.html'
     if not idx.exists():
         return
-    html = idx.read_text(encoding='utf-8')
+    try:
+        html = idx.read_text(encoding='utf-8')
+    except OSError:
+        return
     for name in ('main.css', 'main.js', 'lesson-data.js'):
         p = out_dir / name
         if not p.exists():
             continue
         v = hashlib.sha1(p.read_bytes()).hexdigest()[:10]
         html = re.sub(rf'({re.escape(name)})(\?v=[0-9a-f]+)?', rf'\1?v={v}', html)
-    idx.write_text(html, encoding='utf-8')
+    # non riscrivere se il contenuto non cambia: evita di invalidare la mtime
+    # (che farebbe rispondere 200 invece di 304) e di far rileggere index.html
+    try:
+        if idx.read_text(encoding='utf-8') == html:
+            return
+    except OSError:
+        pass
+    write_text_atomic(idx, html)

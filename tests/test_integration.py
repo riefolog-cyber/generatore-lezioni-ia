@@ -90,8 +90,11 @@ def test_profilo_cache_key_distinta():
 def test_normalize_profilo_fallback():
     from common import normalize_profilo
     assert normalize_profilo({}) == {"durata": "standard", "livello": "intermedio",
-                                     "obiettivo": "auto"}
+                                     "obiettivo": "auto", "accessibilita": "standard"}
     assert normalize_profilo({"durata": "xxx"})["durata"] == "standard"
+    # profilo BES/DSA: valori validi, fallback sicuro su input errato
+    assert normalize_profilo({"accessibilita": "bes"})["accessibilita"] == "bes"
+    assert normalize_profilo({"accessibilita": "xxx"})["accessibilita"] == "standard"
 
 
 def test_validate_slide_edit():

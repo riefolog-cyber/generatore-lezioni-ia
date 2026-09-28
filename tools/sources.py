@@ -19,9 +19,11 @@ import importlib.util
 import json
 import os
 import re
+import socket
 import subprocess
 import threading
 import time
+import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
@@ -71,22 +73,83 @@ _FETCH_TIMEOUT = 25
 _FETCH_RETRIES = 3
 
 
+def _check_public_url(url):
+    """Blocca gli indirizzi non pubblici (SSRF).
+
+    Il pannello è in ascolto su 0.0.0.0 e la richiesta di download parte dal
+    PROCESSO del pannello, quindi da 127.0.0.1: senza questo controllo un URL
+    fornito dal docente (campo "incolla URL") poteva far leggere al pannello
+    sé stesso (`http://127.0.0.1:8341/api/logs_download`, la classifica) o
+    raggiungere il router/metadata di rete (`169.254.169.254`). Il commento che
+    c'era prima prometteva una protezione che non esisteva: qui ora c'è.
+    """
+    import ipaddress
+    p = urllib.parse.urlparse(url)
+    if p.scheme not in ("http", "https"):
+        raise ValueError(f"Schema non consentito: {p.scheme or 'nessuno'}")
+    host = (p.hostname or "").strip()
+    if not host:
+        raise ValueError("URL senza host")
+    low = host.lower()
+    if low in ("localhost",) or low.endswith((".local", ".internal", ".home.arpa")):
+        raise ValueError(f"Host non pubblico: {host}")
+    try:
+        infos = socket.getaddrinfo(host, p.port or (443 if p.scheme == "https" else 80))
+    except OSError as e:
+        raise ValueError(f"Host non risolvibile: {host}") from e
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            raise ValueError(f"Indirizzo non valido: {info[4][0]}")
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            raise ValueError(f"Indirizzo non pubblico ({ip}): download rifiutato")
+    return url
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """urlopen segue i redirect automaticamente: senza questo blocco, un
+    `http://example.com` che risponde 302 verso 127.0.0.1 eluderebbe il
+    controllo fatto all'URL iniziale."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ValueError("Redirect non consentito nel download")
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+# rimozione tag: pattern bounded e senza attraversare i fine-riga (vedi fetch_url)
+_TAG_RE = re.compile(r"<[^>\n]{0,4096}>")
+
+# tetto di dimensione per i file di testo letti dal disco: senza, un .txt da
+# 100 MB veniva caricato 5-6 volte in memoria (read_bytes + decode + 3 re.sub
+# + splitlines) = ~500-700 MB di RSS, e con due job concorrenti il doppio.
+_TEXT_MAX_BYTES = 8 * 1024 * 1024
+_PDF_MAX_PAGES = 400
+
+
 def _http_get(url, timeout=_FETCH_TIMEOUT, max_bytes=5 * 1024 * 1024):
     """GET con retry + backoff (3 tentativi): le pagine YT/web flakano spesso.
-    Limite 5 MB per evitare zip-bomb / pagine giganti."""
+    Limite 5 MB per evitare zip-bomb / pagine giganti.
+    Il target viene validato (niente loopback/privati) a ogni tentativo."""
     last = None
-    # SSRF: blocca localhost/privato se richiesto da panel (chiamante può validare)
     for attempt in range(_FETCH_RETRIES):
         try:
+            _check_public_url(url)
             req = urllib.request.Request(url, headers=_UA)
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with _OPENER.open(req, timeout=timeout) as r:
                 data = r.read(max_bytes + 1)
                 if len(data) > max_bytes:
                     raise ValueError(f"Risposta troppo grande (> {max_bytes} byte)")
                 return data, r.headers.get("Content-Type", "")
         except Exception as e:  # noqa: BLE001
             last = e
-            if "troppo grande" in str(e):
+            msg = str(e)
+            # errori non transitori: nessun retry
+            if ("non consentito" in msg or "non pubblico" in msg
+                    or "non risolvibile" in msg or "non valido" in msg
+                    or "troppo grande" in msg or "Redirect" in msg):
                 raise
             if attempt < _FETCH_RETRIES - 1:
                 time.sleep(1.5 * (attempt + 1))
@@ -461,8 +524,16 @@ def extract_pdf(path):
                          "pip install -r requirements-extra.txt")
     reader = PdfReader(str(path))
     pages = []
-    for p in reader.pages:
-        t = (p.extract_text() or "").strip()
+    # tetto alle pagine: un PDF da 1000 pagine teneva in memoria l'elenco
+    # `reader.pages` + il testo di ogni pagina, con il join finale che ne
+    # faceva una seconda copia integrale
+    for i, p in enumerate(reader.pages):
+        if i >= _PDF_MAX_PAGES:
+            break
+        try:
+            t = (p.extract_text() or "").strip()
+        except Exception:
+            continue
         if t:
             pages.append(t)
     if not pages:
@@ -475,6 +546,10 @@ def extract_text(path):
     """File di testo semplice (.txt/.md) o HTML locale."""
     p = Path(path)
     try:
+        if p.stat().st_size > _TEXT_MAX_BYTES:
+            raise ValueError(
+                f"File di testo troppo grande ({p.stat().st_size // 1048576} MB): "
+                f"massimo {_TEXT_MAX_BYTES // 1048576} MB.")
         raw = p.read_bytes()
         try:
             text = raw.decode("utf-8")
@@ -581,7 +656,12 @@ def fetch_url(url):
         text = raw.decode("latin-1", errors="replace")
     if "html" in ctype.lower():
         return parse_html(text)
-    return _split_into_sections(re.sub(r"<[^>]+>", " ", text))
+    # regex bounded: `<[^>]+>` è greedy e backtracka, cioè O(k·n) su input
+    # con k caratteri `<` senza `>`. Con il tetto di 5 MB della _http_get una
+    # risposta text/plain di "<a<a<a<..." bloccava il thread per minuti.
+    # Il limite a 4096 caratteri e l'esclusione degli a capo rendono il
+    # match lineare, con output identico per l'uso reale.
+    return _split_into_sections(_TAG_RE.sub(" ", text))
 
 
 # ------------------------------------------------------------------ YouTube
