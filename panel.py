@@ -30,6 +30,7 @@ import subprocess
 import sys
 import time
 import urllib.parse
+import urllib.request
 import webbrowser
 import zipfile
 from pathlib import Path
@@ -73,6 +74,41 @@ _PIPELINE_MTIME_START = _pipeline_mtime()
 
 # ------------------------------------------------------------------ job runner
 from tools.jobs import JobManager  # noqa: E402
+
+def _lan_selftest(ip, port):
+    """Verifica che l'URL LAN risponda davvero (visto dal PC stesso).
+
+    Non garantisce che il telefono lo raggiunga (quello dipende dal Wi-Fi
+    e dal firewall), ma becca subito: server non in ascolto su 0.0.0.0,
+    porta sbagliata, IP non locale. Ritorna dict JSON con ok+detail.
+    """
+    if not ip:
+        return {"ok": False, "detail": "nessun IP LAN rilevato"}
+    url = f"http://{ip}:{port}/"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "selftest"})
+        with urllib.request.urlopen(req, timeout=4) as r:
+            body = r.read(2000).decode("utf-8", "replace")
+            if r.status == 200 and ("lezioni" in body.lower() or "lesson" in body.lower()
+                                    or "<html" in body.lower()):
+                return {"ok": True, "detail": f"{url} risponde ✔",
+                        "url": url}
+            return {"ok": False, "detail": f"{url} risponde ma pagina strana (stato {r.status})",
+                    "url": url}
+    except Exception as e:  # noqa: BLE001
+        msg = str(e)
+        if "10013" in msg or "denied" in msg.lower() or "permesso" in msg.lower():
+            hint = " — quasi sicuramente il Firewall di Windows blocca Python: consenti Python (reti private) e riprova."
+        elif "10049" in msg or "assign" in msg.lower():
+            hint = " — questo IP non appartiene più al PC (rete cambiata?): controlla il Wi-Fi."
+        elif "refused" in msg.lower() or "10061" in msg:
+            hint = " — server non in ascolto su questa interfaccia: riavvia con AVVIA.bat."
+        elif "timed out" in msg.lower() or "timeout" in msg.lower():
+            hint = " — nessuna risposta: PC e telefono devono stare sulla STESSA Wi-Fi."
+        else:
+            hint = ""
+        return {"ok": False, "detail": f"{url} non risponde ({msg}){hint}", "url": url}
+
 
 HISTORY_FILE = BASE / "job_history.json"
 
@@ -255,23 +291,102 @@ def cancel_queue():
 
 
 # ------------------------------------------------------------------ helpers
-def lan_ip():
-    # IP fisso da config (rete di classe senza internet: l'auto-rilevamento
-    # via 8.8.8.8 fallisce e mostrerebbe "LAN non disponibile").
+def _local_ips():
+    """Tutti gli IPv4 locali (per verificare che l'IP fisso esista davvero)."""
+    ips = set()
     try:
-        fisso = str(CONFIG.get("lan_ip_fisso") or "").strip()
-        if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", fisso):
-            return fisso
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if not ip.startswith("127."):
+                ips.add(ip)
     except Exception:
         pass
+    for dest in (("8.8.8.8", 80), ("192.168.0.1", 80)):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(1.5)
+            s.connect(dest)
+            ip = s.getsockname()[0]
+            s.close()
+            if not ip.startswith("127."):
+                ips.add(ip)
+        except Exception:
+            pass
+    return ips
+
+
+def _default_route_ip():
+    """IP dell'interfaccia con la route predefinita (= rete che va a internet)."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(1.5)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
         s.close()
-        return ip if not ip.startswith("127.") else None
+        if ip and not ip.startswith("127."):
+            return ip
+    except Exception:
+        pass
+    return None
+
+
+def lan_ip():
+    # Rete di classe SENZA internet: l'auto-rilevamento via 8.8.8.8 fallisce,
+    # per questo esiste lan_ip_fisso in config (192.168.0.2). A casa però il
+    # .0.2 non esiste e il QR punterebbe al vuoto: il fisso vale SOLO se è
+    # davvero assegnato a questa macchina.
+    # Se il fisso non è attivo, meglio l'IP della route predefinita (quello
+    # che il telefono può davvero raggiungere da questa rete).
+    fisso = ""
+    try:
+        fisso = str(CONFIG.get("lan_ip_fisso") or "").strip()
+    except Exception:
+        fisso = ""
+    if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", fisso or ""):
+        try:
+            if fisso in _local_ips():
+                return fisso
+        except Exception:
+            pass
+        # fisso non attivo su questa macchina: fallback qui sotto
+    auto = _default_route_ip()
+    if auto:
+        return auto
+    try:
+        for ip in sorted(_local_ips()):
+            return ip
+    except Exception:
+        pass
+    return None
+
+
+def lan_warning():
+    """Messaggio se l'IP fisso da config non è attivo (QR a casa)."""
+    try:
+        fisso = str(CONFIG.get("lan_ip_fisso") or "").strip()
     except Exception:
         return None
+    if re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}", fisso or ""):
+        try:
+            if fisso not in _local_ips():
+                auto = _default_route_ip()
+                if auto:
+                    return (f"IP fisso {fisso} non attivo su questo PC "
+                            f"(sei su un'altra rete: uso {auto}). "
+                            f"In classe torna tutto da sé.")
+                return (f"IP fisso {fisso} non attivo su questo PC: "
+                        f"il QR potrebbe non aprirsi da qui.")
+            # fisso attivo MA non è la route predefinita (doppia rete:
+            # cavo scuola + Wi-Fi classe): avvisa comunque, perché il
+            # telefono sulla rete di tutti i giorni non lo raggiunge.
+            auto = _default_route_ip()
+            if auto and auto != fisso:
+                return (f"Stai usando anche un'altra rete ({auto}): "
+                        f"per la classe usa il QR {fisso}, "
+                        f"per questa rete usa {auto}.")
+        except Exception:
+            pass
+    return None
 
 
 def _lesson_for(filename):
@@ -359,6 +474,7 @@ def _state():
         "materials": _materials(), "lessons": lessons, "archived": archived,
         "singles": _single_files(), "deps": _deps(),
         "lan_ip": lan_ip(), "port": RUNTIME_PORT,
+        "lan_warning": lan_warning(),
         "max_upload_mb": MAX_UPLOAD_MB,
         "pipeline_stantia": _pipeline_mtime() != _PIPELINE_MTIME_START,
         "config": {k: CONFIG.get(k) for k in
@@ -441,10 +557,32 @@ class PanelHandler(_RangeHandler):
         if path == "/api/history":
             return self._history()
         if path == "/api/lan":
-            return self._json({"lan_ip": lan_ip(), "port": RUNTIME_PORT,
-                               "url": f"http://{lan_ip()}:{RUNTIME_PORT}/" if lan_ip() else None})
+            ip = lan_ip()
+            try:
+                from tools.shared_lesson import get_shared
+                shared = get_shared(BASE)
+            except Exception:
+                shared = ""
+            base = f"http://{ip}:{RUNTIME_PORT}" if ip else ""
+            return self._json({
+                "lan_ip": ip, "port": RUNTIME_PORT,
+                "url": f"{base}/{shared}/index.html" if (base and shared) else (f"{base}/" if base else None),
+                "hub_url": f"{base}/" if base else None,
+                "lesson_url": f"{base}/{shared}/index.html" if (base and shared) else None,
+                "shared": shared,
+                "warning": lan_warning(),
+                "selftest": _lan_selftest(ip, RUNTIME_PORT) if ip else None,
+            })
         if path == "/api/qr":
             return self._qr(query)
+        if path == "/api/lesson_activities":
+            return self._lesson_activities(query)
+        if path == "/api/shared_lesson":
+            try:
+                from tools.shared_lesson import get_shared
+                return self._json({"shared": get_shared(BASE)})
+            except Exception as e:  # noqa: BLE001
+                return self._json({"shared": "", "error": str(e)})
         if path == "/api/diagnostica":
             from tools.netdiag import diagnose
             return self._json(diagnose(RUNTIME_PORT))
@@ -493,8 +631,13 @@ class PanelHandler(_RangeHandler):
             self._json({"error": "Indirizzo URL non valido"}, 400)
             return
         try:
+            scale = int((query.get("scale", ["6"])[0] or "6"))
+            scale = max(4, min(12, scale))
+        except Exception:
+            scale = 6
+        try:
             from tools.qr import qr_png_bytes
-            body = qr_png_bytes(text, scale=6, border=4)
+            body = qr_png_bytes(text, scale=scale, border=4)
         except Exception as e:  # noqa: BLE001
             self._json({"error": f"QR non creato: {e}"}, 500)
             return
@@ -504,6 +647,55 @@ class PanelHandler(_RangeHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    _ACT_LABEL = {
+        "quiz": "Quiz", "match": "Abbina", "vf": "Vero/Falso",
+        "seq": "Metti in ordine", "compila": "Completa",
+        "scenario": "Cosa faresti?", "errore": "Trova l'errore",
+        "classifica": "Classifica", "flashcards": "Flashcards",
+        "glossario": "Glossario",
+    }
+
+    def _acts_from_payload(self, payload, lesson, base):
+        """Slide con attività interattive, con il link per mostrarne una sola."""
+        acts = []
+        for i, s in enumerate(payload.get("slides") or []):
+            kinds = [k for b in (s.get("blocks") or []) if isinstance(b, dict)
+                     for k in b if k in self._ACT_LABEL]
+            if not kinds:
+                continue
+            acts.append({"lesson": lesson, "slide": i,
+                         "title": s.get("title") or f"Slide {i + 1}",
+                         "kind": kinds[0], "label": self._ACT_LABEL.get(kinds[0], kinds[0]),
+                         "url": f"{base}/{lesson}/index.html?attivita={i}" if base else ""})
+        return acts
+
+    def _lesson_activities(self, query):
+        """Elenco attività di una lezione (per farne vedere UNA sola agli alunni)."""
+        name = (query.get("lesson", [""])[0] or "").strip()
+        if not name or name not in _allowed_lesson_names():
+            lesson = (BASE / name).resolve() if name else None
+            try:
+                ok = bool(lesson and lesson.is_dir()
+                          and (lesson / "index.html").is_file()
+                          and str(lesson).startswith(str(BASE.resolve())))
+            except Exception:
+                ok = False
+            if not ok:
+                self._json({"ok": False, "error": "Lezione non valida."}, 400)
+                return
+            name = lesson.name
+        try:
+            from new_lesson import load_lesson
+            _, payload = load_lesson(str(BASE / name))
+        except Exception as e:  # noqa: BLE001
+            self._json({"ok": False, "error": f"Lezione non leggibile: {e}"}, 400)
+            return
+        ip, port = lan_ip(), RUNTIME_PORT
+        base = f"http://{ip}:{port}" if ip else ""
+        acts = self._acts_from_payload(payload, name, base)
+        self._json({"ok": True, "lesson": name, "activities": acts,
+                    "lan_ip": ip, "port": port})
 
     def _logs_download(self):
         """Un unico ZIP con i log utili per assistenza, senza dati degli alunni."""
@@ -528,7 +720,11 @@ class PanelHandler(_RangeHandler):
     def _lesson_action(self, action, data):
         name = str(data.get("lesson") or "")
         from tools import lesson_admin
-        if action == "rename":
+        if action == "share":
+            # lezione mostrata agli alunni: la imposta come "condivisa in classe"
+            from tools.shared_lesson import set_shared
+            result = set_shared(BASE, name)
+        elif action == "rename":
             result = lesson_admin.rename_lesson(BASE, name, data.get("title"))
         elif action == "duplicate":
             result = lesson_admin.duplicate_lesson(BASE, name)

@@ -51,6 +51,36 @@ details.adv .opts{margin-top:6px}
 .qrOv img{width:min(88vmin,760px);height:min(88vmin,760px);background:#fff;padding:18px;border-radius:18px;box-shadow:0 24px 80px rgba(0,0,0,.65)}
 .qrOv .qru{color:#fff;font-size:17px;font-weight:700;word-break:break-all;text-align:center}
 .qrOv button{background:#fff;color:#111827;border:none;border-radius:10px;padding:10px 18px;font-weight:800;cursor:pointer;font-size:15px}
+/* tasto "una sola attività" + finestra di scelta */
+.bigbtn{width:100%;display:flex;align-items:center;justify-content:center;gap:10px;margin-top:14px;
+background:linear-gradient(135deg,var(--acc),#8a6ff0);color:#fff;border:none;border-radius:14px;
+padding:16px 18px;font-size:16px;font-weight:800;cursor:pointer;font-family:inherit;
+box-shadow:0 6px 22px rgba(91,123,213,.4);transition:transform .15s,filter .15s}
+.bigbtn:hover{filter:brightness(1.12);transform:translateY(-1px)}
+#focusNow{margin-top:10px;font-size:12.5px;word-break:break-all}
+#focusOv{position:fixed;inset:0;z-index:9999;background:rgba(4,8,18,.94);display:flex;
+align-items:center;justify-content:center;padding:18px}
+#focusOv .fbox{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px;
+width:min(720px,100%);max-height:92vh;overflow:auto;display:flex;flex-direction:column;gap:12px;
+box-shadow:0 24px 80px rgba(0,0,0,.6)}
+#focusOv h3{margin:0;font-size:16px;display:flex;align-items:center;gap:8px}
+#focusSearch{flex:0 0 auto;width:100%}
+#focusList{flex:0 0 auto;max-height:34vh;min-height:120px;overflow:auto;border:1px solid var(--line);
+border-radius:12px;padding:6px;display:flex;flex-direction:column;gap:4px;background:#10172a}
+#focusList button{display:flex;align-items:center;gap:10px;width:100%;text-align:left;
+background:transparent;border:1px solid transparent;border-radius:10px;color:var(--txt);
+font:inherit;font-size:13.5px;padding:9px 11px;cursor:pointer}
+#focusList button:hover{background:color-mix(in srgb,var(--acc) 16%,transparent)}
+#focusList button.sel{border-color:var(--acc);background:color-mix(in srgb,var(--acc) 22%,transparent);
+font-weight:700}
+#focusList .fkind{flex:0 0 auto;font-size:11px;font-weight:800;padding:3px 8px;border-radius:999px;
+border:1px solid var(--line);color:var(--mut)}
+#focusList .ftitle{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#focusList .fempty{padding:14px;color:var(--mut);font-size:13px}
+#focusOv #focusQr{flex:0 0 auto;align-self:center;width:min(46vmin,360px);height:min(46vmin,360px);
+background:#fff;padding:10px;border-radius:14px;border:1px solid var(--line);cursor:zoom-in}
+#focusOv .fhint{color:var(--mut);font-size:12px;margin:0}
+#focusOv .fclose{align-self:flex-end}
 .lanrow{display:flex;gap:14px;align-items:center;flex-wrap:wrap}
 .lanrow .grow{flex:1;min-width:200px}
 .chips{display:flex;flex-wrap:wrap;gap:8px}
@@ -270,8 +300,12 @@ transition:border-color .2s,background .2s}
           <button class="mini" id="btnLanCopy" type="button">📋 Copia link</button>
           <button class="mini ghost" id="btnLan" type="button" title="Ricarica indirizzo e cronologia">↻</button></div>
         <div class="upmsg" style="font-size:12px">Gli studenti vedono solo l'indice delle lezioni, non questo pannello.</div>
+        <div class="upmsg" id="lanWarn" style="font-size:12px" hidden></div>
       </div>
     </div>
+    <button class="bigbtn" id="btnFocusPick" type="button"
+            title="Scegli la lezione da far vedere agli alunni: la vedranno intera, dall'inizio alla fine">📚 Scegli la lezione da mostrare</button>
+    <div class="upmsg" id="focusNow" style="font-size:12px;margin-top:10px" hidden></div>
     <h2 style="margin-top:14px">Cronologia generazioni
       <button class="mini ghost" onclick="clearHistory()" type="button" title="Cancella la cronologia generazioni">🗑 Svuota</button></h2>
     <div id="hist" style="margin-top:8px;font-size:12px;color:var(--mut)"><div>Nessun job ancora.</div></div>
@@ -282,6 +316,24 @@ transition:border-color .2s,background .2s}
     <img id="qrOvImg" alt="QR a schermo intero">
     <div class="qru" id="qrOvUrl"></div>
     <button type="button" id="qrOvClose">Chiudi (Esc)</button>
+  </div>
+
+  <div id="focusOv" hidden role="dialog" aria-modal="true" aria-label="Scegli la lezione da mostrare">
+    <div class="fbox">
+      <h3>📚 Lezione da far vedere agli alunni</h3>
+      <input id="focusSearch" type="search" autocomplete="off"
+             placeholder="Cerca fra le tue lezioni…">
+      <div id="focusList"><div class="fempty">Caricamento lezioni…</div></div>
+      <img id="focusQr" hidden tabindex="0" role="button"
+           title="Clicca per vedere il QR a schermo intero"
+           alt="QR per aprire la lezione dal telefono">
+      <div class="urlrow"><input id="focusUrl" readonly placeholder="Scegli una lezione dalla lista…">
+        <button class="mini" id="btnFocusCopy" type="button">📋 Copia link</button>
+        <button class="mini" id="btnFocusOpen" type="button">Apri 👀</button>
+        <button class="mini primary" id="btnFocusQr" type="button">⬛ QR grande</button></div>
+      <p class="fhint">Gli alunni vedono la lezione <b>per intero</b>, dall'inizio alla fine, con moduli, attività e riepilogo finale. Il link e il QR qui sotto puntano a quella lezione; anche il QR di sopra si aggiorna.</p>
+      <button class="mini fclose" id="focusOvClose" type="button">Chiudi (Esc)</button>
+    </div>
   </div>
 
   <div class="card">
@@ -504,6 +556,7 @@ async function refresh() {
   if (Date.now() < serverRetryAt) return false;
   try {
     const s = await api('state');
+    window._stateLessons = s.lessons || [];
     serverRetryAt = 0;
     serverRetryStep = 0;
     if (s.pipeline_stantia) $('#stale').style.display = 'block';
@@ -637,6 +690,83 @@ async function reaudio(lesson) {
   startJob('reaudio?lesson=' + encodeURIComponent(lesson), {});
 }
 
+// ------------------------------------------------- lezione da mostrare agli alunni
+// Un'unica finestra con tutte le lezioni: il docente sceglie QUALE lezione far
+// vedere e gli alunni la ricevono intera (dall'inizio alla fine), non a pezzi.
+let _focusSel = null;
+
+function focusLabel(l) { return l.title || lessonTitle(l.name); }
+function lessonTitle(name) {
+  return (name || '').replace(/_lesson$/, '').replace(/_/g, ' ');
+}
+function renderFocusList() {
+  const box = $('#focusList');
+  if (!box) return;
+  const q = ($('#focusSearch').value || '').trim().toLowerCase();
+  const all = (window._stateLessons || []);
+  const hits = all.filter(l => !q
+    || ((l.title || '') + ' ' + l.name).toLowerCase().includes(q));
+  if (!hits.length) {
+    box.innerHTML = '<div class="fempty">' +
+      (all.length ? 'Nessuna lezione trovata.' : 'Nessuna lezione generata ancora.') + '</div>';
+    return;
+  }
+  box.innerHTML = hits.map(l => {
+    const mins = l.duration ? Math.max(1, Math.round(l.duration / 60)) : null;
+    const sel = _focusSel && _focusSel.name === l.name;
+    return '<button type="button" data-lesson="' + escAttr(l.name) + '" class="' + (sel ? 'sel' : '') + '">'
+      + '<span class="fkind">📚</span>'
+      + '<span class="ftitle">' + esc(l.title || lessonTitle(l.name))
+      + (mins ? ' · ' + mins + ' min' : '') + '</span></button>';
+  }).join('');
+  box.querySelectorAll('button[data-lesson]').forEach(b => {
+    b.onclick = () => selectFocus(b.dataset.lesson);
+  });
+}
+async function selectFocus(name) {
+  const l = (window._stateLessons || []).find(x => x.name === name);
+  if (!l) return;
+  // la lezione scelta diventa anche quella "in classe": il QR principale
+  // della card Condividi punterà a lei, così alunni e docente sono allineati
+  try {
+    const r = await fetch('/api/lesson_action', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lesson: name, action: 'share' })
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.ok === false) { alert('Condivisione fallita: ' + (j.error || r.status)); return; }
+  } catch (e) { alert('Condivisione fallita: ' + e.message); return; }
+  _focusSel = l;
+  renderFocusList();
+  closeFocusPicker();   // scelta fatta: la finestra si chiude da sola
+  loadLan();            // ricarica link/QR principali (ora puntano alla lezione)
+  updateFocusQr();
+}
+function updateFocusQr() {
+  const url = $('#focusUrl'), qr = $('#focusQr');
+  if (!url || !qr) return;
+  const lan = $('#lanUrl').value || '';
+  const m = /^https?:\/\/[^\/]+:\d+/.exec(lan);
+  const link = (_focusSel && m) ? (m[0] + '/' + _focusSel.name + '/index.html') : '';
+  url.value = link || (_focusSel ? 'LAN non disponibile (stessa Wi-Fi del PC?)' : '');
+  if (link) {
+    qr.src = '/api/qr?scale=10&url=' + encodeURIComponent(link) + '&t=' + Date.now();
+    qr.hidden = false;
+    qr.onerror = () => {
+      qr.hidden = true;
+      url.value = link + '  (QR non caricato: copia il link con 📋)';
+    };
+  } else qr.hidden = true;
+  const now = $('#focusNow');
+  if (now) {
+    now.textContent = link
+      ? 'Agli alunni viene mostrata la lezione completa: ' + focusLabel(_focusSel) + ' — ' + link
+      : (_focusSel
+        ? 'Lezione scelta: ' + focusLabel(_focusSel) + ' (collega il PC alla stessa Wi-Fi per ottenere link e QR)'
+        : 'Nessuna lezione scelta: premi il tasto per sceglierne una.');
+    now.hidden = false;
+  }
+}
 async function single(lesson) {
   const r = await fetch('/api/export_single?lesson=' + encodeURIComponent(lesson));
   const j = await r.json().catch(() => ({}));
@@ -695,11 +825,22 @@ async function loadLan() {
     $('#lanUrl').value = url || 'LAN non disponibile (stessa Wi-Fi del PC?)';
     const qr = $('#lanQr');
     if (url) {
-      qr.src = '/api/qr?url=' + encodeURIComponent(url);  // QR locale: funziona offline
+      // cache-buster + QR grande: se il server cambia IP il QR non resta vecchio
+      qr.src = '/api/qr?scale=8&url=' + encodeURIComponent(url) + '&t=' + Date.now();
       qr.hidden = false;
-      qr.onerror = () => { qr.hidden = true; };
+      // se il QR non si carica, NON nasconderlo in silenzio: spiega il perché
+      qr.onerror = () => {
+        qr.hidden = true;
+        $('#lanUrl').value = url + '  (QR non caricato: copia il link con 📋)';
+      };
     } else { qr.hidden = true; }
+    const w = $('#lanWarn');
+    if (w) {
+      if (j.warning) { w.textContent = '⚠ ' + j.warning; w.hidden = false; }
+      else w.hidden = true;
+    }
   } catch (e) { $('#lanUrl').value = 'LAN non disponibile'; }
+  updateFocusQr();
   try {
     const h = await api('history');
     $('#hist').innerHTML = (h.history || []).slice(-8).reverse().map(x =>
@@ -713,9 +854,13 @@ function closeQrFullscreen() {
 }
 function openQrFullscreen() {
   const qr = $('#lanQr');
-  if (!qr || qr.hidden || !qr.src) return;
-  $('#qrOvImg').src = qr.src;
-  $('#qrOvUrl').textContent = $('#lanUrl').value || '';
+  const fq = $('#focusQr');
+  // Se il QR dell'attività singola è visibile, ingrandisce quello
+  const src = (fq && !fq.hidden && fq.src) ? fq.src : (qr && !qr.hidden && qr.src ? qr.src : '');
+  const label = (fq && !fq.hidden && fq.src) ? ($('#focusUrl').value || '') : ($('#lanUrl').value || '');
+  if (!src) return;
+  $('#qrOvImg').src = src;
+  $('#qrOvUrl').textContent = label;
   $('#qrOv').hidden = false;
   $('#qrOvClose').focus();
 }
@@ -723,10 +868,17 @@ $('#lanQr').onclick = openQrFullscreen;
 $('#lanQr').onkeydown = e => {
   if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openQrFullscreen(); }
 };
+$('#focusQr').onclick = openQrFullscreen;
+$('#focusQr').onkeydown = e => {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openQrFullscreen(); }
+};
 $('#qrOvClose').onclick = closeQrFullscreen;
 $('#qrOv').onclick = e => { if (e.target === e.currentTarget) closeQrFullscreen(); };
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && !$('#qrOv').hidden) closeQrFullscreen();
+  if (e.key === 'Escape') {
+    if (!$('#qrOv').hidden) { closeQrFullscreen(); return; }
+    if ($('#focusOv') && !$('#focusOv').hidden) closeFocusPicker();
+  }
 });
 $('#btnLan').onclick = loadLan;
 async function runDiagnostica() {
@@ -751,12 +903,53 @@ async function runDiagnostica() {
   } catch (e) { box.textContent = 'Diagnostica non disponibile: ' + e.message; }
 }
 $('#btnDiagnostica').onclick = runDiagnostica;
-$('#btnLanCopy').onclick = async () => {
-  const v = $('#lanUrl').value;
+function copyText(v, btn) {
   if (!v || v.startsWith('LAN')) return;
-  try { await navigator.clipboard.writeText(v); $('#btnLanCopy').textContent = '✓ Copiato'; }
-  catch (e) { $('#lanUrl').select(); document.execCommand('copy'); }
-  setTimeout(() => { $('#btnLanCopy').textContent = '📋 Copia link'; }, 1600);
+  const done = () => {
+    if (!btn) return;
+    const old = btn.textContent;
+    btn.textContent = '✓ Copiato';
+    setTimeout(() => { btn.textContent = old; }, 1600);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(v).then(done).catch(() => {
+      const inp = (btn && btn.id === 'btnFocusCopy') ? $('#focusUrl') : $('#lanUrl');
+      if (inp) { inp.select(); document.execCommand('copy'); }
+      done();
+    });
+  } else {
+    const inp = (btn && btn.id === 'btnFocusCopy') ? $('#focusUrl') : $('#lanUrl');
+    if (inp) { inp.select(); document.execCommand('copy'); }
+    done();
+  }
+}
+$('#btnLanCopy').onclick = () => copyText($('#lanUrl').value, $('#btnLanCopy'));
+$('#btnFocusCopy').onclick = () => copyText($('#focusUrl').value, $('#btnFocusCopy'));
+$('#btnFocusOpen').onclick = () => {
+  const u = $('#focusUrl').value || '';
+  if (u.startsWith('http')) window.open(u, '_blank');
+};
+if ($('#focusSearch')) $('#focusSearch').oninput = renderFocusList;
+
+// ---------------------------------------------------- tasto "lezione da mostrare"
+function openFocusPicker() {
+  const ov = $('#focusOv');
+  if (!ov) return;
+  ov.hidden = false;
+  renderFocusList();
+  const s = $('#focusSearch');
+  if (s) setTimeout(() => s.focus(), 30);
+}
+function closeFocusPicker() {
+  const ov = $('#focusOv');
+  if (ov) ov.hidden = true;
+}
+$('#btnFocusPick').onclick = openFocusPicker;
+$('#focusOvClose').onclick = closeFocusPicker;
+$('#focusOv').onclick = e => { if (e.target === e.currentTarget) closeFocusPicker(); };
+$('#btnFocusQr').onclick = () => {
+  if ($('#focusQr') && !$('#focusQr').hidden) openQrFullscreen();
+  else openFocusPicker();
 };
 
 // ---------------------------------------------------- upload materiale

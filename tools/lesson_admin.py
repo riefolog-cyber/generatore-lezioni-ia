@@ -5,6 +5,7 @@ Tutte le funzioni accettano solo directory reali poste direttamente nella
 cartella dell'app (o nel suo archivio). Questo evita cancellazioni o spostamenti
 verso percorsi esterni tramite nomi inseriti dall'utente.
 """
+import html
 import json
 import os
 import re
@@ -15,7 +16,10 @@ BASE = Path(__file__).resolve().parent.parent
 
 
 def _valid_dir_name(name):
-    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_ -]{0,99}_lesson", name or ""))
+    # \w in modalità testo comprende anche le lettere accentuate: senza, una
+    # lezione con "à" o "è" (es. Saman_Abbas_..._libertà_lesson) risultava
+    # "non valida" e non si poteva più rinominare, archiviare o eliminare.
+    return bool(re.fullmatch(r"\w[\w \-]{0,99}_lesson", name or ""))
 
 
 def _safe_lesson(base, name, parent):
@@ -96,19 +100,62 @@ def _update_lesson_dir(lesson, old_name, new_name):
     os.replace(tmp, index)
 
 
+def _retitle_lesson(lesson, new_title):
+    """Aggiorna il titolo VISTO dal pannello e dal player.
+
+    Il pannello mostra il campo 'titolo' di lesson-data.js, non il nome della
+    cartella: senza questo passaggio una rinomina lasciava due nomi diversi e il
+    docente credeva che il comando non avesse funzionato.
+    """
+    title = str(new_title or "").strip()[:120]
+    if not title:
+        return
+    esc = html.escape(title, quote=False)
+    data = lesson / "lesson-data.js"
+    try:
+        raw = data.read_text(encoding="utf-8")
+        new_raw = re.sub(r'("titolo"\s*:\s*)"(?:[^"\\]|\\.)*"',
+                         lambda m: m.group(1) + json.dumps(title, ensure_ascii=False),
+                         raw, count=1)
+        if new_raw != raw:
+            data.write_text(new_raw, encoding="utf-8")
+    except OSError:
+        pass
+    index = lesson / "index.html"
+    try:
+        html_text = index.read_text(encoding="utf-8")
+        html_text = re.sub(r"<title>.*?</title>",
+                           lambda _m: f"<title>{esc}</title>", html_text, count=1, flags=re.S)
+        html_text = re.sub(r'(<h1 id="ttl">).*?(</h1>)',
+                           lambda m: f"{m.group(1)}{esc}{m.group(2)}", html_text, count=1, flags=re.S)
+        index.write_text(html_text, encoding="utf-8")
+    except OSError:
+        pass
+    manifest = lesson / "manifest.json"
+    try:
+        m = json.loads(manifest.read_text(encoding="utf-8"))
+        m["name"] = title
+        m["short_name"] = title[:12]
+        manifest.write_text(json.dumps(m, ensure_ascii=False), encoding="utf-8")
+    except (OSError, ValueError):
+        pass
+
+
 def rename_lesson(base, name, new_title):
     base = Path(base)
     lesson = safe_lesson(base, name)
-    clean = re.sub(r"[^A-Za-z0-9]+", "_", str(new_title or "").strip()).strip("_")
+    # slug che conserva le lettere accentuate ("Gisèle", non "Gis_le")
+    clean = re.sub(r"[^\w]+", "_", str(new_title or "").strip(), flags=re.UNICODE).strip("_")
     if not clean:
         raise ValueError("Scrivi un nome per la lezione.")
     new_name = f"{clean[:100]}_lesson"
     old_name = lesson.name
     dest = unique_destination(base, new_name)
-    if dest.name == old_name:
-        return dest.name
-    lesson.rename(dest)
-    _update_lesson_dir(dest, old_name, dest.name)
+    if dest.name != old_name:
+        lesson.rename(dest)
+        _update_lesson_dir(dest, old_name, dest.name)
+    # anche a parità di cartella il titolo del pannello va aggiornato
+    _retitle_lesson(dest, new_title)
     return dest.name
 
 

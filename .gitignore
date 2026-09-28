@@ -23,6 +23,7 @@ job_history.json
 .opencode/
 classifica.json
 classifica.sqlite3
+lezione_in_classe.json
 archivio_backup/
 
 # log di generazione/avvio

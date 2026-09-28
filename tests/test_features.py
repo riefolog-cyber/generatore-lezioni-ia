@@ -266,7 +266,10 @@ def test_player_classroom_modes_and_service_worker(tmp_path):
     assert "String.fromCharCode(65 + pos)" in js
     assert "setLessonMode" in js and "startExam" in js and "goExam" in js
     assert "navigator.serviceWorker.register('./sw.js')" in js
-    assert "lesson-v3" in sw and "caches.open" in sw
+    # il nome della cache porta la versione del player: altrimenti il service
+    # worker continua a servire agli alunni una lezione vecchia
+    assert "const C='lesson-v" in sw and "caches.open" in sw
+    assert "self.skipWaiting()" in sw
 
 def test_player_lesson_dir_is_valid_js(tmp_path):
     """Regressione: lo script inline window.LESSON_DIR non deve contenere

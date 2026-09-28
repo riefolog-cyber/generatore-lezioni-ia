@@ -1017,7 +1017,18 @@ try { review = new Set(JSON.parse(localStorage.getItem(DATA_KEY + '-review') || 
 function saveReview() {
   try { localStorage.setItem(DATA_KEY + '-review', JSON.stringify([...review])); } catch (e) {}
 }
+// Parametro ?attivita=N: da quale slide parte il percorso. Va letto PRIMA di
+// restorePos (che altrimenti riporterebbe l'alunno sulla slide memorizzata).
+let FOCUS_SLIDE = -1;
+try {
+  const m = /[?&]attivita=(\d+)/.exec(location.search || '');
+  if (m) {
+    const n = parseInt(m[1], 10);
+    if (Number.isInteger(n) && n >= 0) FOCUS_SLIDE = n;
+  }
+} catch (e) {}
 (function restorePos() {
+  if (FOCUS_SLIDE >= 0) return;   // focus: si parte dall'attività, non dalla cronologia
   try {
     const saved = JSON.parse(localStorage.getItem(DATA_KEY) || 'null');
     if (saved && Number.isInteger(saved.slide) && saved.slide >= 0 && saved.slide < slides.length) {
@@ -1029,6 +1040,13 @@ function savePos() {
   try { localStorage.setItem(DATA_KEY, JSON.stringify({ slide: cur })); } catch (e) {}
 }
 const ACT_TYPES = ['quiz', 'match', 'vf', 'seq', 'compila', 'scenario', 'errore', 'classifica'];
+// Modalità "una sola attività": il docente condivide ?attivita=N e gli alunni
+// vedono SOLO il percorso che parte da quella slide (niente mappa, ricerca,
+// esame né salti a slide esterne): cliccando Avanti si prosegue il modulo.
+let focusAct = (FOCUS_SLIDE >= 0 && FOCUS_SLIDE < slides.length) ? FOCUS_SLIDE : -1;
+const FOCUS = focusAct >= 0;
+// Percorso dell'alunno in focus: dalla slide dell'attività fino alla fine.
+const FOCUS_STOP = FOCUS ? focusAct : -1;
 const activeIdx = slides.map((s, i) =>
   (s.blocks || []).some(b => ACT_TYPES.some(k => b[k])) ? i : -1).filter(i => i >= 0);
 // slide di apertura dei moduli: alimentano la barra di navigazione dei moduli
@@ -2756,6 +2774,26 @@ if (_bNext) _bNext.onclick = () => { if (lessonMode === 'exam' && !examDone) { i
 document.addEventListener('keydown', e => {
   const tag = (e.target && e.target.tagName) || '';
   const inField = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+  if (FOCUS) {
+    // In focus resta solo il percorso dell'attività: niente scorciatoie di
+    // ricerca/esame; la navigazione resta limitata alle slide condivise.
+    if (e.key === 'Escape') {
+      const kb = _btn('kbd'); if (kb) kb.classList.remove('open');
+      const nb = _btn('nmbox'); if (nb) nb.hidden = true;
+    }
+    else if (e.key === 'ArrowRight' && !inField) {
+      if (cur < LAST) { go(cur + 1); e.preventDefault(); }
+    }
+    else if (e.key === 'ArrowLeft' && !inField && cur > FOCUS_STOP) {
+      go(cur - 1); e.preventDefault();
+    }
+    else if (e.key === ' ') {
+      if (tag === 'BUTTON' || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      e.preventDefault();
+      if (audio.src) { if (audio.paused) { tryPlay(); } else { audio.pause(); } }
+    }
+    return;
+  }
   if (e.key === 'ArrowRight' && !inField) { go(cur + 1); e.preventDefault(); }
   else if (e.key === 'ArrowLeft' && !inField) { go(cur - 1); e.preventDefault(); }
   else if (e.key === 'Home' && !inField) { go(0); e.preventDefault(); }
@@ -2824,8 +2862,35 @@ document.addEventListener('keydown', e => {
     if (audio.src) { if (audio.paused) { tryPlay(); } else { audio.pause(); } }
   }
 });
-render(cur);   // parte dalla posizione salvata (riprendi da dove eri)
-if (cur > 0) {
+if (FOCUS) {
+  // Percorso "solo attività": si parte dalla slide dell'attività e si può
+  // proseguire (Avanti/Indietro, audio, quiz) senza mai risalire prima di
+  // quella slide né saltare altrove. Il riepilogo finale resta visibile.
+  document.documentElement.dataset.focus = '1';
+  try {
+    const st = document.getElementById('map'); if (st) st.style.display = 'none';
+    const pb = document.getElementById('pbar'); if (pb) pb.style.display = 'none';
+    ['btnSearch', 'btnModeExam'].forEach(id => {
+      const b = document.getElementById(id); if (b) b.style.display = 'none';
+    });
+    const dots = document.getElementById('dots');
+    if (dots) dots.innerHTML = '<span class="stlab">🎯 Attività: si prosegue fino in fondo</span>';
+    const chip = document.getElementById('prog');
+    if (chip) chip.textContent = '🎯 Attività ' + (focusAct + 1) + ' / ' + slides.length;
+  } catch (e) {}
+  // Niente salti fuori dal percorso: Avanti/Indietro restano nel range
+  // [focusAct .. ultima slide], quindi l'attività si svolge per intero.
+  const _origGo = go;
+  go = function(i) { _origGo(Math.max(FOCUS_STOP, Math.min(LAST, i))); };
+  // la barra dei moduli porta agli altri moduli: nel percorso non serve
+  const _origRender = render;
+  render = function(i) {
+    _origRender(i);
+    try { document.querySelectorAll('.modnav').forEach(n => n.remove()); } catch (e) {}
+  };
+  go(focusAct);
+} else if (cur > 0) {
+  render(cur);
   // Ripresa a metà percorso: avviso chiaro e revocabile, così la prima
   // pagina resta sempre raggiungibile con un clic (e non sembra "sparita").
   const rip = document.createElement('div');
@@ -2846,6 +2911,8 @@ if (cur > 0) {
   rip.appendChild(lbl); rip.appendChild(daCapo); rip.appendChild(chiudi);
   document.body.appendChild(rip);
   setTimeout(() => { if (rip.parentNode) rip.remove(); }, 10000);
+} else {
+  render(cur);   // percorso normale, prima slide
 }
 paintMap();    // mappa del percorso alla prima apertura
 """
@@ -2954,9 +3021,13 @@ def write_player(out_dir: Path, titolo: str, tema: str = 'dark'):
             % (__import__('json').dumps(titolo), __import__('json').dumps(titolo[:12])),
             encoding='utf-8')
         (out_dir / 'sw.js').write_text(
-            "const C='lesson-v3';\n"
+            # NB: il nome della cache cambia a ogni versione del player, così
+            # l'alunno non resta su una lezione vecchia: altrimenti il
+            # service worker continua a servire i file già in cache.
+            "const C='lesson-v4';\n"
             "self.addEventListener('install',e=>{e.waitUntil(caches.open(C).then(c=>c.addAll("
-            "['./index.html','./main.css','./main.js','./lesson-data.js']).catch(()=>{})));});\n"
+            "['./index.html','./main.css','./main.js','./lesson-data.js']).catch(()=>{}))"
+            ".then(()=>self.skipWaiting()));});\n"
             "self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(ks=>Promise.all("
             "ks.filter(k=>k!==C).map(k=>caches.delete(k)))));self.clients.claim();});\n"
             "self.addEventListener('fetch',e=>{const req=e.request; if(req.method!=='GET') return;"

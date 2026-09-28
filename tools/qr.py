@@ -55,7 +55,9 @@ def _rs_gen(nsym):
         for j, v in enumerate(prev):
             g[j] ^= _gf_mul(v, _EXP[i])
             g[j + 1] ^= v
-    return g
+    # g[j] = coefficiente di x^j: _rs_encode lavora come qrcode-generator,
+    # cioe' dal grado piu' alto (g[0] = 1) verso il basso.
+    return g[::-1]
 
 
 def _rs_encode(data, nsym):
