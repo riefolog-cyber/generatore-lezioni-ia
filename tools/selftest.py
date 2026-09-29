@@ -50,6 +50,54 @@ def _find_chrome():
 CHROME = _find_chrome()
 
 
+# --------------------------------------------------------- rendering headless
+# Tutti i test che caricano davvero il player nel browser (test_grading,
+# test_player_css) avevano la stessa sequenza di flag e un `--user-data-dir`
+# NUOVO per ogni invocazione. Misurato su questo progetto: Chrome headless
+# parte in ~0,42 s con profilo nuovo e ~0,35 s con profilo già inizializzato,
+# e l'avvio (non il rendering) e' il costo dominante. Con 7 invocazioni la
+# differenza si sente, quindi qui profilo e flag sono centralizzati.
+_PROFILE = None
+
+
+def chrome_profile():
+    """Cartella profilo Chrome riusata da tutte le invocazioni del processo.
+
+    Va riusata perche' crearne una nuova costa ~70 ms: Chrome deve ricostruire
+    cache, preferenze e componenti ad ogni avvio. La cartella viene rimossa
+    alla fine del processo.
+    """
+    global _PROFILE
+    if _PROFILE is None:
+        _PROFILE = tempfile.mkdtemp(prefix="lesson-chrome-")
+    return _PROFILE
+
+
+def chrome_args(budget=8000, extra=()):
+    """Flag comuni per il rendering headless, in un posto solo.
+
+    `--no-first-run`/`--no-default-browser-check` eliminano le finestre di
+    primo avvio (che in headless non compaiono ma costano tempo),
+    `--disable-extensions` e `--disable-background-networking` tolgono
+    rumore di rete, `--disable-gpu` e' gia' necessario su Windows headless.
+    """
+    return [
+        CHROME, "--headless", "--disable-gpu", "--no-first-run",
+        "--no-default-browser-check", "--disable-extensions",
+        "--disable-background-networking", "--disable-sync",
+        f"--virtual-time-budget={budget}",
+        f"--user-data-dir={chrome_profile()}", *extra,
+    ]
+
+
+def cleanup_chrome_profile():
+    """Rimuove il profilo condiviso (chiamato alla fine della sessione)."""
+    global _PROFILE
+    if _PROFILE:
+        shutil.rmtree(_PROFILE, ignore_errors=True)
+        _PROFILE = None
+
+
 def find_lessons():
     return sorted(p for p in BASE.glob("*_lesson")
                   if p.is_dir() and (p / "index.html").exists())

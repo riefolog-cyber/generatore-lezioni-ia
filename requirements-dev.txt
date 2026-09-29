@@ -1,3 +1,9 @@
 # Dipendenze di sviluppo (test unitari)
 #   pip install -r requirements-dev.txt
 pytest>=8.0.0,<10
+# Lint statico: nomi indefiniti, import inutilizzati, variabili scartate.
+# Non e' un vezzo estetico: ha gia' trovato quattro bug che crashavano a
+# runtime (preview con normalize_profilo, avvia.py che chiamava
+# build_from_source senza importarlo, export_zip.py con os non importato,
+# e un .format() che moriva con KeyError sulle graffe del JSON).
+pyflakes>=3.0.0,<4

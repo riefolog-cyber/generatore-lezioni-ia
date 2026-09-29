@@ -272,7 +272,6 @@ def test_accent_sempre_legibile_su_ogni_titolo():
     """L'accent dipende dal titolo della lezione, quindi il difetto compariva
     solo su alcune lezioni: testo bianco su un verde acceso dava 1,53:1, cioe'
     pulsanti illeggibili. `--accent-ink` garantisce almeno 4,5:1 ovunque."""
-    import colorsys
 
     import player_template as pt
 

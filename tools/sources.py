@@ -365,7 +365,6 @@ def extract_pptx(path):
     """Estrae il testo delle slide usando solo zipfile/XML standard."""
     import xml.etree.ElementTree as ET
     import zipfile
-    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
     sections, title = [], None
     with zipfile.ZipFile(str(path)) as zf:
         names = sorted((n for n in zf.namelist()

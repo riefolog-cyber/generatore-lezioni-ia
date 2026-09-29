@@ -121,7 +121,8 @@ try:
 except Exception:
     reachable = False
 print(("✓ 9router raggiungibile" if reachable else
-       "○ 9router non raggiungibile (lezioni in modalità ridotta, senza attività)"))
+       "○ 9router non raggiungibile: verrà avviato in automatico quando "
+       "serve (build, anteprima, osservazione cartella)"))
 
 print("=== " + ("PRONTO" if ok else "MANCA QUALCOSA DI ESSENZIALE — vedi sopra") + " ===")
 if avvisi:

@@ -680,84 +680,113 @@ class PanelHandler(_RangeHandler):
 
     # -- API ------------------------------------------------------------------
     def _api(self, path, query):
-        if path == "/api/classifica":
+        """Instrada le GET usando il registro in tools/panel_routes.py.
+
+        Prima era una catena di 16 `if path == "/api/..."`: ogni rotta era
+        definita in un punto solo ma la lista viveva incastrata nel codice, e il
+        path `/api/reaudio` compariva sia qui sia in do_POST. Il registro è ora
+        l'unica fonte di verità e le guardie (localhost / PIN) sono dichiarate
+        per rotta invece che dedotte dalla posizione nell'if.
+        """
+        from tools import panel_routes
+
+        rotta = panel_routes.lookup("GET", path)
+        if rotta is None:
+            self.send_error(404, "API sconosciuta")
+            return
+        if rotta.guardia == panel_routes.PIN_CLASSE:
+            # dalla rete di classe i dati degli studenti (nome, punti) sono
+            # visibili solo con il PIN docente
             if not _loopback(self) and not self._teacher_allowed():
-                # dalla rete di classe i dati degli studenti (nome, puni) sono
-                # visibili solo con il PIN docente
-                self._reject(403, "PIN docente richiesto per la classifica.")
+                self._reject(403, "PIN docente richiesto per questa API.")
                 return
-            return self._json(_classifica_view())
-        if path == "/api/classifica_export":
-            if not _loopback(self) and not self._teacher_allowed():
-                self._reject(403, "PIN docente richiesto per l'export della classifica.")
-                return
-            return self._classifica_export(query)
-        if not _loopback(self):
+        elif not _loopback(self):
             self._reject(403, "API riservate a localhost")
             return
-        if path == "/api/state":
-            return self._json(_state())
-        if path == "/api/log":
-            s = _JOBS.snapshot()          # copia coerente sotto lock
-            started = s.get("started_at")
-            elapsed = (time.time() - started) if started and s.get("running") else None
-            try:
-                cur = int((query.get("from", ["-1"])[0] or "-1"))
-            except (TypeError, ValueError):
-                cur = -1
-            lines, total, truncated = LOG.since(cur)
-            return self._json({"running": s["running"], "kind": s["kind"],
-                               "source": s["source"], "error": s["error"],
-                               "done_at": s["done_at"], "ok": s["ok"],
-                               "elapsed": round(elapsed, 1) if elapsed else None,
-                               "queued": len(s["queue"]),
-                               "queue": s["queue"],
-                               "cursor": total, "truncated": truncated,
-                               "lines": lines})
-        if path == "/api/build":
-            return self._start(self._parse_build())
-        if path == "/api/reaudio":
-            return self._start_reaudio(query)
-        if path == "/api/export_single":
-            return self._export_single(query)
-        if path == "/api/progress":
-            return self._progress()
-        if path == "/api/history":
-            return self._history()
-        if path == "/api/lan":
-            ip = lan_ip()
-            try:
-                from tools.shared_lesson import get_shared
-                shared = get_shared(BASE)
-            except Exception:
-                shared = ""
-            base = f"http://{ip}:{RUNTIME_PORT}" if ip else ""
-            return self._json({
-                "lan_ip": ip, "port": RUNTIME_PORT,
-                "url": f"{base}/{shared}/index.html" if (base and shared) else (f"{base}/" if base else None),
-                "hub_url": f"{base}/" if base else None,
-                "lesson_url": f"{base}/{shared}/index.html" if (base and shared) else None,
-                "shared": shared,
-                "warning": lan_warning(),
-                "selftest": _lan_selftest(ip, RUNTIME_PORT) if ip else None,
-            })
-        if path == "/api/qr":
-            return self._qr(query)
-        if path == "/api/diagnostica":
-            from tools.netdiag import diagnose
-            return self._json(diagnose(RUNTIME_PORT))
-        if path == "/api/logs_download":
-            return self._logs_download()
-        if path == "/api/voices":
-            return self._json({"voices": _edge_voices_live(),
-                               "current": CONFIG.get("edge_voice")})
-        if path == "/api/lesson_data":
-            return self._lesson_data(query)
-        if path == "/api/settings":
-            from tools.panel_settings import public_config
-            return self._json({"settings": public_config(),
-                               "runtime_port": RUNTIME_PORT})
-        self.send_error(404, "API sconosciuta")
+        getattr(self, "_api_" + rotta.method)(query)
+
+    # -- implementazioni delle rotte GET (una per rotta del registro) ----------
+    def _api_stato(self, query):
+        return self._json(_state())
+
+    def _api_classifica(self, query):
+        return self._json(_classifica_view())
+
+    def _api_classifica_export(self, query):
+        return self._classifica_export(query)
+
+    def _api_build(self, query):
+        return self._start(self._parse_build())
+
+    def _api_export_single(self, query):
+        return self._export_single(query)
+
+    def _api_progresso(self, query):
+        return self._progress()
+
+    def _api_history(self, query):
+        return self._history()
+
+    def _api_qr(self, query):
+        return self._qr(query)
+
+    def _api_diagnostica(self, query):
+        from tools.netdiag import diagnose
+        return self._json(diagnose(RUNTIME_PORT))
+
+    def _api_logs_download(self, query):
+        return self._logs_download()
+
+    def _api_voices(self, query):
+        return self._json({"voices": _edge_voices_live(),
+                           "current": CONFIG.get("edge_voice")})
+
+    def _api_lesson_data(self, query):
+        return self._lesson_data(query)
+
+    def _api_settings(self, query):
+        from tools.panel_settings import public_config
+        return self._json({"settings": public_config(),
+                           "runtime_port": RUNTIME_PORT})
+
+    def _api_reaudio(self, query):
+        return self._start_reaudio(query)
+
+    def _api_log(self, query):
+        s = _JOBS.snapshot()          # copia coerente sotto lock
+        started = s.get("started_at")
+        elapsed = (time.time() - started) if started and s.get("running") else None
+        try:
+            cur = int((query.get("from", ["-1"])[0] or "-1"))
+        except (TypeError, ValueError):
+            cur = -1
+        lines, total, truncated = LOG.since(cur)
+        return self._json({"running": s["running"], "kind": s["kind"],
+                           "source": s["source"], "error": s["error"],
+                           "done_at": s["done_at"], "ok": s["ok"],
+                           "elapsed": round(elapsed, 1) if elapsed else None,
+                           "queued": len(s["queue"]),
+                           "queue": s["queue"],
+                           "cursor": total, "truncated": truncated,
+                           "lines": lines})
+
+    def _api_lan(self, query):
+        ip = lan_ip()
+        try:
+            from tools.shared_lesson import get_shared
+            shared = get_shared(BASE)
+        except Exception:
+            shared = ""
+        base = f"http://{ip}:{RUNTIME_PORT}" if ip else ""
+        return self._json({
+            "lan_ip": ip, "port": RUNTIME_PORT,
+            "url": f"{base}/{shared}/index.html" if (base and shared) else (f"{base}/" if base else None),
+            "hub_url": f"{base}/" if base else None,
+            "lesson_url": f"{base}/{shared}/index.html" if (base and shared) else None,
+            "shared": shared,
+            "warning": lan_warning(),
+            "selftest": _lan_selftest(ip, RUNTIME_PORT) if ip else None,
+        })
 
     def _teacher_allowed(self):
         return _class_repo_authorized(
@@ -920,7 +949,6 @@ class PanelHandler(_RangeHandler):
         return src, force, bozza, single, profilo
 
     def _start(self, parsed):
-        import new_lesson
         src, force, bozza, single, profilo = parsed
         source_name = Path(src).name if not is_url(src) else src
         if _material_job_pending(source_name):
@@ -937,7 +965,6 @@ class PanelHandler(_RangeHandler):
         self._json({"started": True, "queued": queued})
 
     def _start_text(self):
-        import new_lesson
         from common import normalize_profilo
         data = self._read_json_body()
         text = str(data.get("text") or "")
@@ -1327,11 +1354,13 @@ class PanelHandler(_RangeHandler):
             self._reject(403, "Host non consentito.")
             return
         parsed = urllib.parse.urlparse(self.path)
+        # UNA SOLA API aperta alla LAN: gli studenti inviano il risultato del
+        # percorso (nessun dato sensibile, valori sanitized e limitati). Resta
+        # comunque soggetta al controllo origine: altrimenti un qualsiasi sito
+        # potrebbe far inviare righe arbitrarie. Le rotte sono nel registro
+        # (tools/panel_routes.py, guardia PUBBLICA), ma questa va gestita PRIMA
+        # del blocco sotto perché salta i controlli di loopback e PIN docente.
         if parsed.path == "/api/classifica":
-            # UNA SOLA API aperta alla LAN: gli studenti inviano il risultato
-            # del percorso (nessun dato sensibile, valori sanitized e limitati).
-            # Resta comunque soggetta al controllo origine: altrimenti un
-            # qualsiasi sito potrebbe far inviare righe arbitrarie.
             if not self._origin_ok():
                 self._reject(403, "Origine non consentita.")
                 return
@@ -1349,127 +1378,160 @@ class PanelHandler(_RangeHandler):
         if not self._teacher_allowed():
             self._reject(403, "PIN docente non valido.")
             return
-        if parsed.path == "/api/build":
-            if not _rate_ok(self.client_address[0]):
-                self._json({"started": False, "reason": "Troppe richieste: riprova tra un po'."}, 429)
-                return
-            try:
-                self._start(self._parse_build())
-            except Exception as e:  # noqa: BLE001
-                self._json({"started": False, "reason": str(e)}, 400)
-        elif parsed.path == "/api/build_text":
-            if not _rate_ok(self.client_address[0]):
-                self._json({"started": False, "reason": "Troppe richieste: riprova tra un po'."}, 429)
-                return
-            try:
-                self._start_text()
-            except Exception as e:  # noqa: BLE001
-                self._json({"started": False, "reason": str(e)}, 400)
-        elif parsed.path == "/api/move_slide":
-            try:
-                self._move_slide()
-            except Exception as e:  # noqa: BLE001
-                self._json({"ok": False, "error": str(e)}, 400)
-        elif parsed.path == "/api/add_slide":
-            try:
-                self._add_slide()
-            except Exception as e:  # noqa: BLE001
-                self._json({"ok": False, "error": str(e)}, 400)
-        elif parsed.path == "/api/delete_slide":
-            try:
-                self._delete_slide()
-            except Exception as e:  # noqa: BLE001
-                self._json({"ok": False, "error": str(e)}, 400)
-        elif parsed.path == "/api/reaudio":
-            try:
-                self._start_reaudio(urllib.parse.parse_qs(parsed.query))
-            except Exception as e:  # noqa: BLE001
-                self._json({"started": False, "reason": str(e)}, 400)
-        elif parsed.path == "/api/lesson_action":
-            try:
-                data = self._read_json_body()
-                self._lesson_action(str(data.get("action") or ""), data)
-            except Exception as e:  # noqa: BLE001
-                self._json({"ok": False, "error": str(e)}, 400)
-        elif parsed.path == "/api/upload":
-            try:
-                self._upload()
-            except _UploadTooBig as e:
-                _log(f"✗ upload rifiutato (troppo grande): {e}")
-                _flog(f"upload 413 | {e} | len={self.headers.get('Content-Length')} "
-                      f"| ctype={self.headers.get('Content-Type', '')[:100]}")
-                self._json({"ok": False, "error": str(e)}, 413)
-            except Exception as e:  # noqa: BLE001
-                _log(f"✗ upload fallito: {e}")
-                _flog(f"upload 400 | {e} | len={self.headers.get('Content-Length')} "
-                      f"| ctype={self.headers.get('Content-Type', '')[:100]}")
-                self._json({"ok": False, "error": str(e)}, 400)
-        elif parsed.path == "/api/cancel_queue":
-            n = cancel_queue()
-            self._json({"ok": True, "removed": n})
-        elif parsed.path == "/api/cancel_job":
-            if not JOB["running"]:
-                self._json({"ok": False, "error": "Nessun lavoro in corso."}, 409)
-                return
-            from sources import cancel_transcription
-            cancel_transcription()
-            _log("⏹ annullamento trascrizione richiesto")
-            self._json({"ok": True})
-        elif parsed.path == "/api/settings":
-            if not self._require_teacher():
-                return
-            try:
-                from tools.panel_settings import update_public
-                global CONFIG, MAX_UPLOAD_MB, MAX_UPLOAD_BYTES
-                values = update_public(self._read_json_body())
-                old_port = int(CONFIG.get("porta", 8341))
-                old_cache = int(CONFIG.get("cache_max_mb", 300))
-                CONFIG = load_config()
-                MAX_UPLOAD_MB = int(CONFIG.get("max_upload_mb", 100))
-                MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
-                restart = (int(CONFIG.get("porta", 8341)) != old_port or
-                           int(CONFIG.get("cache_max_mb", 300)) != old_cache)
-                self._json({"ok": True, "settings": values,
-                            "restart_required": restart})
-            except Exception as e:  # noqa: BLE001
-                self._json({"ok": False, "error": str(e)}, 400)
-        elif parsed.path == "/api/save_slide":
-            try:
-                self._save_slide()
-            except Exception as e:  # noqa: BLE001
-                _flog(f"save_slide 400 | {e}")
-                self._json({"ok": False, "error": str(e)}, 400)
-        elif parsed.path == "/api/reaudio_slide":
-            try:
-                self._reaudio_slide(urllib.parse.parse_qs(parsed.query))
-            except Exception as e:  # noqa: BLE001
-                self._json({"started": False, "reason": str(e)}, 400)
-        elif parsed.path == "/api/tts_preview":
-            try:
-                self._tts_preview()
-            except Exception as e:  # noqa: BLE001
-                self._json({"ok": False, "error": str(e)}, 400)
-        elif parsed.path == "/api/clear_history":
-            _history_clear()
-            self._json({"ok": True})
-        elif parsed.path == "/api/refresh_player":
-            # Il player (CSS/JS/SW) e' scritto come file statici dentro ogni
-            # cartella lezione e non si aggiorna da solo quando si modifica
-            # tools/player_template.py: senza questo pulsante gli studenti
-            # continuano a vedere una versione vecchia. Non tocca audio,
-            # sottotitoli o contenuti.
-            import rigenera_player
+        self._post_api(parsed)
 
-            rigenera_player.rigenera(BASE, log=lambda m: _log(m))
-            _invalidate_lessons_cache()
-            self._json({"ok": True,
-                        "messaggio": "Player aggiornato in tutte le lezioni."})
-        elif parsed.path == "/api/reset_classifica":
-            # PIN già verificato sopra per tutte le POST
-            _classifica_reset()
-            self._json({"ok": True})
-        else:
+    # -- POST: dispatch dal registro + un metodo per rotta ---------------------
+    def _post_api(self, parsed):
+        """Instrada le POST usando il registro in tools/panel_routes.py.
+
+        Prima era una catena di 17 `elif parsed.path == "/api/..."` lunga ~120
+        righe, con dentro la gestione errori di ciascuna rotta: aggiungere un
+        endpoint richiedeva di ricordarsi in che punto della catena infilarlo e
+        la forma dell'errore ({"started":...} o {"ok":...}) era implicita nella
+        posizione. Le rotte sono ora dichiarate una volta sola in
+        tools/panel_routes.py, con guardia, rate-limit e forma dell'errore
+        espliciti: `tests/test_panel_routes.py` verifica che ogni rotta
+        dichiarata abbia davvero il metodo corrispondente.
+        """
+        from tools import panel_routes
+
+        rotta = panel_routes.lookup("POST", parsed.path)
+        if rotta is None:
             self.send_error(404, "API sconosciuta")
+            return
+        if rotta.guardia == panel_routes.PUBBLICA:
+            # unica rotta aperta alla rete: gestita già in do_POST, dove il
+            # controllo origine viene prima del blocco loopback/PIN
+            return self._classifica_post()
+        if rotta.rate_limit and not _rate_ok(self.client_address[0]):
+            self._json({"started": False,
+                        "reason": "Troppe richieste: riprova tra un po'."}, 429)
+            return
+        if rotta.err is None:
+            getattr(self, "_post_" + rotta.method)(parsed)   # contratto proprio
+            return
+        try:
+            metodo = getattr(self, "_post_" + rotta.method)
+            if rotta.query:
+                metodo(urllib.parse.parse_qs(parsed.query))
+            else:
+                metodo()
+        except Exception as e:  # noqa: BLE001
+            if rotta.err == "started":
+                self._json({"started": False, "reason": str(e)}, 400)
+            else:
+                self._json({"ok": False, "error": str(e)}, 400)
+
+    def _post_build(self):
+        return self._start(self._parse_build())
+
+    def _post_build_text(self):
+        return self._start_text()
+
+    def _post_move_slide(self):
+        return self._move_slide()
+
+    def _post_add_slide(self):
+        return self._add_slide()
+
+    def _post_delete_slide(self):
+        return self._delete_slide()
+
+    def _post_reaudio(self, query):
+        return self._start_reaudio(query)
+
+    def _post_lesson_action(self):
+        data = self._read_json_body()
+        return self._lesson_action(str(data.get("action") or ""), data)
+
+    def _post_save_slide(self):
+        # il log tiene traccia del body non valido: senza, una slide che non si
+        # salva dal pannello non lascia nessuna traccia
+        try:
+            return self._save_slide()
+        except Exception as e:  # noqa: BLE001
+            _flog(f"save_slide 400 | {e}")
+            raise
+
+    def _post_reaudio_slide(self, query):
+        return self._reaudio_slide(query)
+
+    def _post_tts_preview(self):
+        return self._tts_preview()
+
+    def _post_upload(self, parsed):
+        """L'upload ha un contratto proprio: 413 se il file supera il limite."""
+        try:
+            self._upload()
+        except _UploadTooBig as e:
+            _log(f"✗ upload rifiutato (troppo grande): {e}")
+            _flog(f"upload 413 | {e} | len={self.headers.get('Content-Length')} "
+                  f"| ctype={self.headers.get('Content-Type', '')[:100]}")
+            self._json({"ok": False, "error": str(e)}, 413)
+        except Exception as e:  # noqa: BLE001
+            _log(f"✗ upload fallito: {e}")
+            _flog(f"upload 400 | {e} | len={self.headers.get('Content-Length')} "
+                  f"| ctype={self.headers.get('Content-Type', '')[:100]}")
+            self._json({"ok": False, "error": str(e)}, 400)
+
+    def _post_cancel_queue(self, parsed):
+        n = cancel_queue()
+        self._json({"ok": True, "removed": n})
+
+    def _post_cancel_job(self, parsed):
+        if not JOB["running"]:
+            self._json({"ok": False, "error": "Nessun lavoro in corso."}, 409)
+            return
+        from sources import cancel_transcription
+        cancel_transcription()
+        _log("⏹ annullamento trascrizione richiesto")
+        self._json({"ok": True})
+
+    def _post_clear_history(self, parsed):
+        _history_clear()
+        self._json({"ok": True})
+
+    def _post_reset_classifica(self, parsed):
+        # PIN già verificato sopra per tutte le POST
+        _classifica_reset()
+        self._json({"ok": True})
+
+    # -- metodi delle rotte POST con contratto proprio -------------------------
+    def _post_settings(self, parsed):
+        """Salva le impostazioni e ricalcola i limiti (doppio check del PIN)."""
+        if not self._require_teacher():
+            return
+        try:
+            from tools.panel_settings import update_public
+            global CONFIG, MAX_UPLOAD_MB, MAX_UPLOAD_BYTES
+            values = update_public(self._read_json_body())
+            old_port = int(CONFIG.get("porta", 8341))
+            old_cache = int(CONFIG.get("cache_max_mb", 300))
+            CONFIG = load_config()
+            MAX_UPLOAD_MB = int(CONFIG.get("max_upload_mb", 100))
+            MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
+            restart = (int(CONFIG.get("porta", 8341)) != old_port or
+                       int(CONFIG.get("cache_max_mb", 300)) != old_cache)
+            self._json({"ok": True, "settings": values,
+                        "restart_required": restart})
+        except Exception as e:  # noqa: BLE001
+            self._json({"ok": False, "error": str(e)}, 400)
+
+    def _post_refresh_player(self, parsed):
+        """Riscrive il player di tutte le lezioni.
+
+        Il player (CSS/JS/SW) è scritto come file statici dentro ogni cartella
+        lezione e non si aggiorna da solo quando si modifica
+        tools/player_template.py: senza questo pulsante gli studenti
+        continuano a vedere una versione vecchia. Non tocca audio, sottotitoli
+        o contenuti.
+        """
+        import rigenera_player
+
+        rigenera_player.rigenera(BASE, log=lambda m: _log(m))
+        _invalidate_lessons_cache()
+        self._json({"ok": True,
+                    "messaggio": "Player aggiornato in tutte le lezioni."})
 
     def _classifica_post(self):
         """Invio del risultato da parte dello studente.

@@ -8,6 +8,7 @@ Il destinatario NON deve installare nulla:
 
 Uso: python tools/export_zip.py [nome_lezione]
 """
+import os
 import sys, zipfile
 from pathlib import Path
 

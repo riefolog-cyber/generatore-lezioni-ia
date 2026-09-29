@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """Test delle migliorie del pannello: lezioni, impostazioni, QR e rete."""
 import json
-import re
 import sys
 import time
 from pathlib import Path

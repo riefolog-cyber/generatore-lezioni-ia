@@ -1,6 +1,6 @@
 {
   "llm_url": "http://localhost:20128/v1",
-  "llm_model": "gemini/gemini-3.1-flash-lite-preview",
+  "llm_model": "comboact",
   "llm_api_key": "",
   "llm_modelli_fallback": [
     "groq/openai/gpt-oss-120b",

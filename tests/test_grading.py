@@ -30,7 +30,7 @@ BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE / "tools"))
 sys.path.insert(0, str(BASE))
 
-from tools.selftest import _find_chrome  # noqa: E402
+from tools.selftest import _find_chrome, chrome_args  # noqa: E402
 
 CHROME = _find_chrome()
 # In locale il browser puo' non esserci (si salta). In CI la sua assenza deve
@@ -158,19 +158,16 @@ def _valuta(lezione, risposte):
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     port = httpd.server_address[1]
-    prof = tempfile.mkdtemp()
     out_f = tempfile.NamedTemporaryFile(suffix=".html", delete=False)
     out_f.close()
     try:
         with open(out_f.name, "w", encoding="utf-8") as fo:
             subprocess.run(
-                [CHROME, "--headless", "--disable-gpu", "--virtual-time-budget=7000",
-                 f"--user-data-dir={prof}", "--dump-dom",
-                 f"http://127.0.0.1:{port}/l/index.html"],
+                chrome_args(7000) + ["--dump-dom",
+                                 f"http://127.0.0.1:{port}/l/index.html"],
                 stdout=fo, stderr=subprocess.DEVNULL, timeout=60)
     finally:
         httpd.shutdown()
-        shutil.rmtree(prof, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
     dom = Path(out_f.name).read_text(encoding="utf-8", errors="replace")
     m = re.search(r'<pre id="r">(.*?)</pre>', dom, re.S)
@@ -340,19 +337,16 @@ def _clicca(lezione, piano):
     handler = functools.partial(start_lesson._RangeHandler, directory=str(root))
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    prof = tempfile.mkdtemp()
     out_f = tempfile.NamedTemporaryFile(suffix=".html", delete=False)
     out_f.close()
     try:
         with open(out_f.name, "w", encoding="utf-8") as fo:
             subprocess.run(
-                [CHROME, "--headless", "--disable-gpu", "--virtual-time-budget=8000",
-                 f"--user-data-dir={prof}", "--dump-dom",
-                 f"http://127.0.0.1:{httpd.server_address[1]}/l/index.html"],
+                chrome_args(8000) + ["--dump-dom",
+                                 f"http://127.0.0.1:{httpd.server_address[1]}/l/index.html"],
                 stdout=fo, stderr=subprocess.DEVNULL, timeout=60)
     finally:
         httpd.shutdown()
-        shutil.rmtree(prof, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
     dom = Path(out_f.name).read_text(encoding="utf-8", errors="replace")
     m = re.search(r'<pre id="r">(.*?)</pre>', dom, re.S)
@@ -410,19 +404,16 @@ def _ordine_stabile(lezione):
     handler = functools.partial(start_lesson._RangeHandler, directory=str(root))
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    prof = tempfile.mkdtemp()
     out_f = tempfile.NamedTemporaryFile(suffix=".html", delete=False)
     out_f.close()
     try:
         with open(out_f.name, "w", encoding="utf-8") as fo:
             subprocess.run(
-                [CHROME, "--headless", "--disable-gpu", "--virtual-time-budget=8000",
-                 f"--user-data-dir={prof}", "--dump-dom",
-                 f"http://127.0.0.1:{httpd.server_address[1]}/l/index.html"],
+                chrome_args(8000) + ["--dump-dom",
+                                 f"http://127.0.0.1:{httpd.server_address[1]}/l/index.html"],
                 stdout=fo, stderr=subprocess.DEVNULL, timeout=60)
     finally:
         httpd.shutdown()
-        shutil.rmtree(prof, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
     dom = Path(out_f.name).read_text(encoding="utf-8", errors="replace")
     m = re.search(r'<pre id="r">(.*?)</pre>', dom, re.S)
@@ -504,19 +495,16 @@ def _autoavvanza(lezione):
     handler = functools.partial(start_lesson._RangeHandler, directory=str(root))
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    prof = tempfile.mkdtemp()
     out_f = tempfile.NamedTemporaryFile(suffix=".html", delete=False)
     out_f.close()
     try:
         with open(out_f.name, "w", encoding="utf-8") as fo:
             subprocess.run(
-                [CHROME, "--headless", "--disable-gpu", "--virtual-time-budget=8000",
-                 f"--user-data-dir={prof}", "--dump-dom",
-                 f"http://127.0.0.1:{httpd.server_address[1]}/l/index.html"],
+                chrome_args(8000) + ["--dump-dom",
+                                 f"http://127.0.0.1:{httpd.server_address[1]}/l/index.html"],
                 stdout=fo, stderr=subprocess.DEVNULL, timeout=60)
     finally:
         httpd.shutdown()
-        shutil.rmtree(prof, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
     dom = Path(out_f.name).read_text(encoding="utf-8", errors="replace")
     m = re.search(r'<pre id="r">(.*?)</pre>', dom, re.S)
@@ -590,19 +578,16 @@ def _valuta_clic_e_avanti(lezione):
     handler = functools.partial(start_lesson._RangeHandler, directory=str(root))
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    prof = tempfile.mkdtemp()
     out_f = tempfile.NamedTemporaryFile(suffix=".html", delete=False)
     out_f.close()
     try:
         with open(out_f.name, "w", encoding="utf-8") as fo:
             subprocess.run(
-                [CHROME, "--headless", "--disable-gpu", "--virtual-time-budget=7000",
-                 f"--user-data-dir={prof}", "--dump-dom",
-                 f"http://127.0.0.1:{httpd.server_address[1]}/l/index.html"],
+                chrome_args(7000) + ["--dump-dom",
+                                 f"http://127.0.0.1:{httpd.server_address[1]}/l/index.html"],
                 stdout=fo, stderr=subprocess.DEVNULL, timeout=60)
     finally:
         httpd.shutdown()
-        shutil.rmtree(prof, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
     dom = Path(out_f.name).read_text(encoding="utf-8", errors="replace")
     import html as _h
@@ -678,19 +663,16 @@ def test_la_risposta_corretta_non_e_mai_in_prima_posizione(lezione):
     handler = functools.partial(start_lesson._RangeHandler, directory=str(root))
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    prof = tempfile.mkdtemp()
     out_f = tempfile.NamedTemporaryFile(suffix=".html", delete=False)
     out_f.close()
     try:
         with open(out_f.name, "w", encoding="utf-8") as fo:
             subprocess.run(
-                [CHROME, "--headless", "--disable-gpu", "--virtual-time-budget=7000",
-                 f"--user-data-dir={prof}", "--dump-dom",
-                 f"http://127.0.0.1:{httpd.server_address[1]}/l/index.html"],
+                chrome_args(7000) + ["--dump-dom",
+                                 f"http://127.0.0.1:{httpd.server_address[1]}/l/index.html"],
                 stdout=fo, stderr=subprocess.DEVNULL, timeout=60)
     finally:
         httpd.shutdown()
-        shutil.rmtree(prof, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
     dom = Path(out_f.name).read_text(encoding="utf-8", errors="replace")
     m = re.search(r'<pre id="r">(.*?)</pre>', dom, re.S)

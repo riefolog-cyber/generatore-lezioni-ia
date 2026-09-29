@@ -49,6 +49,15 @@ from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE / "tools"))
+# UTF-8 sul PRIMO import, non solo in main(): questo modulo viene importato
+# anche da panel.py e dai test, dove main() non passa. Senza, bastava una
+# console cp1252 (il default di PowerShell) per far esplodere un print con
+# "✓" dentro ensure_llm() con UnicodeEncodeError: l'avvio automatico di
+# 9router partiva e subito dopo il crash cancellava il messaggio di successo.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
 from common import (load_config, resolve_voice, setup_logging, validate_lesson,
                      write_report, write_text_atomic)
 from player_template import write_player, bust_cache
@@ -1167,11 +1176,29 @@ def _llm_cache_put(key, struct):
 
 
 def _llm_cache_prune():
-    """Autolimite: oltre LLM_CACHE_MAX voci, elimina le più vecchie per mtime."""
+    """Autolimite: oltre LLM_CACHE_MAX voci, elimina le più vecchie per mtime.
+
+    Prima faceva `sorted(glob(...), key=stat)` a OGNI scrittura in cache, quindi
+    una build da 7 moduli (7+ put) pagava 7 volte un sort con una stat() per
+    file: 32 ms misurati con 400 file, tutto per scoprire quasi sempre che la
+    cache era ancora sotto il limite. Ora conta prima con os.scandir (molto
+    piu' economico di glob + stat) e solo se il limite e' superato fa il sort
+    e cancella. Stesso risultato, costo nullo nel caso normale.
+    """
     try:
+        try:
+            n = sum(1 for e in os.scandir(LLM_CACHE_DIR)
+                    if e.name.endswith(".json") and e.is_file())
+        except (OSError, FileNotFoundError):
+            return
+        if n <= LLM_CACHE_MAX:
+            return
         files = sorted(LLM_CACHE_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime)
         for p in files[:max(0, len(files) - LLM_CACHE_MAX)]:
-            p.unlink()
+            try:
+                p.unlink()
+            except OSError:
+                pass
     except Exception:
         pass
 
@@ -1816,7 +1843,6 @@ def _polish_mp3(src, bitrate="96k"):
                  "-f", "null", "-"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 text=True, timeout=120, check=False)
-            import json as _j  # noqa: F811 (locale: non usato altrove)
             m = re.search(r"\{[^}]*measured_[^}]+\}", meas.stderr or "", re.S)
             if m:
                 try:
@@ -2495,7 +2521,11 @@ def _complete_modules(testo, struct, nmin, profilo):
         "stesso schema JSON dei moduli "
         "(titolo/testo/punti/keywords/narrazione/quiz_narrazione/quiz/abbinamenti/"
         "vero_falso/sequenza/compila/scenari/errori/flashcards). "
-        "Rispondi SOLO con un JSON {\"moduli\": [...]}.\n\nMATERIALE:\n{testo}"
+        # NB: le graffe del JSON sono raddoppiate "{{" / "}}". Con una sola
+        # coppia, `.format()` le leggeva come placeholder: il retry parziale
+        # moriva subito con KeyError('"moduli"') e la lezione restava con
+        # moduli mancanti invece di essere completata.
+        "Rispondi SOLO con un JSON {{\"moduli\": [...]}}.\n\nMATERIALE:\n{testo}"
     ).format(need=need, testo=testo[:FLATTEN_LIMIT])
     for model in ([LLM_MODEL or pick_model(), "comboact"]):
         if not model:
@@ -2730,7 +2760,13 @@ def preview_from_source(path, out_name=None, no_cache=False, profilo=None):
     ext = extract_source(str(path))
     # Stesso profilo del build: senza questo la chiave cache era diversa e
     # l'anteprima "veloce" spendeva 1-4 minuti di LLM che il build rifaceva.
-    profilo = normalize_profilo({**CONFIG, **(profilo or {})})
+    # NB: l'import è LOCALE e obbligatorio. `normalize_profilo` sta in
+    # tools/common.py ma non è nel pacchetto importato in testa al modulo, e
+    # qui si usa col suo nome semplice: senza questa riga l'anteprima moriva
+    # subito con "name 'normalize_profilo' is not defined" (la funzione è
+    # usata solo a runtime, quindi nessun test la copriva).
+    from common import normalize_profilo as _np_preview
+    profilo = _np_preview({**CONFIG, **(profilo or {})})
     if ensure_llm(timeout=15):
         try:
             struct, via = llm_structure(ext, use_cache=not no_cache, profilo=profilo)

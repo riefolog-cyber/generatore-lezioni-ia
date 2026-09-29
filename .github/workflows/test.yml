@@ -13,6 +13,12 @@ jobs:
       - run: pip install -r requirements.txt -r requirements-extra.txt -r requirements-dev.txt
       - run: python -m pytest tests/ -q
       - run: python check_env.py
+      - name: lint (pyflakes)
+        # Non e' un vezzo estetico: pyflakes trova i nomi indefiniti che
+        # crashano solo a runtime. Ne ha gia' scovati quattro (normalize_profilo
+        # in preview, build_from_source in avvia.py, os in export_zip.py, e un
+        # .format() con graffe non raddoppiate che moriva con KeyError).
+        run: python -m pyflakes new_lesson.py panel.py app.py avvia.py check_env.py start_lesson.py rigenera_player.py tools tests
 
   browser:
     # I test di rendering (il foglio di stile che il browser applica davvero,

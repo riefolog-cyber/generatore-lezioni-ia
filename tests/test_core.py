@@ -52,8 +52,14 @@ def test_accetta_moduli_valori_anomali():
 def test_player_chiave_ripresa_con_impronta():
     """Il main.js del player deve calcolare DATA_KEY con l'impronta del
     contenuto (n° slide + narrazioni): una lezione rigenerata non deve
-    riapplicare la posizione salvata della versione precedente."""
-    src = (BASE / "tools" / "player_template.py").read_text(encoding="utf-8")
+    riapplicare la posizione salvata della versione precedente.
+
+    Il sorgente del player sta ora in tools/player_assets/ (file reale, non più
+    una stringa dentro player_template.py): il test legge il file vero, così
+    vale anche per l'ispezionabilità con un editor o con node --check.
+    """
+    import player_template as pt
+    src = pt._js()
     assert "_fingerprint" in src
     assert "slides.length + 's-'" in src
 

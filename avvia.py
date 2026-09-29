@@ -57,13 +57,16 @@ def main():
                       else f"○ voce Piper di riserva mancante ({voice.name}): "
                            "in assenza di rete l'audio sarà sostituito"))
 
-    # 3. 9router: se attivo la lezione è completa, altrimenti esce in bozza
-    from new_lesson import llm_reachable
-    print("[3/5] " + ("9router raggiungibile (lezione completa)" if llm_reachable()
-                      else "○ 9router non raggiungibile: lezione in modalità ridotta (lo avvio se serve)"))
+    # 3. 9router: lo avvio davvero se manca, altrimenti la lezione esce in
+    # bozza (senza quiz). Prima qui c'era solo un messaggio che prometteva
+    # "lo avvio se serve" senza avviarlo: la lezione partiva ridotta.
+    from new_lesson import ensure_llm
+    print("[3/5] " + ("9router raggiungibile (lezione completa)" if ensure_llm(timeout=45)
+                      else "○ 9router non disponibile: lezione in modalità ridotta, "
+                           "senza attività (avvialo a mano con: 9router)"))
 
     # 4. genera le lezioni mancanti (una sola alla volta: blocco anti-concorrenza)
-    from new_lesson import sanitize_stem, build_from_docx
+    from new_lesson import sanitize_stem, build_from_source
     from sources import SUPPORTED_EXT
     from common import setup_logging
     log = setup_logging()

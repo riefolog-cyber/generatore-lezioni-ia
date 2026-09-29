@@ -28,7 +28,7 @@ BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE / "tools"))
 sys.path.insert(0, str(BASE))
 
-from tools.selftest import _find_chrome  # noqa: E402
+from tools.selftest import _find_chrome, chrome_args  # noqa: E402
 
 CHROME = _find_chrome()
 
@@ -95,19 +95,16 @@ def _regole_applicate(lesson_dir, etichetta):
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     port = httpd.server_address[1]
-    prof = tempfile.mkdtemp()
     out_f = tempfile.NamedTemporaryFile(suffix=".html", delete=False)
     out_f.close()
     try:
         with open(out_f.name, "w", encoding="utf-8") as fo:
             subprocess.run(
-                [CHROME, "--headless", "--disable-gpu", "--virtual-time-budget=5000",
-                 f"--user-data-dir={prof}", "--dump-dom",
-                 f"http://127.0.0.1:{port}/l/probe.html"],
+                chrome_args(5000) + ["--dump-dom",
+                                 f"http://127.0.0.1:{port}/l/probe.html"],
                 stdout=fo, stderr=subprocess.DEVNULL, timeout=60)
     finally:
         httpd.shutdown()
-        shutil.rmtree(prof, ignore_errors=True)
         shutil.rmtree(root, ignore_errors=True)
     dom = Path(out_f.name).read_text(encoding="utf-8", errors="replace")
     m = re.search(r'<pre id="r">(.*?)</pre>', dom, re.S)
@@ -135,7 +132,6 @@ def test_gzip_davvero_attivo_e_corretto():
     """Il server deve comprimere, e il corpo deve essere gzip valido."""
     import gzip as _gz
     import http.client
-    import sys as _s
 
     import start_lesson
 

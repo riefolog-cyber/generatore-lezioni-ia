@@ -1,0 +1,962 @@
+/* ------------------------------------------------ base + sfondo aurora */
+/* testo solo per lettori di schermo */
+.sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  color: var(--text);
+  font-family: "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", sans-serif;
+  display: flex; flex-direction: column;
+  /* 100dvh, non 100vh: sui browser mobili 100vh non include l'area sotto la
+     barra degli indirizzi, quindi i controlli in fondo finivano tagliati. */
+  min-height: 100vh; min-height: 100dvh;
+  transition: background .35s ease, color .35s ease;
+  background: var(--bg); overflow-x: hidden;
+}
+body::before {
+  content: ''; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  background:
+    radial-gradient(1100px 620px at 6% -12%, var(--blob1), transparent 62%),
+    radial-gradient(950px 600px at 104% 4%, var(--blob2), transparent 60%),
+    radial-gradient(760px 520px at 50% 118%, var(--blob3), transparent 66%);
+  animation: aurora 30s ease-in-out infinite alternate;
+  /* L'aurora sta DIETRO a tre backdrop-filter (header, barra audio, nav):
+     finché il gradiente si muove il blur deve rileggerlo e rifiltrarlo a
+     ogni frame, per sempre. Con `body.idle` (nessuna interazione da 2,5 s)
+     l'animazione si ferma: da 3 blur/frame continui a 0 su slide ferma. */
+  animation-play-state: running;
+  will-change: opacity;
+}
+body.idle body::before { animation-play-state: paused; }
+@media (prefers-reduced-motion: reduce) {
+  body::before { animation: none; }
+}
+/* Griglia di puntini. Prima era `position: fixed; inset: 0` cioe' uno strato
+   compositato grande quanto l'intero viewport, con la maschera replicata
+   due volte (-webkit- e standard). Il puntino da 1 px era pero' invisibile
+   al 8% di opacita' e sul proiettore diventava rumore: qui l'area dipinta e'
+   limitata a dove la maschera lascia passare qualcosa, e resta una sola
+   dichiarazione di maschera (il prefisso -webkit- non serve dal 2021). */
+body::after {
+  content: ''; position: fixed; z-index: 0; pointer-events: none;
+  left: 50%; top: 18%;
+  width: min(2000px, 100vw); height: 1280px;
+  transform: translate(-50%, -50%);
+  background-image: radial-gradient(var(--dot) 1px, transparent 1.5px);
+  background-size: 30px 30px;
+  mask-image: radial-gradient(1000px 640px at 50% 50%, #000 25%, transparent 78%);
+}
+:root {
+  --blob1: color-mix(in srgb, var(--accent) 26%, transparent);
+  --blob2: color-mix(in srgb, var(--accent2) 22%, transparent);
+  --blob3: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+@keyframes aurora {
+  from { transform: translate3d(-1.5%, -1%, 0) scale(1); }
+  to   { transform: translate3d(1.5%, 1.5%, 0) scale(1.05); }
+}
+
+/* ------------------------------------------------ header + progressione */
+header {
+  position: relative; z-index: 5; display: flex; align-items: center; gap: 12px;
+  padding: 10px 18px;
+  background: color-mix(in srgb, var(--bg2) 78%, transparent);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line);
+  transition: background .3s ease, border-color .3s ease;
+}
+header .logo {
+  width: 36px; height: 36px; border-radius: 11px; flex: 0 0 auto;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  display: flex; align-items: center; justify-content: center; font-size: 18px;
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--accent) 45%, transparent),
+              inset 0 0 0 1px rgba(255, 255, 255, .22);
+}
+header h1 {
+  font-size: 15px; font-weight: 700; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; letter-spacing: .01em;
+  min-width: 0; flex: 1 1 auto;
+}
+header .spacer { flex: 1; }
+.hchip {
+  font-size: 12px; font-weight: 600; white-space: nowrap; padding: 4px 11px;
+  border-radius: 999px; border: 1px solid var(--line);
+  color: var(--muted); background: color-mix(in srgb, var(--card) 60%, transparent);
+}
+#prog { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
+#stat { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, transparent);
+  background: color-mix(in srgb, var(--ok) 12%, transparent); }
+#score { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
+.hbtn {
+  border: 1px solid var(--line); background: var(--card); color: var(--text);
+  border-radius: 11px; padding: 6px 12px; cursor: pointer; font-size: 15px;
+  transition: border-color .2s, transform .15s, box-shadow .2s;
+}
+.hbtn:hover { border-color: var(--accent); transform: translateY(-1px);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 22%, transparent); }
+.hbtn .hbtntxt { font-size: 12.5px; font-weight: 700; margin-left: 2px; }
+#hmenu { position: relative; flex: 0 0 auto; }
+#hdrop {
+  position: absolute; right: 0; top: calc(100% + 10px); z-index: 80;
+  min-width: 230px; display: flex; flex-direction: column; gap: 4px;
+  padding: 8px; border-radius: 14px; border: 1px solid var(--line);
+  background: var(--card); box-shadow: 0 18px 50px rgba(0, 0, 0, .45);
+  animation: rise .18s both;
+}
+#hdrop[hidden] { display: none; }
+#hdrop > button {
+  display: flex; align-items: center; gap: 11px; width: 100%;
+  background: transparent; border: none; border-radius: 10px;
+  color: var(--text); font: inherit; font-size: 14px; font-weight: 600;
+  padding: 10px 12px; cursor: pointer; text-align: left;
+}
+#hdrop > button:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+#hdrop > button .ic { font-size: 16px; flex: 0 0 auto; }
+#hdrop #accMenu { position: static; flex-direction: row; gap: 8px;
+  border-top: 1px solid var(--line); padding-top: 8px; margin-top: 4px; }
+#pbar { position: relative; z-index: 5; height: 4px; background: color-mix(in srgb, var(--line) 55%, transparent); }
+/* scaleX invece di width: animare la LARGHEZZA forza il layout (reflow) a ogni
+   frame della transizione; scaleX resta sul compositorio. */
+#pfill {
+  height: 100%; width: 100%; border-radius: 0 4px 4px 0;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  background-size: 200% 100%;
+  animation: progshine 3s linear infinite;
+  transform: scaleX(0); transform-origin: left center;
+  transition: transform .5s cubic-bezier(.2, .7, .3, 1);
+  box-shadow: 0 0 14px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+@keyframes progshine {
+  from { background-position: 0% 0; }
+  to   { background-position: 200% 0; }
+}
+
+/* ------------------------------------------------ stage + slide card */
+main { position: relative; z-index: 1; flex: 1; display: flex; min-height: 0; }
+#stage { flex: 1; display: flex; align-items: flex-start; justify-content: center; padding: 22px; overflow: auto; }
+#stage #slide { margin: auto; }
+#slide {
+  position: relative; overflow: hidden;
+  width: min(940px, 100%);
+  background: linear-gradient(165deg, var(--card) 0%, var(--card2) 135%);
+  border: 1px solid color-mix(in srgb, var(--line) 85%, transparent);
+  border-radius: 22px; padding: 34px 40px;
+  /* 80px di blur su un elemento a tutto schermo: il paint della card costava
+     piu' del contenuto. 46px danno la stessa separazione visiva. */
+  box-shadow: 0 24px 46px var(--cardsh),
+              0 2px 0 color-mix(in srgb, var(--accent) 22%, transparent) inset;
+  transition: background .3s ease, border-color .3s ease;
+}
+#slide::before {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 5px;
+  background: linear-gradient(90deg, var(--accent), var(--accent2) 60%, transparent);
+  border-radius: 22px 22px 0 0;
+}
+#slide::after {
+  content: ''; position: absolute; top: -40px; right: -60px; width: 300px; height: 220px;
+  background: radial-gradient(closest-side, color-mix(in srgb, var(--accent) 13%, transparent), transparent);
+  pointer-events: none;
+}
+#slide > * { position: relative; }
+#slide h1 { font-size: clamp(22px, 3.1vw, 32px); line-height: 1.22; margin-bottom: 12px;
+  font-weight: 800; letter-spacing: -.015em; }
+@supports (-webkit-background-clip: text) or (background-clip: text) {
+  #slide h1 {
+    background: linear-gradient(95deg, var(--text) 30%,
+      color-mix(in srgb, var(--text) 55%, var(--accent)) 100%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+}
+#slide h2 {
+  font-size: 20px; margin: 20px 0 10px; font-weight: 700;
+  display: flex; align-items: center; gap: 10px;
+}
+#slide h2::before { content: ''; width: 5px; height: 20px; border-radius: 3px;
+  background: linear-gradient(var(--accent), var(--accent2)); }
+/* ------------------------------------------------ leggibilità (proiettore)
+   Il corpo testo era 16px fissi: a 3 m da uno schermo da 55" equivalgono a
+   ~1,6 mm di altezza, cioè poco più di 5 mm — sotto la soglia di leggibilità
+   (la regola pratica è 1/30 dell'altezza dello schermo). Qui la dimensione
+   scala con la larghezza del viewport, così su un proiettore da 1920 px il
+   corpo passa a 21 px e su un tablet da 1024 px resta comodo.
+   `--slide-fs` è l'unica leva: i livelli di ingrandimento manuale (tasto F)
+   la moltiplicano, non la sovrascrivono. */
+:root { --slide-fs: var(--slide-fs-base); }
+#slide { font-size: var(--slide-fs); }
+/* lunghezza della riga: 940px di larghezza a 16px davano ~106 caratteri per
+   riga, oltre i 75 oltre i quali l'occhio perde il ritorno a inizio riga.
+   68ch con lo spazio di respiro del padding. */
+#slide p, #slide li, #slide blockquote, .scn .situ, .erra .brano, .vfq {
+  max-width: 68ch;
+}
+#slide p { font-size: 1em; line-height: 1.72; color: var(--text); margin: 8px 0; }
+.callout {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-size: .74em; font-weight: 800; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--accent);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 15%, transparent),
+    color-mix(in srgb, var(--accent2) 12%, transparent));
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent);
+  border-radius: 999px; padding: 5px 14px; margin-bottom: 16px;
+}
+.callout::before { content: '✦'; font-size: 11px; }
+#slide ul { margin: 12px 0 6px 6px; list-style: none; }
+#slide li {
+  font-size: .97em; line-height: 1.65; margin: 8px 0; padding-left: 26px; position: relative;
+}
+#slide li::before {
+  content: ''; position: absolute; left: 4px; top: .68em; width: 7px; height: 7px;
+  border-radius: 2px; transform: rotate(45deg);
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+#slide blockquote {
+  border-left: 3px solid var(--accent); padding: 10px 18px; margin: 20px 0 6px;
+  font-size: 18px; font-style: italic; color: var(--muted);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  border-radius: 0 12px 12px 0;
+}
+#slide .attr { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+#slide .icon {
+  font-size: 46px; line-height: 1; margin-bottom: 12px; display: inline-block;
+  filter: drop-shadow(0 6px 16px color-mix(in srgb, var(--accent) 55%, transparent));
+  animation: rise .5s both, floaty 3.4s ease-in-out .7s infinite alternate;
+}
+@keyframes floaty { from { transform: translateY(0); } to { transform: translateY(-5px); } }
+@keyframes pop { from { transform: scale(.6); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.banner {
+  margin-bottom: 18px; padding: 12px 16px; border-radius: 12px; font-size: 14px; font-weight: 600;
+  display: flex; gap: 10px; align-items: center;
+  background: color-mix(in srgb, var(--ko) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ko) 40%, transparent);
+}
+
+/* ------------------------------------------------ quiz + scenario (opzioni) */
+.quiz q { display: block; font-size: clamp(18px, 2.4vw, 22px); font-weight: 800;
+  line-height: 1.45; margin-bottom: 16px; letter-spacing: -.01em; }
+.opt {
+  display: flex; gap: 12px; align-items: center; width: 100%; text-align: left;
+  background: var(--card2); border: 1px solid var(--line); color: var(--text);
+  border-radius: 14px; padding: 13px 16px; margin: 9px 0; cursor: pointer; font-size: 15px;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, .08);
+  transition: border-color .2s, transform .15s, background .3s ease, box-shadow .2s;
+}
+.opt:hover { border-color: var(--accent); transform: translateX(4px);
+  box-shadow: 0 4px 18px color-mix(in srgb, var(--accent) 16%, transparent); }
+.opt .letter {
+  flex: 0 0 auto; width: 30px; height: 30px; border-radius: 50%; font-weight: 800; font-size: 14px;
+  display: flex; align-items: center; justify-content: center;
+  background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  transition: background .2s, color .2s;
+}
+.quiz .revealed .opt:not(.correct):not(.wrong), .scn .revealed .opt:not(.correct):not(.wrong) { opacity: .55; }
+.opt.correct { border-color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+  box-shadow: 0 4px 20px color-mix(in srgb, var(--ok) 22%, transparent); }
+.opt.correct .letter { background: var(--ok); color: #fff; border-color: var(--ok); }
+.opt.wrong { border-color: var(--ko); background: color-mix(in srgb, var(--ko) 11%, transparent); }
+.opt.wrong .letter { background: var(--ko); color: #fff; border-color: var(--ko); }
+.fb { margin-top: 14px; padding: 13px 16px; border-radius: 12px; font-size: 14.5px; display: none;
+  line-height: 1.6; border: 1px solid transparent; }
+.fb.ok { display: block; background: color-mix(in srgb, var(--ok) 10%, transparent);
+  border-color: color-mix(in srgb, var(--ok) 35%, transparent); }
+.adapt { margin-top: 10px; padding: 11px 15px; border-radius: 12px; font-size: 14px;
+  line-height: 1.55; border: 1px dashed var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.adapt button { margin-left: 8px; }
+.fb.ko { display: block; background: color-mix(in srgb, var(--ko) 9%, transparent);
+  border-color: color-mix(in srgb, var(--ko) 35%, transparent); }
+.fb .verdict { font-weight: 800; font-size: 15px; margin-bottom: 4px; }
+.fb.ok .verdict { color: var(--ok); }
+.fb.ko .verdict { color: var(--ko); }
+.fb .item { margin: 4px 0; }
+
+/* ------------------------------------------------ matching */
+.match .pairs { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 14px; }
+.match .col { display: flex; flex-direction: column; gap: 9px; }
+.match .collabel { font-size: 11px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 2px; padding-left: 4px; }
+.match .chip {
+  background: var(--card2); border: 1px solid var(--line); color: var(--text);
+  border-radius: 12px; padding: 11px 14px; font-size: 14px; cursor: pointer; text-align: left;
+  position: relative; transition: border-color .2s, box-shadow .2s, transform .15s, opacity .3s;
+}
+.match .col.L .chip { border-left: 3px solid var(--accent); }
+.match .col.R .chip { border-right: 3px solid var(--accent2); }
+.match .chip:hover { border-color: var(--accent); transform: translateY(-1px); }
+.match .chip.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 35%, transparent); }
+.match .chip.done { opacity: .5; cursor: default; border-color: var(--ok) !important; }
+.match .chip.done::after { content: ' ✓'; color: var(--ok); font-weight: 800; }
+.match .chip.err { border-color: var(--ko); animation: shake .4s; }
+.match .msg { margin-top: 14px; font-size: 14px; color: var(--muted); min-height: 20px; font-weight: 600; }
+
+/* ------------------------------------------------ vero / falso */
+.vf { display: flex; flex-direction: column; gap: 14px; margin-top: 8px; }
+.vfcard {
+  background: var(--card2); border: 1px solid var(--line); border-radius: 16px;
+  padding: 16px 18px; position: relative; overflow: hidden;
+  transition: background .3s ease, border-color .3s ease;
+}
+.vfcard::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+  background: linear-gradient(var(--accent), var(--accent2)); opacity: 0; transition: opacity .3s; }
+.vfcard.answered::before { opacity: .9; }
+.vfq { font-size: 16px; font-weight: 600; margin-bottom: 12px; line-height: 1.5; padding-right: 6px; }
+.vfrow { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+/* non solo colore: lo stato porta anche un simbolo, cosic' funziona per chi
+   non distingue il rosso dal verde (daltonismo) e a bassa luminosita' */
+.vfbtn::after { font-size: 1.05em; font-weight: 900; }
+.vfbtn[data-ok="1"]::after { content: "✓"; color: var(--ok); }
+.vfbtn[data-ok="0"]::after { content: "✕"; color: var(--ko); }
+.vfbtn[data-ok="1"] { border-color: var(--ok); border-width: 2px; }
+.vfbtn[data-ok="0"] { border-color: var(--ko); border-width: 2px; }
+.vfbtn {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  border: 1px solid var(--line); background: var(--card); color: var(--text);
+  border-radius: 12px; padding: 10px 0; font-size: 14px; font-weight: 800; cursor: pointer;
+  transition: border-color .2s, background .2s, transform .15s;
+}
+.vfbtn:hover { border-color: var(--accent); transform: translateY(-2px); }
+.vfbtn.ok { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 22%, transparent); color: var(--ok); }
+.vfbtn.ko { border-color: var(--ko); background: color-mix(in srgb, var(--ko) 16%, transparent); color: var(--ko); }
+.vffb { margin-top: 12px; font-size: 14px; padding: 11px 14px; border-radius: 11px; display: none;
+  line-height: 1.55; font-weight: 600; }
+.vffb.ok { display: block; background: color-mix(in srgb, var(--ok) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ok) 40%, transparent); color: var(--ok); }
+.vffb.ko { display: block; background: color-mix(in srgb, var(--ko) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ko) 40%, transparent); color: var(--ko); }
+
+/* ------------------------------------------------ sequenza */
+.seq > p { font-weight: 600; }
+.seqpool, .seqline { display: flex; flex-direction: column; gap: 9px; margin-top: 12px; }
+.seqline { min-height: 34px; padding-top: 10px; border-top: 2px dashed var(--line); margin-top: 16px; }
+.seqline .seqlabel { font-size: 11px; color: var(--muted); text-transform: uppercase;
+  letter-spacing: .1em; font-weight: 800; margin-bottom: 4px; }
+.seqchip {
+  background: var(--card2); border: 1px solid var(--line); color: var(--text);
+  border-radius: 12px; padding: 11px 15px; font-size: 14px; cursor: pointer; text-align: left;
+  display: flex; align-items: center; gap: 12px;
+  transition: border-color .2s, background .3s ease, transform .15s, opacity .3s;
+}
+.seqpool .seqchip::before { content: '⇅'; color: var(--muted); font-size: 13px; flex: 0 0 auto; }
+.seqchip:hover { border-color: var(--accent); transform: translateX(4px); }
+.seqline .seqchip { animation: rise .35s both; }
+.seqline .seqchip::before { content: none; }
+.seqchip.ok { border-color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 12%, transparent);
+  cursor: default; font-weight: 700; opacity: 1; }
+.seqchip.ok::after { content: '✓'; margin-left: auto; color: var(--ok); font-weight: 900; }
+.seqchip.err { border-color: var(--ko); animation: shake .4s; }
+.seqmsg { margin-top: 14px; font-size: 15px; color: var(--ok); font-weight: 800; }
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-6px); }
+  75% { transform: translateX(6px); }
+}
+
+/* ------------------------------------------------ flashcards (nuova attività) */
+.flash > p { font-weight: 600; }
+.fcdeck { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 12px; justify-content: center; }
+.fcard { width: 168px; height: 118px; cursor: pointer; perspective: 900px; }
+.fcard.fcon .fcinner { box-shadow: 0 10px 26px color-mix(in srgb, var(--accent) 30%, transparent); }
+.fcinner { position: relative; width: 100%; height: 100%; transition: transform .5s cubic-bezier(.3, .8, .3, 1);
+  transform-style: preserve-3d; }
+.fcard.flip .fcinner { transform: rotateY(180deg); }
+.fcface { position: absolute; inset: 0; backface-visibility: hidden; -webkit-backface-visibility: hidden;
+  border-radius: 15px; padding: 12px 13px; display: flex; flex-direction: column; overflow: hidden; }
+.fcfront { background: linear-gradient(150deg, var(--card2), color-mix(in srgb, var(--accent) 14%, var(--card)));
+  border: 1.5px solid color-mix(in srgb, var(--accent) 40%, var(--line)); align-items: flex-start; }
+.fcback { background: var(--card); border: 1.5px solid var(--line); transform: rotateY(180deg); }
+.fclabel { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); font-weight: 800; }
+.fcterm { font-weight: 800; font-size: 15.5px; margin-top: 8px; line-height: 1.35;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+/* la definizione completa si legge premendo: prima veniva tagliata a meta'
+   senza nessun indizio, quindi lo studente restava con una definizione
+   monca e non poteva sapere che il resto esisteva */
+.fcdef { font-size: 12.5px; line-height: 1.55; margin-top: 8px;
+  overflow-y: auto; max-height: 9em; }
+.fchint { margin-top: auto; font-size: 11px; color: var(--muted); font-style: italic; }
+.fcdots { display: flex; gap: 7px; justify-content: center; margin-top: 12px; }
+.fcdots span { width: 9px; height: 9px; border-radius: 50%; background: var(--line); cursor: pointer; transition: background .2s, transform .2s; }
+.fcdots span.on { background: linear-gradient(135deg, var(--accent), var(--accent2)); transform: scale(1.25); }
+.fcctrl { display: flex; gap: 9px; justify-content: center; margin-top: 10px; }
+.fcctrl button { border: 1px solid var(--line); background: var(--card); color: var(--text);
+  border-radius: 10px; padding: 8px 16px; cursor: pointer; font-weight: 800; font-size: 13.5px; font-family: inherit;
+  transition: border-color .2s, transform .15s; }
+.fcctrl button:hover { border-color: var(--accent); transform: translateY(-1px); }
+.fcverify { margin-top: 18px; border-top: 2px dashed var(--line); padding-top: 14px; display: flex; flex-direction: column; gap: 10px; }
+.fcverify > p { font-weight: 700; }
+.fcrow { display: grid; grid-template-columns: minmax(110px, 190px) 1fr; gap: 10px; align-items: center; }
+/* su telefono la griglia a due colonne schiacciava le opzioni a 100 px */
+@media (max-width: 560px) { .fcrow { grid-template-columns: 1fr; gap: 6px; } }
+.fcrow > .fcterm { margin: 0; font-size: 14px; }
+.fcrowopts { display: flex; gap: 7px; flex-wrap: wrap; }
+.opt.small { font-size: 12px; padding: 9px 12px; border-radius: 9px; text-align: left;
+  white-space: normal; line-height: 1.4; }
+
+/* ------------------------------------------------ glossario strutturato */
+.glos > p { font-weight: 600; }
+.glosearch { width: 100%; margin: 12px 0 4px; padding: 11px 15px; border-radius: 12px;
+  border: 1px solid var(--line); background: var(--card2); color: var(--text);
+  font: inherit; font-size: 14.5px; }
+.glosearch:focus { outline: none; border-color: var(--accent); }
+.glocount { font-size: 12.5px; color: var(--muted); margin: 2px 0 10px; }
+.glogroup { margin: 12px 0 4px; font-size: 13px; font-weight: 800; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--accent); }
+.gloterm { border: 1px solid var(--line); border-radius: 12px; margin: 7px 0;
+  background: var(--card2); overflow: hidden; }
+.gloterm > button { width: 100%; display: flex; justify-content: space-between; align-items: center;
+  gap: 10px; background: none; border: none; color: var(--text); font: inherit;
+  font-weight: 700; font-size: 15px; padding: 12px 15px; cursor: pointer; text-align: left; }
+.gloterm > button .arrow { color: var(--accent); font-size: 12px; transition: transform .2s; }
+.gloterm.open > button .arrow { transform: rotate(90deg); }
+.glodef { display: none; padding: 0 15px 13px; font-size: 14px; line-height: 1.6; color: var(--text); }
+.gloterm.open .glodef { display: block; }
+.glomod { display: inline-block; margin-top: 8px; font-size: 12.5px; font-weight: 700;
+  color: var(--accent); background: none; border: none; cursor: pointer; padding: 0; font-family: inherit; }
+.glomod:hover { text-decoration: underline; }
+.gloempty { color: var(--muted); font-style: italic; padding: 12px 4px; }
+
+/* ------------------------------------------------ compila il vuoto */
+.cmp { display: flex; flex-direction: column; gap: 16px; margin-top: 8px; }
+.cmpfrase { font-size: 16.5px; line-height: 1.9; }
+.cmpblank {
+  display: inline-block; min-width: 100px; border: none; cursor: pointer;
+  border-bottom: 2px dashed var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent); color: var(--text);
+  font: inherit; font-weight: 800; text-align: center; padding: 2px 10px; margin: 0 4px;
+  border-radius: 10px 10px 0 0; position: relative;
+  transition: background .2s, border-color .2s;
+}
+.cmpblank::after { content: '▾'; font-size: 10px; margin-left: 5px; color: var(--accent); }
+.cmpblank:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+.cmpblank.done { border-bottom-style: solid; cursor: default; }
+.cmpblank.done::after { content: none; }
+.cmpblank.ok { border-color: var(--ok); color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 13%, transparent); }
+.cmpblank.ko { border-color: var(--ko); color: var(--ko);
+  background: color-mix(in srgb, var(--ko) 11%, transparent); }
+.cmpmenu {
+  position: fixed; z-index: 50; display: none; flex-direction: column; gap: 5px;
+  background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+  padding: 7px; box-shadow: 0 18px 50px var(--cardsh), 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
+  min-width: 200px; backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+}
+.cmpmenu.open { display: flex; animation: rise .18s both; }
+.cmpmenu button {
+  border: 1px solid transparent; background: transparent; color: var(--text);
+  border-radius: 9px; padding: 9px 13px; text-align: left; cursor: pointer; font-size: 14.5px;
+  transition: background .15s, border-color .15s;
+}
+.cmpmenu button:hover { background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
+.cmpmsg { margin-top: 14px; font-size: 14.5px; font-weight: 700; min-height: 20px; color: var(--muted);
+  transition: color .3s; }
+.cmpmsg.ok { color: var(--ok); }
+.cmpmsg.ko { color: var(--ko); }
+
+/* ------------------------------------------------ scenario decisionale */
+.scn .situ { font-size: 1em; line-height: 1.72; padding: 15px 18px; border-radius: 13px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 10%, transparent),
+    color-mix(in srgb, var(--accent2) 8%, transparent));
+  border-left: 3px solid var(--accent); margin-bottom: 14px; font-weight: 500; }
+.scn .expl { margin-top: 10px; font-size: 14px; color: var(--muted); line-height: 1.6; font-style: italic; }
+
+/* ------------------------------------------------ trova l'errore */
+.erra .brano { font-size: 17px; line-height: 2; padding: 16px 18px; border-radius: 14px;
+  background: var(--card2); border: 1px dashed var(--line); }
+.erra .w { cursor: pointer; border-radius: 5px; padding: 1px 3px; transition: background .15s; }
+.erra .w:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.erra .w.pick { background: color-mix(in srgb, var(--accent) 32%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent); }
+.erra .w.hit { background: color-mix(in srgb, var(--ok) 38%, transparent); font-weight: 800;
+  text-decoration: underline wavy var(--ok) 1.5px; }
+.erra .w.miss { background: color-mix(in srgb, var(--ko) 28%, transparent); }
+.erra .msg { margin-top: 12px; font-size: 14px; color: var(--muted); min-height: 20px; font-weight: 600; }
+.erra .fixbox {
+  margin-top: 12px; display: none; gap: 10px; align-items: center; flex-wrap: wrap;
+  padding: 13px 16px; border-radius: 13px;
+  background: color-mix(in srgb, var(--ok) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ok) 38%, transparent);
+  animation: rise .25s both;
+}
+.erra .fixbox.show { display: flex; }
+.erra .fixbox select {
+  border: 1px solid var(--line); background: var(--card); color: var(--text);
+  border-radius: 9px; padding: 9px 12px; font-size: 14px; cursor: pointer; font-weight: 600;
+}
+.erra .fixbox button {
+  border: none; background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--accent-ink);
+  border-radius: 10px; padding: 9px 18px; cursor: pointer; font-size: 14px; font-weight: 800;
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 40%, transparent);
+  transition: transform .15s;
+}
+.erra .fixbox button:hover { transform: translateY(-1px); }
+.erra .expl { margin-top: 10px; font-size: 14px; color: var(--ok); line-height: 1.6; font-weight: 700; }
+
+/* --- trova l'errore: passaggi guidati --- */
+.erra .steps { display: flex; align-items: center; gap: 7px; margin-bottom: 12px; flex-wrap: wrap; }
+.erra .snum { width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center;
+  justify-content: center; font-size: 13px; font-weight: 800; font-family: ui-monospace, Consolas, monospace;
+  border: 2px solid var(--line); color: var(--muted); background: var(--card2);
+  transition: border-color .25s, color .25s, background .25s, box-shadow .25s; }
+.erra .snum.cur { border-color: var(--accent); color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+.erra .snum.done { border-color: var(--ok); color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.erra .stxt { font-size: 12.5px; color: var(--muted); font-weight: 700; margin-left: 6px; letter-spacing: .3px; }
+.erra .hint { min-height: 20px; font-size: 14.5px; font-weight: 700; color: var(--muted);
+  margin-top: 12px; transition: color .25s; }
+.erra .fixbox { flex-direction: column; align-items: stretch; }
+.erra .flab { font-weight: 800; font-size: 14px; }
+.erra .flopt { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+  border: 1.5px solid var(--line); background: var(--card); color: var(--text);
+  border-radius: 11px; padding: 11px 14px; cursor: pointer; font-size: 14.5px; font-weight: 600;
+  font-family: inherit; transition: border-color .2s, transform .15s, background .2s; }
+.erra .flopt:hover { border-color: var(--accent); transform: translateX(3px); }
+.erra .flopt .letter { flex: 0 0 auto; width: 26px; height: 26px; border-radius: 8px;
+  display: flex; align-items: center; justify-content: center; font-size: 12.5px; font-weight: 800;
+  border: 1.5px solid var(--line); background: var(--card2); transition: background .2s, border-color .2s; }
+.erra .flopt.wrong { border-color: var(--ko); background: color-mix(in srgb, var(--ko) 10%, transparent);
+  animation: shake .4s; }
+.erra .flopt.wrong .letter { background: var(--ko); color: #fff; border-color: var(--ko); }
+.erra .why { margin-top: 12px; font-size: 14px; font-weight: 700; color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: 11px; padding: 10px 14px; animation: rise .25s both; }
+
+/* ------------------------------------------------ audio bar */
+#audioBar {
+  position: relative; z-index: 5; display: flex; align-items: center; gap: 10px;
+  flex-wrap: wrap; padding: 9px 18px;
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg2) 80%, transparent);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  transition: background .3s ease, border-color .3s ease;
+}
+#btnPlay {
+  width: 42px; height: 42px; border-radius: 50%; border: none; cursor: pointer;
+  background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--accent-ink); font-size: 16px;
+  flex: 0 0 auto; box-shadow: 0 4px 16px color-mix(in srgb, var(--accent) 45%, transparent);
+  transition: transform .15s;
+}
+#btnPlay:hover { transform: scale(1.1); }
+.abar {
+  border: 1px solid var(--line); background: var(--card); color: var(--text);
+  border-radius: 10px; min-width: 40px; height: 34px; padding: 0 10px; cursor: pointer;
+  font-size: 13px; font-weight: 700; flex: 0 0 auto; font-family: inherit;
+  transition: border-color .2s, color .2s, box-shadow .2s, transform .15s;
+}
+.abar:hover { border-color: var(--accent); transform: translateY(-1px); }
+/* stato attivo dei toggle: usato dai tasti velocita e play continuo */
+.abar.on { color: var(--accent-ink); background: var(--accent);
+  border-color: var(--accent); font-weight: 800; }
+#seek { flex: 1; height: 7px; border-radius: 4px;
+  background: color-mix(in srgb, var(--line) 75%, transparent); position: relative; cursor: pointer;
+  overflow: hidden; }
+#fill { position: absolute; inset: 0; border-radius: 4px;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  transform: scaleX(0); transform-origin: left center; will-change: transform; }
+#tt { font-size: 12.5px; color: var(--muted); min-width: 92px; text-align: right;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
+#cap { min-height: 22px; font-size: .82em; color: var(--muted); font-weight: 600;
+  text-align: center; flex: 1; }
+/* I sottotitoli NON spariscono su schermi piccoli: sotto i 760 px passavano
+   a display:none, cioè lo studente su telefono restava senza la trascrizione
+   della lezione. Su schermi stretti vanno a capo, non eliminati. */
+@media (max-width: 760px) {
+  #cap { font-size: .78em; min-height: 32px; }
+  #audioBar { flex-wrap: wrap; }
+}
+#audioErr { color: var(--warn, #ffd166); font-size: 12px; font-weight: 600; flex: 0 0 auto;
+  border: 1px solid color-mix(in srgb, var(--warn, #ffd166) 40%, transparent);
+  border-radius: 999px; padding: 3px 10px;
+  background: color-mix(in srgb, var(--warn, #ffd166) 10%, transparent); }
+#audioUnlock { display: flex; align-items: center; gap: 8px; padding: 7px 12px; border-radius: 10px; flex: 0 0 auto;
+  background: color-mix(in srgb, var(--warn, #ffd166) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn, #ffd166) 40%, transparent); font-size: 13px; font-weight: 700; }
+#audioUnlock[hidden] { display: none !important; }
+#audioUnlock button { border: none; background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--accent-ink);
+  border-radius: 8px; padding: 6px 12px; cursor: pointer; font-weight: 800; font-family: inherit; }
+
+/* ------------------------------------------------ ricerca */
+#sbox { position: fixed; z-index: 60; top: 58px; right: 16px; width: min(360px, 92vw);
+  display: none; flex-direction: column; border: 1px solid var(--line);
+  border-radius: 14px; background: var(--card); box-shadow: 0 18px 50px rgba(0,0,0,.35);
+  overflow: hidden; }
+#sbox.open { display: flex; animation: rise .18s both; }
+#sinput { border: none; outline: none; background: var(--card2); color: var(--text);
+  padding: 12px 14px; font-size: 14.5px; border-bottom: 1px solid var(--line);
+  font-family: inherit; }
+#sinput::placeholder { color: var(--muted); }
+#sres { max-height: 44vh; overflow: auto; }
+#sres button { display: block; width: 100%; text-align: left; border: none;
+  background: transparent; color: var(--text); padding: 10px 14px; cursor: pointer;
+  font-size: 13.5px; font-family: inherit; border-bottom: 1px solid var(--line); }
+#sres button:hover { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+#sres .nores { padding: 12px 14px; color: var(--muted); font-size: 13px; }
+
+/* ------------------------------------------------ guida tastiera */
+#kbd { position: fixed; z-index: 70; inset: auto 16px 76px auto; display: none;
+  flex-direction: column; gap: 7px; padding: 16px 18px; border-radius: 14px;
+  border: 1px solid var(--line); background: var(--card);
+  box-shadow: 0 18px 50px rgba(0,0,0,.35); max-width: 320px; }
+#kbd.open { display: flex; animation: rise .18s both; }
+#kbd .ktitle { font-weight: 800; font-size: 14px; margin-bottom: 4px; }
+#kbd .krow { display: flex; gap: 10px; align-items: center; font-size: 13px; color: var(--muted); }
+#kbd .kkey { min-width: 52px; text-align: center; font-family: ui-monospace, Consolas, monospace;
+  font-size: 11.5px; font-weight: 700; color: var(--text);
+  border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 6px; padding: 3px 6px;
+  background: var(--card2); }
+
+/* ------------------------------------------------ accessibilità */
+/* I livelli di ingrandimento moltiplicano `--slide-fs`: prima scrivevano
+   `font-size` in percentuale e sovrascrivevano la scala con il viewport,
+   quindi su proiettore ("livello 0") il testo restava illeggibile. */
+html[data-fs="1"] { --slide-fs: calc(var(--slide-fs-base) * 1.14); }
+html[data-fs="2"] { --slide-fs: calc(var(--slide-fs-base) * 1.30); }
+html[data-fs="3"] { --slide-fs: calc(var(--slide-fs-base) * 1.48); }
+:root { --slide-fs-base: clamp(16px, 0.95vw + 8px, 22px); }
+#slide { font-size: var(--slide-fs); }
+html[data-contrast="1"] { --text: #ffffff; --muted: #e6e6e6; --bg: #000000; --bg2: #0a0a0a;
+  --card: #111111; --card2: #1a1a1a; --line: #555555; --accent: #ffd166; --accent2: #8ecaff; }
+html[data-contrast="1"] body { background: #000; }
+html[data-contrast="1"] body::before, html[data-contrast="1"] body::after { display: none; }
+html[data-contrast="1"] .opt, html[data-contrast="1"] .flopt, html[data-contrast="1"] .cmpmenu button {
+  border-width: 2px; }
+html[data-contrast="1"] header, html[data-contrast="1"] nav, html[data-contrast="1"] #audioBar {
+  background: #000; }
+#accMenu { position: absolute; top: 100%; right: 0; display: flex; flex-direction: column;
+  gap: 6px; padding: 10px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--card); box-shadow: 0 12px 34px rgba(0,0,0,.3); z-index: 80; }
+#accMenu[hidden] { display: none; }
+#btnZoom { min-width: 64px; }
+#nmbox { position: fixed; z-index: 65; bottom: 84px; right: 16px; display: flex;
+  align-items: center; gap: 9px; padding: 12px 15px; border-radius: 13px;
+  border: 1px solid var(--line); background: var(--card);
+  box-shadow: 0 16px 44px rgba(0,0,0,.35); max-width: min(380px, 92vw);
+  animation: rise .2s both; }
+#nmbox[hidden] { display: none; }
+#nmbox span { font-size: 13px; font-weight: 700; color: var(--muted); }
+#nminput { border: 1.5px solid var(--line); background: var(--card2); color: var(--text);
+  border-radius: 9px; padding: 8px 11px; font-size: 14px; font-family: inherit;
+  min-width: 130px; }
+#nminput:focus { border-color: var(--accent); outline: none; }
+#nmok { border: none; background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #fff; border-radius: 9px; padding: 8px 15px; cursor: pointer;
+  font-size: 13px; font-weight: 800; font-family: inherit; }
+#examTimer { color: var(--warn); font-size: 12px; font-weight: 800; }
+#examBanner { margin: 8px auto; max-width: 940px; padding: 9px 14px; border-radius: 10px;
+  background: color-mix(in srgb, var(--warn) 13%, transparent); border: 1px solid var(--warn);
+  color: var(--text); font-size: 13px; font-weight: 700; }
+/* Modalità esame: il banner promette "feedback nascosto fino alla fine", ma
+   nascondevano solo i TESTI: `.opt.correct`/.opt.wrong` restavano visibili, e
+   l'opzione giusta veniva evidenziata in verde a ogni domanda. In un test a
+   15 minuti le domande successive erano già state rivelate. */
+html[data-mode="exam"] .fb, html[data-mode="exam"] .vffb,
+html[data-mode="exam"] .seqmsg, html[data-mode="exam"] .cmpmsg,
+html[data-mode="exam"] .clmsg { display: none !important; }
+html[data-mode="exam"] .opt.correct, html[data-mode="exam"] .opt.wrong,
+html[data-mode="exam"] .chip.ok, html[data-mode="exam"] .chip.no { display: none !important; }
+html[data-mode="exam"] .opt .letter { color: inherit !important; }
+html[data-mode="exam"] #map { opacity: .35; pointer-events: none; }
+
+/* ------------------------------------------------ export docente */
+.exprow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 14px;
+  padding: 11px 14px; border-radius: 12px; background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
+.exprow .explab { font-size: 13px; font-weight: 700; color: var(--muted); }
+.exprow button { border: 1px solid var(--line); background: var(--card); color: var(--text);
+  border-radius: 9px; padding: 7px 13px; cursor: pointer; font-size: 13px; font-weight: 700;
+  font-family: inherit; transition: border-color .2s, transform .15s; }
+.exprow button:hover { border-color: var(--accent); transform: translateY(-1px); }
+.namerow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+.namerow input { border: 1.5px solid var(--line); background: var(--card2); color: var(--text);
+  border-radius: 9px; padding: 9px 12px; font-size: 14px; font-family: inherit; min-width: 180px; }
+.namerow input:focus { border-color: var(--accent); outline: none; }
+
+/* ------------------------------------------------ nav */
+nav {
+  position: relative; z-index: 5;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 11px 18px; border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--bg2) 80%, transparent);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  transition: background .3s ease, border-color .3s ease;
+}
+nav button {
+  border: 1px solid var(--line); background: var(--card); color: var(--text);
+  border-radius: 12px; padding: 10px 20px; cursor: pointer; font-size: 14px; font-weight: 700;
+  transition: border-color .2s, transform .15s, box-shadow .2s;
+}
+nav button:hover { border-color: var(--accent); }
+nav button.primary {
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  border: none; color: var(--accent-ink); box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+nav button.primary:hover { transform: translateY(-2px); }
+nav button:disabled { opacity: .35; cursor: default; transform: none !important; box-shadow: none !important; }
+button:active:not(:disabled) { transform: scale(.96); }
+#dots { display: flex; gap: 7px; flex-wrap: wrap; justify-content: center; align-items: center; }
+#dots button { position: relative; padding: 0; border: none; font: inherit;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: var(--line); background-clip: padding-box;
+  border: 5px solid transparent; /* area di tocco allargata, pallino invariato */
+  cursor: pointer; transition: background .2s, transform .2s, box-shadow .2s;
+}
+#dots button:hover { transform: scale(1.3); }
+#dots button.on {
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  transform: scale(1.3);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+#dots button.done { background: var(--ok); }
+#dots button.rv { box-shadow: 0 0 0 2px color-mix(in srgb, var(--ko) 75%, transparent); }
+#dots button.rv::after { content: '🔖'; position: absolute; top: -11px; right: -6px; font-size: 10px; }
+#dots button.done.on { background: linear-gradient(135deg, var(--accent), var(--accent2)); }
+
+/* streak: serie di risposte corrette consecutive */
+#streak.streak { color: #ff9f43; border-color: color-mix(in srgb, #ff9f43 50%, transparent);
+  background: color-mix(in srgb, #ff9f43 14%, transparent);
+  animation: pop .3s both; }
+
+/* ------------------------------------------------ navigazione moduli */
+.modnav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+.modnav button {
+  border: 1px solid var(--line); background: color-mix(in srgb, var(--card2) 70%, transparent);
+  color: var(--muted); border-radius: 999px; padding: 5px 13px; cursor: pointer;
+  font-size: 12.5px; font-weight: 700; font-family: inherit;
+  transition: border-color .2s, color .2s, background .2s, transform .15s;
+}
+.modnav button:hover { border-color: var(--accent); color: var(--text); transform: translateY(-1px); }
+.modnav button.on {
+  color: var(--accent-ink); border-color: transparent;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  box-shadow: 0 3px 12px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.modnav .mnlabel { font-size: 11px; color: var(--muted); align-self: center;
+  font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+
+/* ------------------------------------------------ pannello finale + sfida */
+.fin { margin-top: 22px; padding-top: 18px; border-top: 1px dashed var(--line); }
+.fin .callout { margin-top: 4px; }
+.sumrow {
+  display: flex; gap: 14px; flex-wrap: wrap; align-items: stretch; margin: 8px 0 16px;
+}
+.sumcard {
+  flex: 1 1 150px; min-width: 150px; text-align: center;
+  background: var(--card2); border: 1px solid var(--line); border-radius: 16px;
+  padding: 14px 12px;
+}
+.sumcard .big { font-size: 26px; font-weight: 900; line-height: 1.1;
+  background: linear-gradient(95deg, var(--accent), var(--accent2));
+  -webkit-background-clip: text; background-clip: text; color: transparent; }
+.sumcard .lab { font-size: 11px; color: var(--muted); margin-top: 5px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .08em; }
+.medal { font-size: 54px; line-height: 1; text-align: center; margin: 6px 0 2px;
+  filter: drop-shadow(0 6px 18px color-mix(in srgb, var(--accent) 45%, transparent));
+  animation: floaty 3s ease-in-out infinite alternate; }
+.stars { text-align: center; font-size: 26px; letter-spacing: 4px; margin: 4px 0 10px; }
+.stars .off { opacity: .22; }
+.fin .actrow { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; margin-top: 8px; }
+.fin .actrow button {
+  border: 1px solid var(--line); background: var(--card); color: var(--text);
+  border-radius: 12px; padding: 10px 18px; cursor: pointer; font-size: 14px; font-weight: 700;
+  font-family: inherit; transition: border-color .2s, transform .15s, box-shadow .2s;
+}
+.fin .actrow button:hover { border-color: var(--accent); transform: translateY(-2px); }
+.fin .actrow button.primary {
+  border: none; color: var(--accent-ink);
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.chal { margin-top: 16px; }
+.chal .qtop { display: flex; align-items: center; gap: 10px; margin: 10px 0 6px;
+  font-size: 12.5px; color: var(--muted); font-weight: 700; }
+.chal .qtop .qnum { margin-left: auto; font-family: ui-monospace, Consolas, monospace; }
+.chal .sc { color: var(--accent); }
+.chal .start {
+  border: none; cursor: pointer; margin: 6px 0; font-family: inherit;
+  background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--accent-ink);
+  border-radius: 14px; padding: 13px 26px; font-size: 15px; font-weight: 800;
+  box-shadow: 0 6px 22px color-mix(in srgb, var(--accent) 45%, transparent);
+  transition: transform .15s;
+}
+.chal .start:hover { transform: translateY(-2px); }
+.chal .fb { margin-top: 10px; }
+.chal .finish { text-align: center; padding: 8px 0; }
+.chal .finish .res { font-size: 24px; font-weight: 900; margin: 8px 0 2px; }
+
+.chal q { display: block; font-size: 18px; font-weight: 700; line-height: 1.5;
+  margin: 2px 0 6px; }
+.chal .fb { margin-top: 4px; }
+
+/* ------------------------------------------------ classifica (smista) */
+.classify .clzones { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-top: 10px; }
+.clzone { border: 2px dashed var(--line); border-radius: 14px; padding: 10px; min-height: 110px;
+  background: color-mix(in srgb, var(--card2) 55%, transparent); cursor: pointer;
+  transition: border-color .2s, background .2s; }
+.clzone:hover, .clzone.over { border-color: var(--accent); }
+.clzone.done { border-style: solid; border-color: var(--ok);
+  background: color-mix(in srgb, var(--ok) 10%, transparent); cursor: default; }
+.clzname { font-weight: 800; font-size: 14.5px; margin-bottom: 8px; color: var(--text); }
+.clzlist { display: flex; flex-direction: column; gap: 6px; min-height: 30px; }
+.clpool { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 4px; min-height: 40px; }
+.clpill { border: 1.5px solid var(--line); background: var(--card); color: var(--text);
+  border-radius: 999px; padding: 8px 14px; cursor: grab; font-size: 13.5px; font-weight: 600;
+  font-family: inherit; transition: border-color .15s, opacity .2s; }
+.clpill:hover { border-color: var(--accent); }
+.clpill.sel { border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent); }
+.clpill.in { opacity: .92; cursor: default;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+.clhint { font-size: 12.5px; color: var(--muted); }
+.clmsg { margin-top: 10px; font-weight: 800; color: var(--ok); animation: rise .3s both; }
+@keyframes shakeX { 0%,100% { transform: translateX(0); } 25% { transform: translateX(-5px); } 75% { transform: translateX(5px); } }
+.clpill.shake { animation: shakeX .35s; border-color: var(--ko); }
+  /* il colore da solo non basta: lo shake e il bordo spesso segnalano l'errore */
+
+/* ------------------------------------------------ mappa del percorso */
+#map { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-start; justify-content: center;
+  padding: 10px 18px 6px; }
+#map:empty { display: none; }
+#map .st { display: flex; flex-direction: column; align-items: center; gap: 3px; min-width: 74px; cursor: pointer; }
+#map .stico { width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center;
+  justify-content: center; font-size: 16px; border: 2px solid var(--line); background: var(--card);
+  position: relative;
+  transition: border-color .2s, box-shadow .2s, transform .2s; }
+#map .stlab { font-size: 10.5px; color: var(--muted); font-weight: 700; text-align: center; max-width: 100px; }
+#map .st.reached .stico { border-color: var(--ok); background: color-mix(in srgb, var(--ok) 16%, transparent); }
+/* pulseS su un pseudo-elemento, non su box-shadow: animare box-shadow
+   richiede un repaint dell'elemento e del suo alone a ogni frame, per sempre.
+   Sul pseudo-elemento dedicato è una questione di compositorio. */
+#map .st.now .stico { border-color: var(--accent); transform: scale(1.1); }
+#map .st.now .stico::after {
+  content: ''; position: absolute; inset: -3px; border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  animation: pulseS 1.6s ease-in-out infinite alternate;
+  pointer-events: none;
+}
+#map .st.now .stlab { color: var(--text); }
+@keyframes pulseS {
+  from { opacity: .85; transform: scale(.9); }
+  to   { opacity: .35; transform: scale(1.25); }
+}
+
+/* ------------------------------------------------ badge */
+.badge-toast { position: fixed; z-index: 95; bottom: 84px; right: 16px; display: flex; gap: 10px;
+  align-items: center; padding: 12px 16px; border-radius: 14px; background: var(--card);
+  border: 1px solid var(--accent); box-shadow: 0 14px 40px rgba(0,0,0,.4); animation: rise .3s both;
+  max-width: 300px; }
+.badge-toast .bicon { font-size: 26px; }
+.badge-toast .btit { font-weight: 800; font-size: 13.5px; }
+.badge-toast .bdesc { font-size: 12px; color: var(--muted); }
+.badgerow { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; justify-content: center; }
+.badgerow .badgelab { font-size: 12px; font-weight: 800; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .06em; }
+.badge { border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent); border-radius: 999px;
+  padding: 5px 12px; font-size: 12.5px; font-weight: 700; }
+.bdov { position: fixed; inset: 0; z-index: 90; background: rgba(0,0,0,.55); display: flex;
+  align-items: center; justify-content: center; padding: 20px; }
+.bdbox { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 22px;
+  max-width: 560px; width: 100%; max-height: 86vh; overflow: auto;
+  box-shadow: 0 24px 70px rgba(0,0,0,.5); }
+.bdbox h2 { margin: 0 0 14px; }
+.bdgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.bdcard { border: 1px solid var(--line); border-radius: 12px; padding: 12px 8px; text-align: center; opacity: .55; }
+.bdcard.got { opacity: 1; border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.bdcard .bdico { font-size: 26px; }
+.bdcard .bdnome { font-weight: 800; font-size: 13px; margin-top: 4px; }
+.bdcard .bddesc { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.bdbox button.primary { border: none; color: var(--accent-ink); border-radius: 10px; padding: 9px 18px;
+  cursor: pointer; font-weight: 800; font-family: inherit;
+  background: linear-gradient(135deg, var(--accent), var(--accent2)); }
+
+/* ------------------------------------------------ confetti */
+.confetti {
+  position: fixed; top: -14px; z-index: 99; pointer-events: none;
+  width: 10px; height: 14px; border-radius: 2px; opacity: .95;
+  animation: confettiFall linear forwards;
+}
+@keyframes confettiFall {
+  to { transform: translateY(112vh) rotate(720deg); opacity: 0; }
+}
+
+/* ------------------------------------------------ animazioni */
+@keyframes slideIn {
+  from { opacity: 0; transform: translateY(28px) scale(.985); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes slideInF {
+  from { opacity: 0; transform: translateX(46px) scale(.99); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes slideInB {
+  from { opacity: 0; transform: translateX(-46px) scale(.99); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes rise {
+  from { opacity: 0; transform: translateY(15px); }
+  to   { opacity: 1; transform: none; }
+}
+#slide { animation: slideIn .45s cubic-bezier(.2, .7, .3, 1); }
+#slide > * { animation: rise .5s both; }
+#slide > *:nth-child(2) { animation-delay: .05s; }
+#slide > *:nth-child(3) { animation-delay: .1s; }
+/* l'anello di focus usa --text, non --accent: sull'accent chiaro (tema light)
+   il contrasto dell'anello scendeva a 1,53:1 e l'indicatore di tastiera
+   diventava praticamente invisibile. --text è sempre >= 7:1 sul fondo. */
+:focus-visible { outline: 3px solid var(--text); outline-offset: 2px; }
+/* Coarse pointer = dito: sotto i 44px i bersagli di tocco sono troppo piccoli
+   per un bambino. Non si applica al mouse (pointer: fine), dove un bottone
+   piccolo è comodo. */
+@media (pointer: coarse) {
+  nav button, .opt, .vfbtn, .match .chip, .fcctrl button, .cmpmenu button,
+  .bdbox button, .fin button, .actrow button, .abar, #btnPlay,
+  #hdrop button, .accMenu button, #dots button, #fcard, .bdcard button {
+    min-height: 44px;
+  }
+  #dots button { min-width: 44px; }
+  .fcctrl button, .cmpmenu button, .bdbox button, .fin button,
+  .actrow button, .abar { padding: 11px 18px; }
+  #btnPlay { width: 48px; height: 48px; font-size: 19px; }
+  .match .chip { padding: 14px 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+  html { scroll-behavior: auto !important; }
+}
+@media (max-width: 640px) {
+  #slide { padding: 22px 20px; }
+  #slide h1 { font-size: 23px; }
+  #slide li { padding-left: 22px; }
+  .match .pairs { grid-template-columns: 1fr; }
+  .vfrow { grid-template-columns: 1fr; }
+  /* header compatto: resta solo il contatore, il resto va nel menu */
+  header { gap: 8px; padding: 9px 12px; }
+  header .spacer { display: none; }
+  header .hchip { display: none; }
+  header #prog.hchip { display: inline-block; }
+  header h1 { font-size: 13.5px; }
+  .hbtn .hbtntxt { display: none; }
+  .hbtn { padding: 6px 10px; }
+  /* nav su due righe: dots sopra, pulsanti sotto a tutta larghezza */
+  nav { flex-wrap: wrap; gap: 9px; padding: 10px 12px; }
+  #dots { order: -1; flex: 1 1 100%; gap: 9px; }
+  nav button { flex: 1 1 0; padding: 11px 8px; font-size: 13.5px; white-space: nowrap; }
+  #audioBar { gap: 8px; padding: 8px 12px; }
+  #tt { min-width: 0; }
+  .clzones { grid-template-columns: 1fr; }
+  #map { gap: 7px; padding: 8px 12px 2px; }
+  #map .stlab { display: none; }
+  #map .stico { width: 28px; height: 28px; font-size: 13px; }
+  .badge-toast { bottom: 130px; }
+}
