@@ -20,6 +20,14 @@ from pathlib import Path
 
 from common import write_text_atomic
 
+# UTF-8 sul PRIMO import, non solo in main(): il pannello chiama
+# export_single() come libreria, senza passare da main(), e su una console
+# cp1252 un messaggio con caratteri non-ASCII moriva con UnicodeEncodeError.
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
 BASE = Path(__file__).resolve().parent.parent
 
 

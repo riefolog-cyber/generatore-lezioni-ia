@@ -9,8 +9,13 @@ nessuna connessione.
 """
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
+
+import pytest
+
+import export_zip
 
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE / "tools"))
@@ -181,6 +186,72 @@ def test_modello_configurato_e_comboact():
     """Il modello richiesto è comboact, in config.json e nel default."""
     assert DEFAULT_CONFIG["llm_model"] == "comboact"
     assert load_config().get("llm_model") == "comboact"
+
+
+# ------------------------------------------------------- export e encoding
+def test_export_zip_su_console_cp1252():
+    """Regressione: `export_zip` moriva con UnicodeEncodeError su cp1252.
+
+    Il reconfigure di UTF-8 stava solo in `if __name__ == '__main__'`, ma il
+    pannello chiama `export_zip.export()` come libreria: senza passare da
+    main() lo stdout restava su cp1252 e la freccia "→" del messaggio finale
+    faceva esplodere la funzione DOPO aver gia' creato lo ZIP. Il docente
+    vedeva un traceback invece di "Export OK".
+
+    Il test rilancia l'interprete in una subprocess con PYTHONIOENCODING=cp1252,
+    che e' il vero scenario (la console di PowerShell). Sostituire sys.stdout
+    dentro il processo non proverebbe nulla: il reconfigure all'import agisce
+    sullo stream gia' presente, quindi un sostituto successivo lo annullerebbe.
+    """
+    lezioni = [n for n in export_zip.list_lessons() if n.endswith("_lesson")]
+    if not lezioni:
+        pytest.skip("nessuna lezione da esportare")
+
+    codice = (
+        "import sys; sys.path.insert(0, 'tools')\n"
+        "from pathlib import Path\n"
+        "from export_zip import export\n"
+        f"out = export({lezioni[0]!r})\n"
+        "assert out and Path(out).exists()\n"
+        "Path(out).unlink()\n"
+        "print('ESPORTAZIONE OK')\n"
+    )
+    env = dict(os.environ, PYTHONIOENCODING="cp1252")
+    r = subprocess.run([sys.executable, "-c", codice], capture_output=True,
+                       text=True, encoding="utf-8", errors="replace", env=env,
+                       cwd=str(BASE))
+    assert "ESPORTAZIONE OK" in r.stdout, (
+        "export() deve funzionare anche su console cp1252:\n"
+        f"stdout={r.stdout!r}\nstderr={r.stderr[-500:]!r}")
+
+
+@pytest.mark.parametrize("modulo", ["new_lesson", "export_zip", "export_single"])
+def test_il_reconfigure_e_a_livello_di_modulo(modulo):
+    """I moduli stampano caratteri non-ASCII: il reconfigure deve stare in testa.
+
+    Se torna dentro `if __name__ == '__main__'`, importarli (come fa il
+    pannello) li lascia con stdout cp1252 e il primo print con "✓" muore.
+    """
+    import importlib
+
+    try:
+        sys.stdout.reconfigure(encoding="cp1252", errors="strict")
+    except Exception:
+        pytest.skip("stdout non reconfigurabile")
+    try:
+        src = Path(importlib.import_module(modulo).__file__).read_text(encoding="utf-8")
+    finally:
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+    primo_def = src.find("def ")
+    pos = src.find("sys.stdout.reconfigure")
+    assert pos != -1, f"{modulo} non reconfigura lo stdout"
+    assert pos < primo_def, (
+        f"{modulo}: il reconfigure deve stare a livello di modulo, non dentro "
+        "main(): i chiamanti che importano la libreria altrimenti restano su cp1252")
 
 def test_config_json_e_json_valido():
     cfg = json.loads((BASE / "config.json").read_text(encoding="utf-8"))

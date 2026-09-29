@@ -12,6 +12,16 @@ import os
 import sys, zipfile
 from pathlib import Path
 
+# UTF-8 sul PRIMO import, non solo in main(): questo modulo viene importato
+# anche da panel.py e app.py, dove main() non passa. Senza, su una console
+# cp1252 (il default di PowerShell) bastava la freccia "→" del messaggio
+# finale per far esplodere export() con UnicodeEncodeError DOPO aver creato
+# lo ZIP: l'utente vedeva un'eccezione invece di "Export OK".
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
 BASE = Path(__file__).resolve().parent.parent
 
 AVVIA_PY = '''# -*- coding: utf-8 -*-
