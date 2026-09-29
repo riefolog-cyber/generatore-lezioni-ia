@@ -53,6 +53,10 @@ prova_*.py
 _tmp*
 *_test_*.py
 
+# copia di debug del player generata a mano per provare la modalita' attivita':
+# non e' la sorgente (quella e' tools/player_assets/) e non va nel repo
+qr_focus_check/
+
 # report di classe prodotti dagli export
 report_classe.csv
 report_classe.html
