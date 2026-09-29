@@ -5,6 +5,7 @@ Usato dal pannello (/api/diagnostica) e da riga di comando:
     python tools/netdiag.py
 Ritorna un dict JSON-serializzabile: IP, porta, disco, dipendenze.
 """
+import importlib.util
 import shutil
 import socket
 import sys
@@ -99,10 +100,12 @@ def diagnose(port=None):
         "ok": bool(primario),
     }
     for mod in ("docx", "edge_tts", "pypdf", "youtube_transcript_api"):
+        # find_spec e non __import__: verificare la presenza di una libreria non
+        # deve eseguirla. edge_tts da sola costava ~1,1 s a import e la
+        # diagnostica viene aperta proprio quando qualcosa non va.
         try:
-            __import__(mod)
-            out["deps"][mod] = True
-        except Exception:
+            out["deps"][mod] = importlib.util.find_spec(mod) is not None
+        except (ImportError, ValueError):
             out["deps"][mod] = False
     out["deps"]["ffmpeg"] = bool(shutil.which("ffmpeg"))
     return out

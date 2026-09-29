@@ -31,6 +31,7 @@ Uso:  python panel.py        (avvia il pannello e apre il browser)
 """
 import functools
 import http.server
+import importlib.util
 import io
 import json
 import re
@@ -505,10 +506,17 @@ def _register_upload(name):
 
 def _deps():
     def have(m):
+        # find_spec e NON __import__: chiedere "e' installata?" non deve
+        # eseguire la libreria. Con __import__ questo helper costava ~1,5 s
+        # (edge_tts da sola ~1,1 s), e _deps sta dentro _state(), quindi il
+        # costo ricadeva su ogni snapshot freddo del pannello: all'avvio e a
+        # ogni invalidazione della cache (upload, generazione), cioe' proprio
+        # quando il docente sta aspettando. find_spec risponde in microsecondi
+        # e senza effetti collaterali.
         try:
-            __import__(m)
-            return True
-        except Exception:
+            return importlib.util.find_spec(m) is not None
+        except (ImportError, ValueError):
+            # ValueError: il modulo esiste in sys.modules ma ha __spec__ = None
             return False
     return {
         "python_docx": have("docx"),
