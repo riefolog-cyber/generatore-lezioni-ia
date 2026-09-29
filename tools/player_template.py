@@ -236,7 +236,6 @@ def write_player(out_dir: Path, titolo: str, tema: str = 'dark'):
         <button id="btnZoom" class="abar" title="Dimensione del testo (F)">A</button>
         <button id="btnContrast" class="abar" title="Alto contrasto (Ctrl+Alt+T)">◐</button>
         <button id="btnSpeed" class="abar" title="Velocita di riproduzione dell'audio">1×</button>
-        <button id="btnAuto" class="abar" title="Riproduzione continua: passa da solo alla slide successiva">⏭</button>
         <button id="btnGloss" class="abar" title="Glossario sempre raggiungibile">📖</button>
       </div>
     </div>

@@ -451,23 +451,22 @@ window.addEventListener('load', () => setTimeout(() => {
     // ATTENZIONE: LESSON_STATE e' un getter che restituisce un'istantanea,
     // quindi `cur` va riletto ogni volta, non tenuto in una variabile.
     const cur = () => window.LESSON_STATE.cur;
-    A.setAutoNext(true);
     const esito = {};
-    // 1) slide di CONTENUTO (indice 0, nessuna attivita'): deve avanzare
+    // 1) slide di CONTENUTO (indice 0, nessuna attivita'): finito l'audio
+    //    NON deve avanzare da solo, l'avanti e' una scelta dello studente
     A.go(0);
     esito.contenuto_parte = cur();
     A.audio.dispatchEvent(new Event('ended'));
     esito.contenuto_dopo = cur();
-    // 2) slide con ATTIVITA' (indice 1, quiz): NON deve avanzare
+    // 2) slide con ATTIVITA' (indice 1, quiz): non deve avanzare
     A.go(1);
     esito.attivita_parte = cur();
     A.audio.dispatchEvent(new Event('ended'));
     esito.attivita_dopo = cur();
-    // 3) con l'avanzamento disattivato non avanza nemmeno sul contenuto
-    A.setAutoNext(false);
+    // 3) il pulsante "Avanti" resta l'unico modo di proseguire
     A.go(0);
-    A.audio.dispatchEvent(new Event('ended'));
-    esito.spurgo_dopo = cur();
+    document.getElementById('btnNext').click();
+    esito.dopo_tasto_avanti = cur();
     esito.slide0_ha_attivita = A.slideHaAttivita(0);
     esito.slide1_ha_attivita = A.slideHaAttivita(1);
     out.textContent = JSON.stringify(esito);
@@ -515,34 +514,36 @@ def _autoavvanza(lezione):
     return json.loads(_h.unescape(testo))
 
 
-def test_l_avanzamento_automatico_salta_le_attivita(lezione):
-    """Reclamo dell'utente: aperta un'attivita' il player andava avanti da
-    solo appena finiva la lettura, e lo studente non aveva tempo di rispondere.
+def test_l_avanzamento_automatico_e_disattivato(lezione):
+    """Richiesta del docente: a fine audio il player non deve passare da solo
+    alla slide successiva, nemmeno su quelle di solo contenuto.
 
-    L'avanzamento automatico serve sulle slide di contenuto (ascolti e prosegui
-    senza toccare lo schermo), ma NON su quelle con qualcosa da fare.
+    Prima l'avanzamento automatico saltava le attivita' (dopo un reclamo dello
+    studente), ma restava attivo sul contenuto: chi ascoltava non decideva
+    quando ripartire. Ora la scelta e' sempre sua e l'unico modo di proseguire
+    e' il pulsante "Avanti" (o la freccia destra).
     """
     r = _autoavvanza(lezione)
     assert r["slide0_ha_attivita"] is False, "la slide 0 dovrebbe essere di solo contenuto"
     assert r["slide1_ha_attivita"] is True, "la slide 1 dovrebbe avere il quiz"
 
-    # sul contenuto avanza
-    assert r["contenuto_dopo"] == r["contenuto_parte"] + 1, (
-        f"sul contenuto l'avanzamento automatico non funziona: "
+    # sul contenuto NON avanza da solo
+    assert r["contenuto_dopo"] == r["contenuto_parte"], (
+        f"l'avanzamento automatico e' ancora attivo sul contenuto: "
         f"{r['contenuto_parte']} -> {r['contenuto_dopo']}")
     # sull'attivita' resta fermo
     assert r["attivita_dopo"] == r["attivita_parte"], (
         f"il player e' andato avanti mentre lo studente leggeva l'attivita': "
         f"{r['attivita_parte']} -> {r['attivita_dopo']}")
-    # disattivato, non avanza nemmeno sul contenuto
-    assert r["spurgo_dopo"] == 0, (
-        f"con l'avanzamento disattivato si e' comunque passati a "
-        f"slide {r['spurgo_dopo']}")
+    # il tasto "Avanti" porta avanti: e' l'unico modo di proseguire
+    assert r["dopo_tasto_avanti"] == 1, (
+        f"il pulsante Avanti non ha funzionato dalla slide 0: "
+        f"si e' arrivati a {r['dopo_tasto_avanti']}")
 
 
 def test_il_pulsante_avanti_e_ancora_utile_sulle_attivita(lezione):
-    """Il pulsante "Avanti" deve portare avanti anche quando l'avanzamento
-    automatico e' fermo: e' l'unico modo di proseguire dopo aver risposto."""
+    """Il pulsante "Avanti" e' l'unico modo di proseguire (l'avanzamento
+    automatico non esiste piu'): deve funzionare anche dopo aver risposto."""
     r = _valuta_clic_e_avanti(lezione)
     assert r["cur_dopo_avanti"] == 2, (
         f"il pulsante Avanti non ha funzionato dalla slide 1: "
@@ -558,7 +559,6 @@ def _valuta_clic_e_avanti(lezione):
       try {
         const A = window.LESSON_API;
         const cur = () => window.LESSON_STATE.cur;
-        A.setAutoNext(true);
         A.go(1);
         const btn = document.getElementById('btnNext');
         const prima = cur();

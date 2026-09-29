@@ -72,10 +72,11 @@ Dipendenze opzionali (PDF, YouTube e Whisper): `pip install -r requirements-extr
   tra le slide (`loudnorm`), micro-fade anti-pop e ricodifica a 44.1 kHz /
   96 kbps (`audio_bitrate` in config.json). Il player mostra la didascalia a
   frasi naturali durante la lettura e offre controlli: ▶/pausa (Spazio),
-  riascolta ⟲ (R), velocità 0.8×/1×/1.25×, riproduzione continua ⏭
-  (auto-avanti a fine audio). Il testo letto viene ripulito prima della
-  sintesi (abbreviazioni espanse, simboli %/€/→ detti a parole, punteggiatura
-  normalizzata) per una voce più naturale.
+  riascolta ⟲ (R), velocità 0.8×/1×/1.25×. **Non c'è auto-avanti**: quando
+  l'audio finisce il player resta sulla slide e a proseguire si sceglie con il
+  pulsante **Avanti →** o con la freccia destra. Il testo letto viene ripulito
+  prima della sintesi (abbreviazioni espanse, simboli %/€/→ detti a parole,
+  punteggiatura normalizzata) per una voce più naturale.
 - **Gamification nel player**: ogni attività assegna punti (chip ⭐ in alto),
   le slide dei moduli hanno una barra di navigazione rapida, la conclusione
   mostra medaglia/stelle/confetti con riepilogo del percorso, una **Sfida

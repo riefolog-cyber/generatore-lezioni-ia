@@ -92,6 +92,15 @@ function tipiAttivita(i) {
   return (slides[i] && slides[i].blocks || []).some(b =>
     ACT_TYPES.some(t => b[t]) || (b.quiz && b.quiz.q));
 }
+// Qualcosa da fare su questa slide? Comprende anche le flashcard, che non
+// sono conteggiate nel punteggio (sono esercizio facoltativo) ma sono comunque
+// cliccabili. Non governa piu' l'avanzamento automatico (non esiste piu'):
+// resta un informatore sul tipo di slide, usato dai test e a disposizione del
+// docente.
+function slideHaAttivita(i) {
+  return (slides[i] && slides[i].blocks || []).some(b =>
+    ACT_TYPES.some(t => b[t]) || b.flashcards || (b.quiz && b.quiz.q));
+}
 let animDir = 'init', celebrated = false;
 // Velocità di riproduzione: LEGGIMI.md prometteva 0,8×/1×/1,25× ma il codice
 // aveva `const rate = 1` fisso e il selettore rimosso: la promessa non era
@@ -120,21 +129,11 @@ function applyRate() {
   if (typeof audio !== 'undefined' && audio) audio.playbackRate = r;
 }
 
-// Riproduzione continua: al termine dell'audio passa da solo alla slide
-// successiva. Promessa dal manuale e mai implementata: chi ascoltava senza
-// toccare lo schermo restava fermo sulla stessa slide.
-let autoNext = true;
-try { autoNext = localStorage.getItem(DATA_KEY + '-autonext') !== '0'; } catch (e) {}
-function applyAutoNext() {
-  const b = _safe('btnAuto');
-  if (b) {
-    b.classList.toggle('on', autoNext);
-    b.title = autoNext ? 'Riproduzione continua: attiva (alla fine l\'audio passa alla slide seguente)'
-                       : 'Riproduzione continua: spenta (resta sulla slide)';
-  }
-  try { localStorage.setItem(DATA_KEY + '-autonext', autoNext ? '1' : '0'); } catch (e) {}
-}
-
+// Riproduzione continua: DISATTIVATA di proposito. Prima l'audio finito portava
+// da solo alla slide successiva, anche su quelle di solo contenuto: lo
+// studente non decideva quando ripartire e non poteva fermarsi a rileggere
+// quello che aveva appena ascoltato senza toccare lo schermo. Ora la scelta
+// e' sempre sua: si prosegue con il tasto "Avanti" o con la freccia.
 var RIPASSO = [], RIPASSO_POS = 0;   // percorso di ripasso sulle slide segnalate 🔖
 let lastSlideTime = null;            // per il tempo per slide del report docente
 const slideTimes = {};               // slide (0-based) -> ms trascorsi
@@ -1823,31 +1822,16 @@ function blockErrore(s, idx, bidx) {
 // ---------------------------------------------------------------- audio
 const audio = new Audio();
 audio.preload = 'auto';
-// Riproduzione continua: al termine dell'audio si passa alla slide seguente.
-//
-// MA SOLO sulle slide di contenuto. Su una slide con attivita' la narrazione
-// finisce mentre lo studente sta ancora leggendo la domanda, e veniva
-// catapultato sulla slide successiva: non aveva piu' il tempo di rispondere,
-// e il pulsante "Avanti" non serviva a niente. Ora sulle attivita' si resta
-// fermi finche' lo studente non sceglie (o non preme Avanti).
-function slideHaAttivita(i) {
-  // Qualcosa da fare qui? Comprende anche le flashcard, che non sono
-  // conteggiate nel punteggio (sono esercizio facoltativo) ma sono comunque
-  // cliccabili: su quelle slide l'avanzamento automatico sarebbe sgradito.
-  return (slides[i] && slides[i].blocks || []).some(b =>
-    ACT_TYPES.some(t => b[t]) || b.flashcards || (b.quiz && b.quiz.q));
-}
-audio.addEventListener('ended', () => {
-  if (!autoNext || lessonMode === 'exam') return;
-  if (cur < LAST && !slideHaAttivita(cur)) go(cur + 1);
-});
+// Alla fine dell'audio NON si passa da soli alla slide successiva: l'avanti e'
+// sempre una scelta dello studente (pulsante "Avanti" o freccia destra), anche
+// sulle slide di solo contenuto. Nessun ascolto su 'ended': senza questo
+// aggancio la traccia si ferma dove finisce e ▶ la riavvia.
 // velocità: applicata qui, ora che `audio` esiste
-applyRate(); applyAutoNext();
+applyRate();
 if (_safe('btnSpeed')) _safe('btnSpeed').onclick = () => {
   rateIdx = (rateIdx + 1) % RATE_VALORI.length;
   applyRate();
 };
-if (_safe('btnAuto')) _safe('btnAuto').onclick = () => { autoNext = !autoNext; applyAutoNext(); };
 if (_safe('btnGloss')) {
   // il glossario stava solo come slide: da un telefono, per usarlo si
   // attraversava l'intera lezione. Ora è sempre a portata di un tocco.
@@ -2441,7 +2425,5 @@ window.LESSON_API = {
   shuffleOpts: shuffleOpts, renderBlock: renderBlock,
   paintScore: paintScore, paintDots: paintDots, go: go,
   buildExport: buildExport, buildProgress: buildProgress,
-  audio: audio, slideHaAttivita: slideHaAttivita,
-  autoNext: function () { return autoNext; },
-  setAutoNext: function (v) { autoNext = !!v; applyAutoNext(); }
+  audio: audio, slideHaAttivita: slideHaAttivita
 };
