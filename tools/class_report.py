@@ -13,9 +13,60 @@ Produce in output:
 """
 import csv
 import json
+import re
 import statistics
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from classifica_score import ordina, punta  # noqa: E402
+
+
+def _errori(rep):
+    """Numero di risposte sbagliate.
+
+    Il player lo scrive gia' nel report; per i report generati da una versione
+    precedente il campo non c'e', quindi si conta da `risposte` (la stessa
+    fonte da cui nasce `errori_per_tipo`).
+    """
+    n = rep.get("errori")
+    if isinstance(n, (int, float)):
+        return int(n)
+    return sum(1 for r in rep.get("risposte", []) if not r.get("esito"))
+
+
+def _punti(r):
+    """(punti, totale, pct) da un report: i punti sono una stringa "8/10"."""
+    pt, tot = 0, 0
+    grezzo = str(r.get("punti") or "")
+    m = re.match(r"\s*(\d+)\s*/\s*(\d+)\s*$", grezzo)
+    if m:
+        pt, tot = int(m.group(1)), int(m.group(2))
+    pct = _numero(r.get("precisione"), 0.0)
+    return pt, tot, int(pct if pct else (round(pt / tot * 100) if tot else 0))
+
+
+def _riga(rep):
+    """Una riga di classifica nella stessa forma del pannello."""
+    pt, tot, pct = _punti(rep)
+    return {"studente": rep.get("studente") or "Anonimo",
+            "lezione": rep.get("lezione") or "",
+            "punti": pt, "totale": tot, "pct": pct,
+            "errori": _errori(rep),
+            "tempo_min": _numero(rep.get("tempo_min"), 0.0),
+            "completata": True,
+            "t": rep.get("data") or "",
+            # il report di origine: serve per il dettaglio per tipo di attivita'
+            "rep": rep}
+
+
+def classifica(reports):
+    """Stessa regola del pannello: media degli errori e del tempo.
+
+    Un solo file per studente (i report sono uno per invio), quindi non serve
+    la scelta del "tentativo migliore": l'indice basta a ordinarli.
+    """
+    return ordina(punta([_riga(r) for r in reports]), per_studente=False)
 
 
 def _load(paths):
@@ -56,15 +107,16 @@ def _per_tipo(rep):
 def build_csv(reports, out_path):
     with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f, delimiter=";")
-        w.writerow(["studente", "lezione", "data", "tempo_min", "punti",
+        w.writerow(["posizione", "studente", "indice", "media_errori_tempo",
+                    "errori", "tempo_min", "lezione", "data", "punti",
                     "precisione_%", "dettaglio_per_tipo"])
-        for r in reports:
-            pt = r.get("punti") or ""
-            prec = (r.get("precisione") or "").replace("%", "")
+        for pos, r in enumerate(classifica(reports), start=1):
             tipo_txt = "; ".join(f"{k}: {c}/{t}" for k, (c, t)
-                                 in sorted(_per_tipo(r).items()))
-            w.writerow([r.get("studente"), r.get("lezione"), r.get("data"),
-                        r.get("tempo_min"), pt, prec, tipo_txt])
+                                 in sorted(_per_tipo(r["rep"]).items()))
+            w.writerow([pos, r.get("studente"), r.get("indice"), r.get("media"),
+                        r.get("errori"), r.get("tempo_min"), r.get("lezione"),
+                        r.get("t"), f'{r.get("punti", 0)}/{r.get("totale", 0)}',
+                        r.get("pct", 0), tipo_txt])
         precs, tempi = _aggregate(reports)
         w.writerow([])
         w.writerow(["STATISTICHE DI CLASSE"])
@@ -76,6 +128,10 @@ def build_csv(reports, out_path):
         if tempi:
             w.writerow(["tempo medio min", f"{statistics.mean(tempi):.1f}"])
             w.writerow(["tempo mediano min", f"{statistics.median(tempi):.1f}"])
+        indici = [r.get("indice", 0) for r in classifica(reports)]
+        if indici:
+            w.writerow(["indice medio (errori+tempo)",
+                        f"{statistics.mean(indici):.0f}"])
 
 
 def _aggregate(reports):
@@ -108,12 +164,15 @@ def _numero(v, default=0.0):
 
 def build_html(reports, out_path):
     esc = lambda s: __import__("html").escape(str(s), quote=True)
+    classifica_rows = classifica(reports)
     rows = []
-    for r in sorted(reports, key=lambda x: -_numero(x.get("precisione"))):
-        rows.append(f"<tr><td>{esc(r.get('studente', '?'))}</td>"
-                    f"<td>{esc(r.get('punti', '-'))}</td>"
-                    f"<td>{esc(r.get('precisione', '-'))}</td>"
-                    f"<td>{esc(r.get('tempo_min', '?'))} min</td></tr>")
+    for pos, r in enumerate(classifica_rows, start=1):
+        rows.append(f"<tr><td>{pos}</td><td>{esc(r.get('studente', '?'))}</td>"
+                    f"<td><b>{esc(r.get('indice', '-'))}</b></td>"
+                    f"<td>{esc(r.get('errori', '-'))}</td>"
+                    f"<td>{esc(r.get('tempo_min', '?'))} min</td>"
+                    f"<td>{esc(r.get('punti', 0))}/{esc(r.get('totale', 0))}</td>"
+                    f"<td>{esc(r.get('pct', 0))}%</td></tr>")
     # punti deboli della classe: tipo di attività con precisione media più bassa
     agg = {}
     for r in reports:
@@ -135,6 +194,11 @@ def build_html(reports, out_path):
     if tempi:
         stats_html += (f"<p>Tempo: media <b>{statistics.mean(tempi):.1f} min</b> · "
                        f"mediana <b>{statistics.median(tempi):.1f} min</b></p>")
+    if classifica_rows:
+        indici = [r.get("indice", 0) for r in classifica_rows]
+        errori_tot = sum(r.get("errori", 0) for r in classifica_rows)
+        stats_html += (f"<p>Indice (errori + tempo): media <b>{statistics.mean(indici):.0f}</b> · "
+                       f"errori totali <b>{errori_tot}</b></p>")
     esc_lezione = __import__("html").escape(str(reports[0].get('lezione', '?') if reports else '?'), quote=True)
     html = f"""<!DOCTYPE html><html lang="it"><meta charset="utf-8">
 <title>Report di classe</title>
@@ -143,9 +207,12 @@ def build_html(reports, out_path):
 <p>{len(reports)} studenti · generato il {__import__('datetime').date.today().isoformat()}</p>
 <h2>Statistiche di classe</h2>
 {stats_html}
-<h2>Classifica (per precisione)</h2>
+<h2>Classifica — media degli errori e del tempo</h2>
+<p style="font-size:13px;color:#9fb0c8">Ordinata per <b>indice</b>: metà errori e metà tempo
+impiegato a concludere le attività, riportati al peggiore della classe
+(100 = nessun errore e il tempo più rapido).</p>
 <table border="1" cellpadding="8" style="border-collapse:collapse">
-<tr style="background:#1a2740"><th>Studente</th><th>Punti</th><th>Precisione</th><th>Tempo</th></tr>
+<tr style="background:#1a2740"><th>#</th><th>Studente</th><th>Indice</th><th>Errori</th><th>Tempo</th><th>Punti</th><th>Precisione</th></tr>
 {''.join(rows)}
 </table>
 <h2>Punti deboli della classe</h2>

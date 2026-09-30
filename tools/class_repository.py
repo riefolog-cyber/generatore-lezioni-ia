@@ -27,11 +27,16 @@ CREATE TABLE IF NOT EXISTS risultati (
     totale INTEGER NOT NULL,
     pct INTEGER NOT NULL,
     completata INTEGER NOT NULL,
-    tempo_min REAL NOT NULL
+    tempo_min REAL NOT NULL,
+    errori INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_risultati_lesson ON risultati(lesson);
 CREATE INDEX IF NOT EXISTS idx_risultati_studente ON risultati(lesson, studente);
 """
+# La classifica e' la media di errori e tempo: senza il numero di errori la
+# classifica resterebbe ordinata solo sui minuti. La colonna arriva dopo, quindi
+# un archivio gia' in uso va allargato (idempotente).
+_COLONNA_ERRORI = "ALTER TABLE risultati ADD COLUMN errori INTEGER NOT NULL DEFAULT 0"
 
 
 def db_path_for(json_path: Path) -> Path:
@@ -47,7 +52,26 @@ def _connect(path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA busy_timeout=10000")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_SCHEMA)
+    _migrate_schema(conn)
     return conn
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Allarga uno schema creato da una versione precedente.
+
+    `CREATE TABLE IF NOT EXISTS` non tocca una tabella gia' esistente: senza
+    questo passaggio un archivio con i risultati di qualche lezione fa' fallire
+    ogni inserimento successivo con "no such column: errori".
+    """
+    try:
+        colonne = {r["name"] for r in conn.execute("PRAGMA table_info(risultati)")}
+    except sqlite3.Error:
+        return
+    if colonne and "errori" not in colonne:
+        try:
+            conn.execute(_COLONNA_ERRORI)
+        except sqlite3.Error:
+            pass
 
 
 def _json_rows(json_path: Path):
@@ -78,12 +102,13 @@ def _migrate_if_needed(json_path: Path, conn: sqlite3.Connection) -> None:
                 punti = int(r.get("punti", 0) or 0)
                 pct = int(r.get("pct", round(punti / totale * 100) if totale else 0))
                 conn.execute(
-                    "INSERT INTO risultati(t, lesson, studente, punti, totale, pct, completata, tempo_min) "
-                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO risultati(t, lesson, studente, punti, totale, pct, completata, tempo_min, errori) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (str(r.get("t") or time.strftime("%Y-%m-%d %H:%M"))[:40],
                      str(r.get("lesson") or "")[:80], str(r.get("studente") or "Anonimo")[:40],
                      punti, totale, pct, int(bool(r.get("completata"))),
-                     float(r.get("tempo_min", 0) or 0)))
+                     float(r.get("tempo_min", 0) or 0),
+                     int(r.get("errori", 0) or 0)))
             except (TypeError, ValueError):
                 continue
     _trim(conn)
@@ -99,7 +124,7 @@ def _write_json_compat(json_path: Path, rows: list[dict]) -> None:
 
 
 def add_result(json_path: Path, lesson: str, studente: str, punti: int, totale: int,
-               completata: bool, tempo_min: float) -> None:
+               completata: bool, tempo_min: float, errori: int = 0) -> None:
     json_path = Path(json_path)
     with _WRITE_LOCK:
         conn = _connect(db_path_for(json_path))
@@ -108,10 +133,11 @@ def add_result(json_path: Path, lesson: str, studente: str, punti: int, totale: 
             pct = round(punti / totale * 100) if totale > 0 else 0
             with conn:
                 conn.execute(
-                    "INSERT INTO risultati(t, lesson, studente, punti, totale, pct, completata, tempo_min) "
-                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO risultati(t, lesson, studente, punti, totale, pct, completata, tempo_min, errori) "
+                    "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (time.strftime("%Y-%m-%d %H:%M"), str(lesson)[:80], str(studente)[:40],
-                     int(punti), int(totale), pct, int(bool(completata)), float(tempo_min)))
+                     int(punti), int(totale), pct, int(bool(completata)), float(tempo_min),
+                     max(0, int(errori or 0))))
                 _trim(conn)
             _write_json_compat(json_path, list_results(json_path))
         finally:
@@ -124,7 +150,8 @@ def list_results(json_path: Path) -> list[dict]:
     try:
         _migrate_if_needed(json_path, conn)
         rows = [dict(r) for r in conn.execute("SELECT * FROM risultati ORDER BY id")]
-        return [{**r, "completata": bool(r["completata"])} for r in rows]
+        return [{**r, "completata": bool(r["completata"]),
+                 "errori": int(r.get("errori") or 0)} for r in rows]
     finally:
         conn.close()
 

@@ -222,6 +222,7 @@ def write_player(out_dir: Path, titolo: str, tema: str = 'dark'):
   <span id="streak" class="hchip streak" hidden>🔥</span>
   <span id="rvw" class="hchip" hidden>🔖</span>
   <span id="examTimer" class="hchip" hidden>⏱ --:--</span>
+  <span id="classTimer" class="hchip" hidden>⏱ --:--</span>
   <button id="btnModeExam" class="hbtn" title="Modalità esame: domande casuali e timer">⏱<span class="hbtntxt">Esame</span></button>
   <button id="btnMute" class="hbtn" title="Disattiva la voce per tutta la lezione" aria-pressed="false"><span class="hbtnico">🔊</span><span class="hbtntxt">Audio</span></button>
   <button id="btnSearch" class="hbtn" title="Cerca nella lezione (F)">🔍<span class="hbtntxt">Cerca</span></button>
@@ -251,6 +252,7 @@ def write_player(out_dir: Path, titolo: str, tema: str = 'dark'):
   <button id="nmok">OK</button>
 </div>
 <div id="examBanner" hidden></div>
+<div id="classTimerBanner" hidden></div>
 <div id="pbar"><div id="pfill"></div></div>
 <div id="map"></div>
 <main><div id="stage"><div id="slide"></div></div></main>

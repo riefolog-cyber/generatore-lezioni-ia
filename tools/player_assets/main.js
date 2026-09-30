@@ -239,6 +239,98 @@ function goExam(delta) {
   go(examOrder[examPos]);
 }
 
+// ---------------------------------------------- timer di classe (impostato dal docente)
+// Il docente avvia un conto alla rovescia dal pannello ("Scegli la lezione da
+// mostrare" -> Timer attivita') e lo studente lo vede in alto, durante le
+// attivita'. La scadenza che arriva dal server e' un istante ASSOLUTO: due
+// alunni che aprono la lezione in momenti diversi vedono la stessa fine.
+//
+// Non e' l'esame: non nasconde i feedback e non blocca nulla. Alla scadenza
+// l'avviso resta e il percorso continua, perche' un orologio che blocca la
+// pagina lascia gli studenti fermi davanti a uno schermo pieno di risposte.
+let classEndsAt = 0, classTimerId = null, classScaduto = false;
+function fmtCountdown(ms) {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+}
+function paintClassTimer() {
+  const chip = _safe('classTimer'), banner = _safe('classTimerBanner');
+  if (!classEndsAt) {
+    if (chip) chip.hidden = true;
+    if (banner) banner.hidden = true;
+    return;
+  }
+  const left = classEndsAt - Date.now();
+  if (chip) {
+    chip.hidden = false;
+    chip.classList.toggle('urgent', left > 0 && left <= 60000);
+    chip.classList.toggle('scaduto', left <= 0);
+    chip.textContent = left > 0 ? '⏱ ' + fmtCountdown(left) : '⏱ Tempo scaduto';
+  }
+  if (banner) {
+    banner.hidden = false;
+    if (left > 0) {
+      banner.classList.remove('scaduto');
+      // riepilogato: la classe sa a che ora chiude, non solo quanto manca
+      const fine = new Date(classEndsAt).toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' });
+      banner.textContent = 'L\'attività finisce alle ' + fine + ' — mancano ' + fmtCountdown(left);
+    } else {
+      if (!classScaduto) {
+        classScaduto = true;
+        // la notifica e' per l'alunno, non un'interruzione: si avvisa una volta
+        try {
+          if (navigator.vibrate) navigator.vibrate([120, 80, 120]);
+          const ann = _safe('slideAnnounce');
+          if (ann) ann.textContent = 'Tempo scaduto. Puoi comunque continuare il percorso.';
+        } catch (e) {}
+      }
+      banner.classList.add('scaduto');
+      banner.textContent = '⏱ Tempo scaduto: il percorso resta aperto, il docente vi darà le indicazioni.';
+    }
+  }
+  if (left <= 0 && classTimerId) { clearInterval(classTimerId); classTimerId = null; }
+}
+function setClassEndsAt(ms) {
+  const nuovo = Number(ms) > 0 ? Number(ms) : 0;
+  // il server puo' prolungare o fermare il timer mentre la pagina e' aperta:
+  // ripartire da zero evita un doppio intervallo e il messaggio "scaduto" che
+  // resterebbe appeso dopo un prolungamento
+  if (nuovo === classEndsAt) return;
+  classEndsAt = nuovo;
+  classScaduto = false;
+  if (classTimerId) { clearInterval(classTimerId); classTimerId = null; }
+  if (classEndsAt) classTimerId = setInterval(paintClassTimer, 1000);
+  paintClassTimer();
+}
+function avviaTimerClasse() {
+  // assente su un file aperto dal disco o su una lezione servita da
+  // start_lesson.py: in quel caso non c'e' pannello, quindi nessun timer, e il
+  // silenzio e' la risposta giusta
+  if (!/^https?:$/.test(location.protocol || '')) return;
+  fetch('/api/class_timer', { cache: 'no-store' })
+    .then(r => (r.ok ? r.json() : null))
+    .then(j => { if (j && j.scadenza) setClassEndsAt(j.scadenza); })
+    .catch(() => {});
+  // risincronizza: il docente puo' avviare o prolungare il timer mentre questa
+  // pagina e' gia' aperta. 15 s bastano (il conto e' locale, non ricalcolato
+  // dal server a ogni tick) e non tengono la radio del tablet accesa.
+  setInterval(() => {
+    if (document.hidden) return;
+    fetch('/api/class_timer', { cache: 'no-store' })
+      .then(r => (r.ok ? r.json() : null))
+      .then(j => { if (j) setClassEndsAt(j.scadenza || 0); })
+      .catch(() => {});
+  }, 15000);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      fetch('/api/class_timer', { cache: 'no-store' })
+        .then(r => (r.ok ? r.json() : null))
+        .then(j => { if (j) setClassEndsAt(j.scadenza || 0); })
+        .catch(() => {});
+    }
+  });
+}
+
 // ------------------------------------------------------------ tema
 const btnTheme = _safe('btnTheme') || el('div');
 function applyTheme(tt) {
@@ -789,6 +881,9 @@ function buildExport() {
            data: new Date().toISOString().slice(0, 10),
            attivita_svolte: M.svolte + '/' + M.totaleAtt,
            punti: M.e + '/' + M.t,
+           // numero di risposte sbagliate: la classifica di classe e' la media
+           // di questo e del tempo, quindi deve viaggiare con il report
+           errori: LOG.filter(r2 => !r2.esito).length,
            precisione: (M.t ? Math.round(M.e / M.t * 100) : 0) + '%',
            precisione_sulle_svolte: (M.tSvolte ? Math.round(M.e / M.tSvolte * 100) : 0) + '%',
            copertura: M.copertura + '%',
@@ -818,12 +913,17 @@ function buildProgress() {
   const M = scoreMetrics();
   const totMs = sessMs + (document.hidden ? 0 : Date.now() - sessStart);
   return { done: M.svolte, total: M.totaleAtt, punti: M.e, totale: M.t,
-            pct: M.pct, pct_svolte: M.pctSvolte, copertura: M.copertura,
-            esame: examMetrics(),
-            completata: M.completo,
-            slide: cur + 1, di: slides.length,
-            studente: studentName || 'Studente',
-            tempo_s: Math.round(totMs / 1000) };
+           pct: M.pct, pct_svolte: M.pctSvolte, copertura: M.copertura,
+           esame: examMetrics(),
+           completata: M.completo,
+           // errori: la classifica di classe e' la MEDIA degli errori e del
+           // tempo, quindi servono entrambi. Sono le risposte sbagliate registrate
+           // (come in errori_per_tipo), non i punti persi: conta lo sbaglio, non
+           // quanto valeva la domanda.
+           errori: LOG.filter(r2 => !r2.esito).length,
+           slide: cur + 1, di: slides.length,
+           studente: studentName || 'Studente',
+           tempo_s: Math.round(totMs / 1000) };
 }
 function downloadFile(name, content, mime) {
   const b = new Blob([content], { type: mime });
@@ -862,6 +962,7 @@ function exportReport(kind) {
       + '<p><b>Studente:</b> ' + escHtml(R.studente) + ' - <b>Data:</b> ' + escHtml(R.data)
       + ' - <b>Tempo:</b> ' + escHtml(R.tempo_min) + ' min</p>'
       + '<p><b>Attività svolte:</b> ' + escHtml(R.attivita_svolte) + ' - <b>Punti:</b> ' + escHtml(R.punti)
+      + ' - <b>Errori:</b> ' + escHtml(R.errori)
       + ' - <b>Precisione:</b> ' + escHtml(R.precisione) + '</p>'
       + '<table><tr><th>Slide</th><th>Titolo</th><th>Punti</th></tr>' + rows + '</table>'
       + '<script>setTimeout(() => window.print(), 350)<\/script></body></html>');
@@ -977,6 +1078,7 @@ function buildFinishPanel() {
                                    punti: p.punti, totale: p.totale,
                                    completata: p.completata,
                                    copertura: p.copertura,
+                                   errori: p.errori,
                                    tempo_min: Math.round(p.tempo_s / 6) / 10 }) });
           const j = await r.json().catch(() => ({}));
           cbtn.textContent = (r.ok && j.ok) ? '✓ Inviato in classifica!' : '✗ Invio fallito (aperto da file? usa il server)';
@@ -2407,6 +2509,10 @@ if (FOCUS) {
   }
   paintMap();    // mappa del percorso alla prima apertura
 
+  // timer di classe: parte per ultima, dopo il disegno della slide, cosi' non
+  // compete con il rendering iniziale
+  avviaTimerClasse();
+
 // ------------------------------------------------------------ superficie di test
 // Esposta VOLUTAMENTE, come già fatto per LOG e review. Serve ai test per
 // verificare la logica di valutazione (denominatore fisso, soglia d'esame,
@@ -2425,5 +2531,6 @@ window.LESSON_API = {
   shuffleOpts: shuffleOpts, renderBlock: renderBlock,
   paintScore: paintScore, paintDots: paintDots, go: go,
   buildExport: buildExport, buildProgress: buildProgress,
-  audio: audio, slideHaAttivita: slideHaAttivita
+  audio: audio, slideHaAttivita: slideHaAttivita,
+  setClassEndsAt: setClassEndsAt, paintClassTimer: paintClassTimer
 };

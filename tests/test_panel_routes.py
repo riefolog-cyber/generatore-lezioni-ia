@@ -69,15 +69,61 @@ def test_la_classifica_richiede_il_pin_anche_dalla_rete():
 
 
 def test_tutte_le_altre_api_sono_riservate_a_localhost():
-    """Configurazione, filesystem e QR non escono mai sulla rete di classe."""
+    """Configurazione, filesystem e QR non escono mai sulla rete di classe.
+
+    Unica eccezione dichiarata: il timer di classe. E' l'orario di fine
+    dell'attivita', e senza leggerlo dalla rete il player dello studente non
+    puo' mostrare il conto alla rovescia (e il docente lo imposta dal pannello
+    sul suo PC, non dal telefono). Non contiene dati del docente ne' risultati
+    degli studenti: lo verifica `test_il_timer_pubblico_non_espone_nulla`.
+    """
     for path, rotta in panel_routes.GET_ROUTES.items():
-        if rotta.guardia == panel_routes.PIN_CLASSE:
+        if rotta.guardia in (panel_routes.PIN_CLASSE, panel_routes.PUBBLICA):
             continue
         assert rotta.guardia == panel_routes.LOCALHOST, f"{path} non è localhost-only"
     for path, rotta in panel_routes.POST_ROUTES.items():
         if rotta.guardia == panel_routes.PUBBLICA:
             continue          # l'unica aperta alla rete: l'invio dello studente
         assert rotta.guardia == panel_routes.LOCALHOST, f"{path} POST non è localhost-only"
+
+
+def test_la_sole_api_pubblica_in_lettura_e_il_timer():
+    """Ogni GET pubblica in più significa un dato del docente sulla rete.
+
+    Elenco chiuso, non una lista di "quelli che mi sembrano innocui": aggiungere
+    una rotta pubblica deve far fallire questo test.
+    """
+    pubbliche = [p for p, r in panel_routes.GET_ROUTES.items()
+                 if r.guardia == panel_routes.PUBBLICA]
+    assert pubbliche == ["/api/class_timer"], pubbliche
+
+
+def test_il_timer_pubblico_non_espone_nulla(tmp_path, monkeypatch):
+    """Il timer espone quattro numeri e basta: nessun dato del docente."""
+    import panel
+    from tools import shared_lesson
+    monkeypatch.setattr(panel, "BASE", tmp_path)
+    lezione = tmp_path / "Prova_lesson"
+    lezione.mkdir()
+    (lezione / "index.html").write_text("x", encoding="utf-8")
+    shared_lesson.set_shared(tmp_path, "Prova_lesson")
+
+    catturato = {}
+
+    class FakeHandler(panel.PanelHandler):
+        def __init__(self):
+            pass
+
+        def _json(self, obj, code=200):
+            catturato.update(obj)
+
+    assert shared_lesson.set_timer(tmp_path, 15)["attivo"] is True
+    FakeHandler()._api_class_timer({})
+    assert set(catturato) == {"minuti", "scadenza", "attivo", "residuo"}
+    assert catturato["residuo"] > 0
+    # nessuna chiave che possa contenere un nome, un punteggio o un percorso
+    for k in catturato:
+        assert not any(x in k.lower() for x in ("nome", "stud", "punti", "path", "file"))
 
 
 def test_una_sola_rotta_e_aperta_alla_rete():
@@ -113,6 +159,30 @@ def test_la_forma_dell_errore_e_dichiarata():
         assert rotta.err in ("started", "ok", None), f"{path}: err={rotta.err!r}"
     assert panel_routes.POST_ROUTES["/api/build"].err == "started"
     assert panel_routes.POST_ROUTES["/api/add_slide"].err == "ok"
+
+
+def test_le_rotte_con_contratto_proprio_ricevono_il_parsed():
+    """`err=None` = la rotta gestisce da se ogni errore: il metodo riceve `parsed`.
+
+    Il dispatcher chiama `_post_<method>(parsed)` per queste rotte e senza
+    argomenti per le altre. Un metodo con la firma sbagliata non fallisce nei
+    test (basta che esista) ma a runtime, con un TypeError e una risposta vuota:
+    è successo con il timer di classe.
+    """
+    import inspect
+    for path, rotta in panel_routes.POST_ROUTES.items():
+        nome = "_post_" + rotta.method
+        metodo = getattr(panel.PanelHandler, nome, None)
+        if not callable(metodo):
+            continue
+        posizionali = [p for p in inspect.signature(metodo).parameters.values()
+                      if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+        if rotta.err is None:
+            assert len(posizionali) == 2, f"{path}: {nome} deve ricevere parsed"
+        elif rotta.query:
+            assert len(posizionali) == 2, f"{path}: {nome} deve ricevere la query"
+        else:
+            assert len(posizionali) == 1, f"{path}: {nome} non deve ricevere argomenti"
 
 
 def test_nessuna_rotta_dichiarata_e_ignorata():

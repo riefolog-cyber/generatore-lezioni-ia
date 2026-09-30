@@ -210,15 +210,37 @@ CLASSIFICA_FILE = BASE / "classifica.json"
 _CLASSIFICA_PANEL = 50         # righe mostrate in classifica per lezione
 
 
-def _classifica_add(lesson, studente, punti, totale, completata, tempo_min):
+def _int_clamp(value, lo, hi, default=0):
+    """Intero tra `lo` e `hi`, ripiegando su `default` su qualsiasi input.
+
+    `int("abc")` sollevava ValueError e la risposta allo studente conteneva il
+    messaggio interno di Python ("invalid literal for int() with base 10"):
+    un dettaglio della macchina del docente, consegnato dalla rete di classe.
+    Un campo malformato vale 0, e i limiti tengono fuori i valori assurdi.
+    """
+    try:
+        v = int(round(float(value)))
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, v))
+
+
+def _classifica_add(lesson, studente, punti, totale, completata, tempo_min,
+                    errori=0):
     """Aggiunge un risultato (chiamato anche da client LAN: nessun segreto)."""
     _class_repo_add(CLASSIFICA_FILE, lesson, studente, punti, totale,
-                    completata, tempo_min)
+                    completata, tempo_min, errori)
 
 
 def _classifica_view():
-    """Classifica per lezione: miglior risultato per studente, ordinato per
-    percentuale (decrescente) e tempo (crescente)."""
+    """Classifica per lezione ordinata dall'indice: la MEDIA degli errori e
+    del tempo impiegato per concludere le attivita'.
+
+    La formula e' in tools/classifica_score.py: qui si raggruppa per lezione e
+    si restituisce gia' ordinata, con `indice` (0-100, 100 = nessun errore e il
+    tempo piu' rapido) e `media` (la penalita' 0-100) accanto ai dati grezzi.
+    """
+    from tools import classifica_score
     try:
         rows = _class_repo_list(CLASSIFICA_FILE)
     except Exception:
@@ -229,17 +251,7 @@ def _classifica_view():
             by_lesson.setdefault(str(r["lesson"]), []).append(r)
     out = []
     for lesson in sorted(by_lesson):
-        lst = by_lesson[lesson]
-        best = {}
-        for r in lst:                      # migli risultato per studente
-            k = r.get("studente") or "Anonimo"
-            prev = best.get(k)
-            if (prev is None or r.get("pct", 0) > prev.get("pct", 0)
-                    or (r.get("pct", 0) == prev.get("pct", 0)
-                        and r.get("tempo_min", 9999) < prev.get("tempo_min", 9999))):
-                best[k] = r
-        ranked = sorted(best.values(), key=lambda r: (-r.get("pct", 0),
-                                                      r.get("tempo_min", 9999)))
+        ranked = classifica_score.ordina(classifica_score.punta(by_lesson[lesson]))
         out.append({"lesson": lesson, "rows": ranked[:_CLASSIFICA_PANEL]})
     return {"classifiche": out}
 
@@ -708,6 +720,11 @@ class PanelHandler(_RangeHandler):
             if not _loopback(self) and not self._teacher_allowed():
                 self._reject(403, "PIN docente richiesto per questa API.")
                 return
+        elif rotta.guardia == panel_routes.PUBBLICA:
+            # raggiungibile anche dalla rete: al momento solo il timer di classe,
+            # che e' un orario di fine e non un dato del docente. Il controllo
+            # Host (anti DNS-rebinding) e' gia' passato in do_GET.
+            pass
         elif not _loopback(self):
             self._reject(403, "API riservate a localhost")
             return
@@ -756,6 +773,23 @@ class PanelHandler(_RangeHandler):
         from tools.panel_settings import public_config
         return self._json({"settings": public_config(),
                            "runtime_port": RUNTIME_PORT})
+
+    def _api_class_timer(self, query):
+        """Timer di classe: l'unica GET aperta alla rete di classe.
+
+        Espone solo `{minuti, scadenza, attivo, residuo}`: l'orario di fine
+        dell'attivita'. Nessun dato del docente, nessun risultato degli studenti
+        (quelli restano dietro PIN_classe), quindi il player puo' leggerlo per
+        mostrare il conto alla rovescia. Se il file non esiste, semplicemente
+        non c'e' un timer.
+        """
+        from tools.shared_lesson import get_timer
+        try:
+            return self._json(get_timer(BASE))
+        except Exception as e:  # noqa: BLE001
+            _flog(f"class_timer GET: {e}")
+            return self._json({"minuti": 0, "scadenza": 0, "attivo": False,
+                               "residuo": 0})
 
     def _api_reaudio(self, query):
         return self._start_reaudio(query)
@@ -1541,6 +1575,28 @@ class PanelHandler(_RangeHandler):
         self._json({"ok": True,
                     "messaggio": "Player aggiornato in tutte le lezioni."})
 
+    def _post_class_timer(self, parsed):
+        """Avvia o ferma il timer di classe (solo dal PC del docente).
+
+        `minuti` = 0 ferma il timer. Il merito e' la risposta: il pannello mostra
+        subito l'orario di fine e non deve rileggere il file. Firma con `parsed`
+        perché la rotta è dichiarata `err=None` (gestisce da se ogni errore, con
+        un 500 sulle colpe del server invece di un 400 che farebbe sembrare la
+        colpa dello studente).
+        """
+        from tools.shared_lesson import set_timer
+        try:
+            d = self._read_json_body()
+            stato = set_timer(BASE, d.get("minuti"))
+        except ValueError as e:
+            self._json({"ok": False, "error": str(e)}, 400)
+            return
+        except Exception as e:  # noqa: BLE001
+            _flog(f"class_timer POST: {e}")
+            self._json({"ok": False, "error": "Salvataggio non riuscito."}, 500)
+            return
+        self._json({"ok": True, **stato})
+
     def _classifica_post(self):
         """Invio del risultato da parte dello studente.
 
@@ -1554,13 +1610,16 @@ class PanelHandler(_RangeHandler):
             lesson = self._check_lesson(str(d.get("lesson") or ""))
             studente = re.sub(r"\s+", " ", str(d.get("studente") or "Anonimo")).strip()[:40] \
                 or "Anonimo"
-            punti = max(0, min(999, int(d.get("punti") or 0)))
-            totale = max(0, min(999, int(d.get("totale") or 0)))
-            tempo_min = max(0, min(600, int(d.get("tempo_min") or 0)))
+            punti = _int_clamp(d.get("punti"), 0, 999)
+            totale = _int_clamp(d.get("totale"), 0, 999)
+            tempo_min = _int_clamp(d.get("tempo_min"), 0, 600)
+            # errori: senza questo numero la classifica non puo' essere la media
+            # di errori e tempo, ma solo un ordine sui minuti
+            errori = _int_clamp(d.get("errori"), 0, 999)
             if totale <= 0:
                 raise ValueError("Nessuna attivita' registrata")
             _classifica_add(lesson.name, studente, punti, totale,
-                            bool(d.get("completata")), tempo_min)
+                            bool(d.get("completata")), tempo_min, errori)
             self._json({"ok": True})
         except ValueError as e:
             # errori di input: il messaggio e' utile e non rivela nulla
@@ -1579,12 +1638,15 @@ class PanelHandler(_RangeHandler):
         view = _classifica_view()
         entry = next((c for c in view["classifiche"] if c["lesson"] == lesson.name), None)
         rows = entry["rows"] if entry else []
-        lines = ["posizione;studente;punti;percentuale;completata;tempo_min;quando"]
+        lines = ["posizione;studente;indice;media_errori_tempo;errori;minuti;"
+                 "punti;percentuale;completata;quando"]
         for i, r in enumerate(rows):
             lines.append(";".join(_csv_cell(x) for x in (
-                i + 1, r.get("studente", ""), f'{r.get("punti", 0)}/{r.get("totale", 0)}',
+                i + 1, r.get("studente", ""), r.get("indice", 0),
+                r.get("media", 0), r.get("errori", 0), r.get("tempo_min", 0),
+                f'{r.get("punti", 0)}/{r.get("totale", 0)}',
                 f'{r.get("pct", 0)}%', "si" if r.get("completata") else "no",
-                r.get("tempo_min", 0), r.get("t", ""))))
+                r.get("t", ""))))
         body = ("\ufeff" + "\n".join(lines)).encode("utf-8")
         fname = f'classifica-{lesson.name.replace("_lesson", "")}.csv'
         self.send_response(200)

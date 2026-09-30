@@ -17,17 +17,20 @@ il **pannello di controllo** (pagina grafica), con cui puoi:
    bozza senza LLM (`--bozza`), rigenera solo l'audio di una lezione,
    generare come **file HTML unico** (senza cartella) e attivare la
    **trascrizione audio locale con Whisper**;
-5. usare le **impostazioni** del pannello per porta, limite upload, cache,
+5. **mostrare in classe**: scegli la lezione con «📚 Scegli la lezione da
+   mostrare» e, se serve, armare il **timer di attività** (il conto alla
+   rovescia compare in alto sulla pagina degli studenti);
+6. usare le **impostazioni** del pannello per porta, limite upload, cache,
    modello Whisper, IP e PIN docente;
-6. in **Manutenzione**, «Aggiorna il player» per riscrivere grafica e script
+7. in **Manutenzione**, «Aggiorna il player» per riscrivere grafica e script
    delle lezioni già generate (serve dopo un aggiornamento del player: senza,
    le lezioni continuano a servire la versione precedente);
-6. **modificare** le slide dopo la generazione (titolo, narrazione, quiz)
+8. **modificare** le slide dopo la generazione (titolo, narrazione, quiz)
    con rigenerazione audio della singola slide;
-7. provare le **voci** neurali (anteprima audio) prima di generare;
-8. seguire il **log** in tempo reale (errori anche in `panel_errors.log`);
-9. **aprire** le lezioni generate (anche da tablet/telefono sulla stessa rete
-   Wi-Fi: l'indirizzo LAN è mostrato nel pannello).
+9. provare le **voci** neurali (anteprima audio) prima di generare;
+10. seguire il **log** in tempo reale (errori anche in `panel_errors.log`);
+11. **aprire** le lezioni generate (anche da tablet/telefono sulla stessa rete
+    Wi-Fi: l'indirizzo LAN è mostrato nel pannello).
 
 `AVVIA.bat gui` → vecchia GUI desktop (tkinter: anteprima, genera, esporta ZIP).
 `python avvia.py` → flusso automatico da terminale (senza pannello).
@@ -159,7 +162,7 @@ tools/               common, player_template (player autogenerato),
                      sources (fonti e Whisper), export_zip, export_single,
                      class_report, selftest (QA), netdiag, qr, jobs,
                      multipart, uploads, panel_ui, panel_settings,
-                     class_repository, lesson_admin, http_safety
+                     class_repository, classifica_score, lesson_admin, http_safety
 assets/voice/        modello Piper + cache audio
 ```
 
@@ -190,6 +193,25 @@ assets/voice/        modello Piper + cache audio
   stesso modello configurato, la struttura dei contenuti si riusa al posto di
   rifare la chiamata LLM (risparmio di minuti). Con `--no-cache` si forza una
   nuova strutturazione. Autolimitata a 200 voci (le più vecchie vengono rimosse).
+- **Timer di classe**: accanto al pulsante «📚 Scegli la lezione da mostrare» c'è
+  «⏱ Timer attività» (nessuno / 5 / 10 / 15 / 20 / 30 / 45 minuti) con
+  **▶ Avvia** e **⏹ Ferma**. Il conto alla rovescia compare in alto sulla pagina
+  degli studenti, con chip `⏱ mm:ss` e banner con l'ora di fine, e resta
+  leggibile anche su telefono. La scadenza è un **istante assoluto** salvato dal
+  server: tutti gli alunni vedono la stessa fine, anche se aprono la lezione in
+  momenti diversi. Il pannello mostra il proprio conto e lo risincronizza ogni
+  15 s, così il docente può prolungare o fermare mentre la classe sta già
+  leggendo. **Non blocca nulla**: allo scadere restano l'avviso e la lezione
+  utilizzabile (un orologio che blocca la pagina lascia gli studenti fermi davanti
+  alle risposte). Dopo gli ultimi 60 secondi il chip passa al rosso.
+  Il timer è indipendente dalla lezione scelta e sopravvive al riavvio del
+  pannello (`lezione_in_classe.json`).
+  È l'unica API in lettura aperta alla rete di classe:
+  `/api/class_timer` espone solo `{minuti, scadenza, attivo, residuo}` — un
+  orario di fine, nessun dato del docente — e **solo in lettura**; avviarlo o
+  fermarlo è riservato al PC del docente (`tests/test_panel_routes.py` lo blocca).
+  Su un file aperto dal disco o su una lezione servita da `start_lesson.py` il
+  timer semplicemente non compare: non c'è il pannello a riceverlo.
 - Log in `generazione.log`, errori API del pannello in `panel_errors.log`.
   Rigenera con `python new_lesson.py build file.docx --force`.
 - **Codice modulare**: `panel.py` contiene logica HTTP e compatibilità API;
@@ -245,9 +267,21 @@ assets/voice/        modello Piper + cache audio
   **La classifica contiene dati di minori**: dalla rete di classe la sua
   consultazione e il CSV richiedono il **PIN docente**; in locale no.
   Lo studente può sempre inviare il proprio risultato.
-- **Sicurezza del pannello**: le API sono raggiungibili solo da localhost,
-  l'header `Host` deve essere un indirizzo di questa macchina (blocca il
-  DNS-rebinding) e le POST con origine esterna vengono rifiutate. Se imposti
-  un **PIN docente** in Impostazioni, è richiesto per ogni operazione che
-  modifica qualcosa — non solo per le impostazioni. Con PIN vuoto l'unica
-  protezione è il controllo di loopback.
+  **L'ordine è la media degli errori e del tempo impiegato** a concludere le
+  attività: ogni risultato riceve un indice 0-100
+  (`indice = 100 − media(penalità errori, penalità tempo)`, metà e metà, con
+  entrambe le componenti riportate al peggiore della classe → 100 = nessun
+  errore e il tempo più rapido). Il player manda il numero di errori insieme
+  al resto (`errori`); chi ha più tentativi mostra il migliore, chi non ha
+  concluso il percorso resta in coda e non fa da termometro. Nell'inserimento
+  manuale si possono indicare errori e minuti. Formula in
+  `tools/classifica_score.py`; la colonna `errori` viene aggiunta in automatico
+  a un archivio già in uso.
+- **Sicurezza del pannello**: le API sono raggiungibili solo da localhost, con
+  due eccezioni dichiarate e verificate nei test: l'invio del risultato da parte
+  dello studente (`POST /api/classifica`) e la lettura del timer di classe
+  (`GET /api/class_timer`, un orario e nient'altro). L'header `Host` deve essere
+  un indirizzo di questa macchina (blocca il DNS-rebinding) e le POST con origine
+  esterna vengono rifiutate. Se imposti un **PIN docente** in Impostazioni, è
+  richiesto per ogni operazione che modifica qualcosa — non solo per le
+  impostazioni. Con PIN vuoto l'unica protezione è il controllo di loopback.

@@ -135,13 +135,22 @@ async function loadClassifica() {
       return;
     }
     const medal = i => i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : (i + 1);
+    const idx = r2 => (r2.indice != null ? r2.indice : '—');
+    const idxColor = r2 => (r2.indice == null ? 'var(--mut)'
+      : r2.indice >= 70 ? 'var(--ok)' : r2.indice >= 40 ? 'var(--warn)' : 'var(--ko)');
     box.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:13.5px">'
-      + '<tr style="color:var(--mut);text-align:left"><th style="padding:6px 8px">#</th><th>Studente</th><th>Punti</th><th>%</th><th>Minuti</th><th>Quando</th></tr>'
+      + '<tr style="color:var(--mut);text-align:left"><th style="padding:6px 8px">#</th><th>Studente</th>'
+      + '<th title="Media degli errori e del tempo impiegato per concludere le attività (100 = nessun errore e il tempo più rapido)">Indice</th>'
+      + '<th>Errori</th><th>Minuti</th><th>Punti</th><th>Quando</th></tr>'
       + entry.rows.map((r2, i) => `<tr style="border-top:1px solid var(--line)">
         <td style="padding:6px 8px">${medal(i)}</td>
         <td style="font-weight:700">${esc(r2.studente)}${r2.completata ? ' <span style="color:var(--ok)">✓</span>' : ''}</td>
-        <td>${r2.punti}/${r2.totale}</td><td>${r2.pct}%</td><td>${r2.tempo_min}</td><td style="color:var(--mut)">${esc(r2.t)}</td>
-      </tr>`).join('') + '</table>';
+        <td style="font-weight:700;color:${idxColor(r2)}">${idx(r2)}</td>
+        <td>${r2.errori != null ? r2.errori : '—'}</td><td>${r2.tempo_min}</td><td>${r2.punti}/${r2.totale}</td><td style="color:var(--mut)">${esc(r2.t)}</td>
+      </tr>`).join('') + '</table>'
+      + '<div style="font-size:11.5px;color:var(--mut);margin-top:6px">'
+      + 'La classifica ordina per <b>indice</b>: la media degli errori commessi e del tempo impiegato '
+      + 'a concludere le attività (100 = nessun errore e il tempo più rapido della classe).</div>';
   } catch (e) {
     box.innerHTML = '<span class="empty">Errore: ' + esc(e.message) + '</span>';
   }
@@ -168,11 +177,17 @@ async function addManuale() {
     alert('Scegli la lezione, scrivi il nome e i punti nel formato 7/10.');
     return;
   }
+  // errori e minuti alimentano l'indice: inserendoli a mano il risultato
+  // compete con gli altri nello stesso modo di quelli inviati dal player
+  const err = Math.max(0, parseInt(($('#claAddErr').value || '0').trim(), 10) || 0);
+  const min = Math.max(0, parseFloat(($('#claAddMin').value || '0').trim().replace(',', '.')) || 0);
   const r = await api('classifica', { method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ lesson, studente: nome, punti: +pm[1], totale: +pm[2], completata: true, tempo_min: 0 }) });
+    body: JSON.stringify({ lesson, studente: nome, punti: +pm[1], totale: +pm[2], completata: true,
+                           errori: err, tempo_min: min }) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok || j.ok === false) { alert('Errore: ' + (j.error || r.status)); return; }
   $('#claAddName').value = ''; $('#claAddPts').value = '';
+  $('#claAddErr').value = ''; $('#claAddMin').value = '';
   loadClassifica();
 }
 
@@ -606,6 +621,75 @@ $('#btnFocusQr').onclick = () => {
   if ($('#focusQr') && !$('#focusQr').hidden) openQrFullscreen();
   else openFocusPicker();
 };
+
+// ---------------------------------------------------- timer di classe
+// Il docente avvia un conto alla rovescia per la fine dell'attivita': la
+// scadenza e' un istante ASSOLUTO salvato dal server, quindi tutti gli alunni
+// vedono la stessa fine anche se aprono la lezione in momenti diversi. Il
+// pannello mostra il proprio conto e lo risincronizza con il server: l'orologio
+// del PC puo' essere un secondo indietro rispetto a quello del telefono.
+let _timerScadenza = 0;
+function fmtMMSS(ms) {
+  const s = Math.max(0, Math.ceil(ms / 1000));
+  const m = Math.floor(s / 60);
+  return String(m).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+}
+function disegnaTimer() {
+  const box = $('#timerLeft');
+  if (!box) return;
+  const stop = $('#btnTimerStop');
+  if (!_timerScadenza) {
+    box.textContent = '';
+    box.style.color = 'var(--mut)';
+    if (stop) stop.hidden = true;
+    return;
+  }
+  const residuo = _timerScadenza - Date.now();
+  if (residuo <= 0) {
+    box.textContent = '⏱ Tempo scaduto';
+    box.style.color = 'var(--ko)';
+  } else {
+    box.textContent = '⏱ ' + fmtMMSS(residuo) + ' rimanenti';
+    // rosso negli ultimi 60 secondi: da li in poi la classe deve chiudere
+    box.style.color = residuo <= 60000 ? 'var(--ko)' : 'var(--warn)';
+  }
+  if (stop) stop.hidden = false;
+}
+async function caricaTimer() {
+  try {
+    const t = await api('class_timer');
+    _timerScadenza = (t && t.scadenza) || 0;
+  } catch (e) {
+    _timerScadenza = 0;   // server non raggiungibile: nessun timer
+  }
+  disegnaTimer();
+}
+async function impostaTimer(minuti) {
+  const msg = $('#timerMsg');
+  try {
+    const j = await teacherPost('class_timer', { minuti: minuti });
+    _timerScadenza = (j && j.scadenza) || 0;
+    if (msg) {
+      msg.textContent = minuti
+        ? 'Timer avviato: la classe ha ' + minuti + ' minuti. Fine alle ' +
+          new Date(_timerScadenza).toLocaleTimeString('it-IT') + '.'
+        : 'Timer fermato: non compare più sulla pagina degli studenti.';
+    }
+  } catch (e) {
+    if (msg) msg.textContent = '✗ ' + e.message;
+  }
+  disegnaTimer();
+}
+$('#btnTimerAvvia').onclick = () => impostaTimer(parseInt($('#timerMin').value, 10) || 0);
+$('#btnTimerStop').onclick = () => impostaTimer(0);
+// il conto del docente gira ogni secondo; il server viene riletto ogni 15 s
+// per correggere la deriva e per cogliere un timer avviato da un'altra scheda
+setInterval(disegnaTimer, 1000);
+setInterval(caricaTimer, 15000);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) caricaTimer();
+});
+caricaTimer();
 
 // ---------------------------------------------------- upload materiale
 const upZone = $('#upzone'), upFile = $('#upfile');

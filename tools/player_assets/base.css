@@ -654,6 +654,19 @@ html[data-contrast="1"] header, html[data-contrast="1"] nav, html[data-contrast=
 #examBanner { margin: 8px auto; max-width: 940px; padding: 9px 14px; border-radius: 10px;
   background: color-mix(in srgb, var(--warn) 13%, transparent); border: 1px solid var(--warn);
   color: var(--text); font-size: 13px; font-weight: 700; }
+/* Timer di classe: countdown impostato dal docente (vedi tools/shared_lesson.py).
+   Resta leggibile da lontano sul proiettore e passa al rosso negli ultimi
+   minuti, quando la classe deve chiudere. */
+#classTimer { color: var(--warn); font-size: 12px; font-weight: 800; }
+#classTimer.urgent { color: var(--ko); background: color-mix(in srgb, var(--ko) 15%, transparent);
+  border-color: var(--ko); }
+#classTimer.scaduto { color: var(--ko); background: color-mix(in srgb, var(--ko) 18%, transparent);
+  border-color: var(--ko); }
+#classTimerBanner { margin: 8px auto; max-width: 940px; padding: 9px 14px; border-radius: 10px;
+  background: color-mix(in srgb, var(--warn) 13%, transparent); border: 1px solid var(--warn);
+  color: var(--text); font-size: 13px; font-weight: 700; text-align: center; }
+#classTimerBanner.scaduto { border-color: var(--ko);
+  background: color-mix(in srgb, var(--ko) 15%, transparent); }
 /* Modalità esame: il banner promette "feedback nascosto fino alla fine", ma
    nascondevano solo i TESTI: `.opt.correct`/.opt.wrong` restavano visibili, e
    l'opzione giusta veniva evidenziata in verde a ogni domanda. In un test a
@@ -945,6 +958,10 @@ button:active:not(:disabled) { transform: scale(.96); }
   header .spacer { display: none; }
   header .hchip { display: none; }
   header #prog.hchip { display: inline-block; }
+  /* il timer di classe resta visibile anche su telefono: e' l'informazione
+     che il docente vuole vedere in fondo alla sala, e su schermi piccoli
+     finirebbe nel menu come tutto il resto */
+  header #classTimer.hchip { display: inline-block; }
   header h1 { font-size: 13.5px; }
   .hbtn .hbtntxt { display: none; }
   .hbtn { padding: 6px 10px; }

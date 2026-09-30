@@ -252,6 +252,90 @@ def test_lesson_action_share_sets_shared_lesson(tmp_path):
     assert shared_lesson.get_shared(tmp_path) is not None
 
 
+def test_timer_di_classe_scadenza_assoluta(tmp_path):
+    """Il timer è un istante, non una durata: tutti devono vedere la stessa fine.
+
+    Se fosse una durata ricalcolata da ogni browser, chi aprisse la lezione un
+    minuto dopo avrebbe tempo in più e la classe non sarebbe sincronizzata.
+    """
+    from tools import shared_lesson
+
+    # nessun file: nessun timer, e nessuna eccezione
+    assert shared_lesson.get_timer(tmp_path) == {"minuti": 0, "scadenza": 0,
+                                                 "attivo": False, "residuo": 0}
+    stato = shared_lesson.set_timer(tmp_path, 15)
+    assert stato["attivo"] is True and stato["minuti"] == 15
+    # ~15 minuti, non 15 secondi
+    assert 14 * 60_000 < stato["residuo"] <= 15 * 60_000
+    # il secondo chiamante vede la STESSA scadenza
+    assert shared_lesson.get_timer(tmp_path)["scadenza"] == stato["scadenza"]
+    # riavvio con un tempo maggiore: la scadenza si sposta in avanti
+    nuovo = shared_lesson.set_timer(tmp_path, 20)
+    assert nuovo["scadenza"] > stato["scadenza"]
+    # riavvio con un tempo minore: la scadenza si avvicina (non si allunga)
+    assert shared_lesson.set_timer(tmp_path, 1)["scadenza"] < nuovo["scadenza"]
+    # fermare: sparisce dalla pagina degli studenti
+    fermo = shared_lesson.set_timer(tmp_path, 0)
+    assert fermo["attivo"] is False and fermo["scadenza"] == 0
+
+
+def test_timer_sopravvive_a_lezione_nessuna_o_valori_strani(tmp_path):
+    """Cambiare la lezione mostrata non deve far sparire il timer avviato."""
+    from tools import shared_lesson
+    lezione = tmp_path / "Prova_lesson"
+    lezione.mkdir()
+    (lezione / "index.html").write_text("x", encoding="utf-8")
+
+    shared_lesson.set_shared(tmp_path, "Prova_lesson")
+    scadenza = shared_lesson.set_timer(tmp_path, 10)["scadenza"]
+    shared_lesson.set_shared(tmp_path, "")            # docente toglie la lezione
+    assert shared_lesson.get_timer(tmp_path)["scadenza"] == scadenza
+    shared_lesson.set_shared(tmp_path, "Prova_lesson")
+    assert shared_lesson.get_timer(tmp_path)["scadenza"] == scadenza
+
+    # un file scritto a mano (o da una versione precedente) non deve far
+    # esplodere la lettura: i valori assurdi vengono normalizzati
+    (tmp_path / "lezione_in_classe.json").write_text(
+        '{"lesson": "Prova_lesson", "timer": {"minuti": "abc", "scadenza": null}}',
+        encoding="utf-8")
+    assert shared_lesson.get_timer(tmp_path) == {"minuti": 0, "scadenza": 0,
+                                                 "attivo": False, "residuo": 0}
+    # fuori range: rifiutato con un messaggio per l'insegnante, non silenziato
+    try:
+        shared_lesson.set_timer(tmp_path, 9999)
+        assert False, "un timer di 9999 minuti deve essere rifiutato"
+    except ValueError as e:
+        assert "fuori range" in str(e)
+    # e il timer corrente resta intatto dopo il rifiuto
+    assert shared_lesson.get_timer(tmp_path)["scadenza"] == 0
+
+
+def test_il_player_mostra_il_timer_di_classe():
+    """Il conto alla rovescia deve comparire sulla pagina dello studente."""
+    import inspect
+    from tools import player_template
+
+    src = player_template._js()
+    assert "avviaTimerClasse" in src and "setClassEndsAt" in src
+    # legge la scadenza dal server e la ricalcola da solo: il conteggio non
+    # dipende da una richiesta al secondo
+    assert "/api/class_timer" in src
+    assert "setInterval(paintClassTimer, 1000)" in src
+    # scaduto NON blocca il percorso: resta un avviso
+    assert "Tempo scaduto" in src
+    assert "il percorso resta aperto" in src
+
+    src_html = inspect.getsource(player_template.write_player)
+    assert 'id="classTimer"' in src_html
+    assert 'id="classTimerBanner"' in src_html
+
+    # il CSS deve distinguerlo dal timer d'esame e tenerlo visibile su telefono
+    css = player_template._css(dict(player_template.THEMES['dark'], accent="#808080",
+                                    accent2="#808080", accentink="#ffffff"))
+    assert "#classTimer" in css and "#classTimerBanner" in css
+    assert "header #classTimer.hchip" in css
+
+
 def test_netdiag_returns_panel_fields():
     from tools.netdiag import diagnose
     d = diagnose(8341)
@@ -274,10 +358,80 @@ def test_class_repository_migrates_json_and_keeps_compatibility(tmp_path):
     assert rows[0]["studente"] == "Alice"
     assert db_path_for(json_path).exists()
 
-    add_result(json_path, "Prova_lesson", "Bob", 9, 10, True, 3)
+    add_result(json_path, "Prova_lesson", "Bob", 9, 10, True, 3, 2)
     rows = list_results(json_path)
     assert {r["studente"] for r in rows} == {"Alice", "Bob"}
     assert json.loads(json_path.read_text(encoding="utf-8"))
+    # gli errori viaggiano con il risultato: senza, la classifica non può essere
+    # la media di errori e tempo
+    assert {r["studente"]: r["errori"] for r in rows} == {"Alice": 0, "Bob": 2}
+
+
+def test_class_repository_allarga_un_archivio_gia_esistente(tmp_path):
+    """Un DB creato da una versione precedente (senza `errori`) deve funzionare.
+
+    `CREATE TABLE IF NOT EXISTS` non tocca una tabella già esistente: senza
+    l'allargamento esplicito, il primo inserimento dopo l'aggiornamento
+    fallisce con "no such column" e la classe non può più inviare risultati.
+    """
+    import sqlite3
+    from tools.class_repository import add_result, db_path_for, list_results
+
+    json_path = tmp_path / "classifica.json"
+    db = db_path_for(json_path)
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        "CREATE TABLE risultati (id INTEGER PRIMARY KEY AUTOINCREMENT, t TEXT NOT NULL,"
+        " lesson TEXT NOT NULL, studente TEXT NOT NULL, punti INTEGER NOT NULL,"
+        " totale INTEGER NOT NULL, pct INTEGER NOT NULL, completata INTEGER NOT NULL,"
+        " tempo_min REAL NOT NULL);"
+        "INSERT INTO risultati(t,lesson,studente,punti,totale,pct,completata,tempo_min)"
+        " VALUES('2026-01-01 10:00','Prova_lesson','Vecchio',7,10,70,1,5);")
+    conn.commit()
+    conn.close()
+
+    # la riga precedente si legge e ottiene 0 errori (assenza = nessun dato)
+    assert list_results(json_path)[0]["errori"] == 0
+    # e il nuovo inserimento non solleva
+    add_result(json_path, "Prova_lesson", "Nuovo", 9, 10, True, 3, 1)
+    rows = list_results(json_path)
+    assert {r["studente"]: r["errori"] for r in rows} == {"Vecchio": 0, "Nuovo": 1}
+
+
+def test_class_report_ordina_per_media_errori_e_tempo(tmp_path):
+    """Il report di classe usa la stessa regola del pannello.
+
+    Un report generato da una versione precedente non ha il campo `errori`:
+    se non viene ricavato da `risposte`, la classifica riporterebbe 0 errori
+    per tutti e la regola "media di errori e tempo" diventerebbe "solo tempo".
+    """
+    from tools import class_report
+
+    nuovo = {"lezione": "Prova_lesson", "studente": "Carl", "data": "2026-09-30",
+             "punti": "10/10", "precisione": "100%", "errori": 0, "tempo_min": 10,
+             "risposte": [{"tipo": "quiz", "esito": True, "tempo": 30}] * 10}
+    vecchio = {"lezione": "Prova_lesson", "studente": "Alice", "data": "2026-09-30",
+               "punti": "6/10", "precisione": "60%", "tempo_min": 2,
+               "risposte": [{"tipo": "quiz", "esito": i < 6, "tempo": 10}
+                            for i in range(10)]}
+    (tmp_path / "carl.json").write_text(json.dumps(nuovo), encoding="utf-8")
+    (tmp_path / "alice.json").write_text(json.dumps(vecchio), encoding="utf-8")
+
+    reports = class_report._load([tmp_path])
+    assert len(reports) == 2
+    # Carl: 0 errori in 10 minuti (indice 50). Alice: 4 errori in 2 minuti (40)
+    classifica = class_report.classifica(reports)
+    assert [(r["studente"], r["indice"]) for r in classifica] == [("Carl", 50.0),
+                                                                 ("Alice", 40.0)]
+    assert classifica[1]["errori"] == 4          # contato da `risposte`
+
+    out_csv, out_html = tmp_path / "r.csv", tmp_path / "r.html"
+    class_report.build_csv(reports, out_csv)
+    class_report.build_html(reports, out_html)
+    testo = out_csv.read_text(encoding="utf-8-sig")
+    assert "indice" in testo and "errori" in testo
+    assert "Carl;50.0" in testo
+    assert "Indice" in out_html.read_text(encoding="utf-8")
 
 
 def test_panel_blocks_duplicate_generation_jobs():

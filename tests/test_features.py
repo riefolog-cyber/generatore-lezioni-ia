@@ -296,15 +296,42 @@ def test_player_lesson_dir_is_valid_js(tmp_path):
 def test_classifica_add_and_view(tmp_path, monkeypatch):
     import panel
     monkeypatch.setattr(panel, "CLASSIFICA_FILE", tmp_path / "classifica.json")
-    panel._classifica_add("X_lesson", "Alice", 8, 10, True, 4)
-    panel._classifica_add("X_lesson", "Bob", 6, 10, True, 3)
-    panel._classifica_add("X_lesson", "Alice", 9, 10, True, 5)   # migliora il suo best
-    panel._classifica_add("Y_lesson", "Carl", 2, 10, False, 9)
+    # La classifica e' la MEDIA di errori e tempo: Alice è più lenta ma sbaglia
+    # meno di Bob, e la media la mette davanti (indice più alto).
+    panel._classifica_add("X_lesson", "Alice", 8, 10, True, 6, 1)
+    panel._classifica_add("X_lesson", "Bob", 9, 10, True, 3, 5)
+    panel._classifica_add("X_lesson", "Alice", 9, 10, True, 5, 1)   # migliora il suo best
+    panel._classifica_add("Y_lesson", "Carl", 2, 10, False, 9, 7)
     view = panel._classifica_view()
     by = {c["lesson"]: c["rows"] for c in view["classifiche"]}
     assert [r["studente"] for r in by["X_lesson"]] == ["Alice", "Bob"]
     assert by["X_lesson"][0]["punti"] == 9
+    # l'indice tiene conto di entrambi i dati: 0 errori e 2 minuti -> 100
+    assert by["X_lesson"][0]["indice"] > by["X_lesson"][1]["indice"]
+    assert by["X_lesson"][0]["errori"] == 1
     assert len(by["Y_lesson"]) == 1
+
+
+def test_classifica_ordina_per_media_errori_e_tempo(tmp_path, monkeypatch):
+    """La regola: indice = 100 - media(penalità errori, penalità tempo)."""
+    import panel
+    from tools import classifica_score
+    monkeypatch.setattr(panel, "CLASSIFICA_FILE", tmp_path / "classifica.json")
+    # Carl: 0 errori in 10 minuti -> penalita' 0 e 100, indice 50.
+    # Alice: 4 errori in 2 minuti  -> penalita' 100 e 20, indice 40.
+    # Vince Carl: l'assenza di errori non compensa da sola la lentezza, perche'
+    # i due dati pesano uguale nella media.
+    panel._classifica_add("Z_lesson", "Carl", 10, 10, True, 10, 0)
+    panel._classifica_add("Z_lesson", "Alice", 6, 10, True, 2, 4)
+    rows = {c["lesson"]: c["rows"] for c in panel._classifica_view()["classifiche"]}["Z_lesson"]
+    assert [(r["studente"], r["indice"]) for r in rows] == [("Carl", 50.0), ("Alice", 40.0)]
+    # chi non ha finito il percorso resta in coda, e non fa da termometro
+    panel._classifica_add("Z_lesson", "Dan", 1, 10, False, 1, 0)
+    rows = {c["lesson"]: c["rows"] for c in panel._classifica_view()["classifiche"]}["Z_lesson"]
+    assert rows[-1]["studente"] == "Dan"
+    assert classifica_score.indice(0, 0, 0, 0) == 100.0
+    # la classe vuota non deve dividere per zero
+    assert classifica_score.punta([]) == []
 
 
 def test_classifica_reset_and_history_clear(tmp_path, monkeypatch):

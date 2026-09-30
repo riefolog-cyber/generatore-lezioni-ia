@@ -92,6 +92,11 @@ GET_ROUTES = {
     "/api/voices": Route("voices", LOCAL, "voci neurali disponibili"),
     "/api/lesson_data": Route("lesson_data", LOCAL, "dati di una slide"),
     "/api/settings": Route("settings", LOCAL, "impostazioni pubbliche"),
+    # PUBBLICA perche' e' l'unica rotta che anche il PLAYER dello studente deve
+    # poter leggere: contiene solo l'orario di fine dell'attivita' (timestamp),
+    # non un dato del docente ne' un risultato. Senza, il conto alla rovescia
+    # del pannello non arriverebbe alle pagine degli alunni.
+    "/api/class_timer": Route("class_timer", PUBBLICA, "timer di classe"),
 }
 
 # POST: ogni rotta e' una mutazione e passa dal controllo PIN del docente
@@ -125,6 +130,8 @@ POST_ROUTES = {
     "/api/clear_history": Route("clear_history", LOCAL, "svuota la cronologia", err=None),
     "/api/refresh_player": Route("refresh_player", LOCAL, "aggiorna il player", err=None),
     "/api/reset_classifica": Route("reset_classifica", LOCAL, "azzera la classifica", err=None),
+    "/api/class_timer": Route("class_timer", LOCAL, "avvia/ferma il timer di classe",
+                              err=None),
 }
 
 

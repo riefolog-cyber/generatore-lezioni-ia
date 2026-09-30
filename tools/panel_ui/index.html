@@ -138,7 +138,14 @@
     <div class="urlrow" style="margin-top:8px">
       <input id="claAddName" placeholder="Nome studente (per aggiungere a mano un risultato)">
       <input id="claAddPts" placeholder="Punti (es. 7/10)" style="max-width:140px">
+      <input id="claAddErr" placeholder="Errori" style="max-width:90px" inputmode="numeric">
+      <input id="claAddMin" placeholder="Minuti" style="max-width:100px" inputmode="decimal">
       <button class="mini" onclick="addManuale()" type="button">Aggiungi</button>
+    </div>
+    <div class="upmsg" style="font-size:12px;margin-top:6px">
+      La classifica ordina per <b>indice</b>: la media degli <b>errori</b> e del <b>tempo</b>
+      impiegato a concludere le attività (100 = nessun errore e il tempo più rapido della classe).
+      Lascia vuoti errori/minuti solo se non li conosci.
     </div>
     <div id="classifica" style="margin-top:10px"><span class="empty">Nessun risultato ancora: gli studenti lo inviano dal pulsante nel pannello finale della lezione.</span></div>
   </div>
@@ -189,6 +196,25 @@
     <button class="bigbtn" id="btnFocusPick" type="button"
             title="Scegli la lezione da far vedere agli alunni: la vedranno intera, dall'inizio alla fine">📚 Scegli la lezione da mostrare</button>
     <div class="upmsg" id="focusNow" style="font-size:12px;margin-top:10px" hidden></div>
+    <div class="urlrow" style="margin-top:10px">
+      <label class="mini" style="display:flex;gap:6px;align-items:center">⏱ Timer attività
+        <select id="timerMin" style="background:#0d1220;border:1px solid var(--line);color:var(--txt);border-radius:9px;padding:7px">
+          <option value="0">Nessuno</option>
+          <option value="5">5 minuti</option>
+          <option value="10" selected>10 minuti</option>
+          <option value="15">15 minuti</option>
+          <option value="20">20 minuti</option>
+          <option value="30">30 minuti</option>
+          <option value="45">45 minuti</option>
+        </select>
+      </label>
+      <button class="mini" id="btnTimerAvvia" type="button" title="Avvia (o riavvia) il conto alla rovescia da adesso">▶ Avvia</button>
+      <button class="mini ghost" id="btnTimerStop" type="button" title="Togli il timer dalla pagina degli studenti" hidden>⏹ Ferma</button>
+      <span id="timerLeft" class="upmsg" style="font-size:14px;font-weight:800" aria-live="polite"></span>
+    </div>
+    <div class="upmsg" id="timerMsg" style="font-size:12px">Il conto alla rovescia compare in alto
+      sulla pagina degli studenti, con lo <b>stesso orario di fine per tutti</b>. Non blocca la lezione:
+      allo scadere resta visibile l'avviso e il percorso continua.</div>
     <h2 style="margin-top:14px">Manutenzione
       <button class="mini" onclick="refreshPlayer()" type="button"
               title="Riscrive CSS, JavaScript e il service worker di tutte le lezioni già generate, senza toccare audio o contenuti. Serve dopo un aggiornamento del player: senza, gli alunni continuano a vedere la versione precedente.">🎨 Aggiorna il player</button>
@@ -227,7 +253,7 @@
     <div class="grid2">
       <div><b>1. Carica</b><br><span class="empty">Trascina qui un documento. Per un audio MP3/M4A/WAV spunta «Trascrizione audio con Whisper».</span></div>
       <div><b>2. Genera</b><br><span class="empty">Scegli durata e livello, poi premi «Carica e genera». Puoi usare anche un link o incollare testo.</span></div>
-      <div><b>3. Condividi</b><br><span class="empty">Apri il QR a schermo intero e fai scansione dal telefono. Computer e dispositivi devono essere sulla stessa rete.</span></div>
+      <div><b>3. Condividi</b><br><span class="empty">Apri il QR a schermo intero e fai scansione dal telefono. Vuoi un tempo limite? Arma «⏱ Timer attività»: lo vedranno in alto, con la stessa ora di fine per tutti.</span></div>
       <div><b>4. Assistenza</b><br><span class="empty">Se un dispositivo non si collega, premi «Controlla computer e rete».</span></div>
     </div>
   </div>
