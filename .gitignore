@@ -34,6 +34,8 @@ archivio_backup/
 
 # log di generazione/avvio
 *.log
+# redirect stderr dei processi avviati in background (vuoti)
+*.err
 
 # lezioni generate (rigenerabili dal codice) e materiali di partenza
 *_lesson/

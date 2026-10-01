@@ -180,6 +180,90 @@ def test_extra_keys_segue_l_obiettivo_bloom():
         "l'obiettivo Bloom deve cambiare il tipo di attivita', non solo il testo")
 
 
+# ------------------------------------------------------------- WORKBOOK
+def _wb(domanda, risposta, **kw):
+    d = {"domanda": domanda, "risposta": risposta}
+    d.update(kw)
+    return d
+
+
+def test_workbook_le_chiavi_vengono_dall_llm():
+    """Se l'LLM dichiara le parole obbligatorie, devono essere conservate:
+    sono cio' che il player cerca nella risposta dello studente."""
+    m = {"titolo": "M", "workbook": [
+        _wb("Che cos'e' la cellula?", "e' l'unita base della vita",
+            chiavi=["unita", "vita"])]}
+    nl._check_struct({"moduli": [m]})
+    assert m["workbook"][0]["chiavi"] == ["unita", "vita"]
+
+
+def test_workbook_ricava_le_chiavi_se_l_llm_non_le_da():
+    """Senza chiavi l'esercizio sarebbe segnato SEMPRE sbagliato: l'alunno
+    non puo' sapere la formulazione esatta attesa. Vanno ricavate dalla
+    risposta, non lasciate vuote."""
+    m = {"titolo": "M", "workbook": [
+        _wb("Che cos'e' la fotosintesi?", "e' il processo delle piante")] * 2}
+    nl._check_struct({"moduli": [m]})
+    for w in m["workbook"]:
+        assert w["chiavi"], "una domanda senza chiavi non e' verificabile"
+        # le chiavi devono comparire nella risposta attesa
+        risp = w["risposta"].lower()
+        for k in w["chiavi"]:
+            assert k.lower() in risp, f"chiave '{k}' assente dalla risposta"
+
+
+def test_workbook_scarta_una_chiave_lunga_come_la_risposta():
+    """Chiave = risposta intera significherebbe "copia parola per parola"."""
+    m = {"titolo": "M", "workbook": [
+        _wb("Definisci", "unita base della vita",
+            chiavi=["unita base della vita", "vita"])]}
+    nl._check_struct({"moduli": [m]})
+    assert "unita base della vita" not in m["workbook"][0]["chiavi"]
+
+
+def test_workbook_scarta_domande_incomplete():
+    m = {"titolo": "M", "workbook": [
+        {"domanda": "senza risposta"},
+        _wb("con risposta", "una risposta")]}
+    nl._check_struct({"moduli": [m]})
+    assert len(m["workbook"]) == 1 and m["workbook"][0]["domanda"] == "con risposta"
+
+
+def test_workbook_partecipa_alla_rotazione():
+    """Un tipo di attivita' che non finisce mai nelle slide non esiste."""
+    assert "workbook" in nl.EXTRA_ROTATION_CLASS
+    assert "workbook" in nl.EXTRA_PRIORITY
+    for rot in nl.ROT_PER_BLOOM.values():
+        assert "workbook" in rot, "il workbook deve comparire in ogni rotazione Bloom"
+
+
+def test_workbook_rispetta_le_soglie():
+    """Come tutte le altre: sotto la soglia non viene assegnato un turno."""
+    def voce(chiavi=("uno",)):
+        return _wb("d", "risposta uno", chiavi=list(chiavi))
+
+    assert nl._modulo_ha({"workbook": [voce()]}, "workbook") is False
+    assert nl._modulo_ha({"workbook": [voce(), voce()]}, "workbook") is True
+    # senza chiavi non e' verificabile: la rotazione non deve sceglierlo
+    assert nl._modulo_ha({"workbook": [voce(()), voce(())]}, "workbook") is False
+
+
+def test_workbook_finisce_in_una_slide():
+    """Il blocco deve arrivare al player, non restare nel modulo."""
+    m = {"titolo": "M", "testo": "testo", "punti": [], "keywords": [],
+         "narrazione": "n", "quiz": None, "workbook": [
+             _wb("Domanda uno?", "risposta uno", chiavi=["uno"]),
+             _wb("Domanda due?", "risposta due", chiavi=["due"])]}
+    slides = nl.build_slides({"titolo": "T", "moduli": [m]},
+                             profilo={"obiettivo": "applicazione"})
+    blocchi = [b for s in slides for b in (s.get("blocks") or [])
+               if b.get("workbook")]
+    assert blocchi, "nessuna slide contiene il blocco workbook"
+    assert len(blocchi[0]["workbook"]) == 2
+    # il player si aspetta questi nomi brevi
+    assert set(blocchi[0]["workbook"][0]) == {"q", "r", "k", "sp", "ai"}
+
+
 # ------------------------------------------------------------ build_final_exam
 def _modulo_esame(chiave, testo="d"):
     q = {"domanda": f"domanda {testo}",

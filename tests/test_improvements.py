@@ -575,6 +575,7 @@ def test_class_repository_pin_is_optional_but_checked():
 
 def test_sources_support_pptx_epub_and_audio_dispatch(tmp_path):
     import zipfile
+    import sources
     from sources import extract_epub, extract_pptx, extract_source
 
     pptx = tmp_path / "Lezione.pptx"
@@ -590,10 +591,20 @@ def test_sources_support_pptx_epub_and_audio_dispatch(tmp_path):
     assert "capitolo" in extract_epub(epub)["sections"][0]["paras"][0].lower()
     assert extract_source(str(epub))["sections"]
 
+    # il flag di annullamento e' globale: senza begin_transcription()
+    # l'audio viene rifiutato come 'annullato' da un test precedente
+    sources.begin_transcription()
     audio = tmp_path / "voce.wav"
     audio.write_bytes(b"RIFF----WAVE")
     import importlib.util
-    if not any(importlib.util.find_spec(x) for x in ("faster_whisper", "whisper")):
+    _backends = any(importlib.util.find_spec(x) for x in ("faster_whisper", "whisper"))
+    if not _backends:
+        try:
+            from whisper_cpp import find_binary
+            _backends = find_binary() is not None
+        except Exception:
+            _backends = False
+    if not _backends:
         try:
             extract_source(str(audio))
         except ValueError as e:
@@ -643,3 +654,57 @@ def test_whisper_audio_transcription_reuses_model(tmp_path, monkeypatch):
     assert "storia" in " ".join(cached["sections"][0]["paras"])
     assert len(calls) == 3  # seconda chiamata: cache, nessuna nuova trascrizione
     sources.set_transcription_progress(None)
+
+
+
+def test_whisper_cpp_il_cammino_felice_non_crassa():
+    """whisper.cpp: dopo il loop il testo va restituito, non crashare.
+
+    C'era un `finally: raise` nel _run: quando la trascrizione terminava
+    bene non c'e' eccezione in corso, quindi Python sollevava "No active
+    exception to reraise". Ogni audio finiva come fallito anche se il
+    testo era stato scritto. Il test usa un finto processo: nessun
+    download, nessuna CPU.
+    """
+    import json
+    import subprocess
+    from types import SimpleNamespace
+    import whisper_cpp
+
+    def finto_popen(cmd, **kw):
+        out_base = Path(cmd[cmd.index("-of") + 1])
+        out_base.with_suffix(".json").write_text(json.dumps({
+            "transcription": [{"text": "ciao"}, {"text": "mondo"}]}),
+            encoding="utf-8")
+        return SimpleNamespace(
+            stderr=iter(['[00:00:00.000 --> 00:00:01.000] ciao\n']),
+            returncode=0,
+            wait=lambda timeout=None: 0,
+            terminate=lambda: None, kill=lambda: None)
+
+    model = whisper_cpp.WhisperCppModel.__new__(whisper_cpp.WhisperCppModel)
+    model.name, model.language, model.threads = "base", "it", 1
+    model._progress, model._cancel, model._duration = None, None, 0.0
+    old = whisper_cpp.subprocess.Popen
+    whisper_cpp.subprocess.Popen = finto_popen
+    try:
+        testo = model._run(["whisper", "-of", "out"], Path("out"))
+    finally:
+        whisper_cpp.subprocess.Popen = old
+    assert testo == "ciao mondo", (
+        f"il testo non e' tornato indietro: {testo!r}")
+
+
+def test_il_flag_annullamento_non_resta_appiccicato():
+    """Dopo una trascrizione annullata, la successiva deve poter partire.
+
+    Il flag e' un Event globale e `begin_transcription()` lo pulisce: senza
+    quello, un annullamento precedente faceva fallire anche l'audio
+    successivo con 'Trascrizione annullata dall'utente'."""
+    import sources
+
+    sources.cancel_transcription()
+    assert sources.is_transcription_cancelled()
+    sources.begin_transcription()
+    assert not sources.is_transcription_cancelled(), (
+        "il flag di annullamento sopravvive al job successivo")

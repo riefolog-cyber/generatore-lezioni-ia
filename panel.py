@@ -530,12 +530,34 @@ def _deps():
         except (ImportError, ValueError):
             # ValueError: il modulo esiste in sys.modules ma ha __spec__ = None
             return False
+    def whisper_disponibile():
+        """Whisper è disponibile se c'è faster-whisper (pip) OPPURE whisper.cpp.
+
+        Prima si guardava SOLO il modulo `faster_whisper`, quindi su Windows ARM
+        il pannello diceva sempre "Whisper ✗": lì faster-whisper non è
+        installabile (CTranslate2 non ha wheel win_arm64) e il progetto ripiega
+        su whisper.cpp, un binario che pip non vede. Risultato: la trascrizione
+        funzionava e il pannello la dava per assente — un falso negativo che
+        aveva fatto perdere tempo anche per capire che il materiale audio era
+        già supportato. Ora la stessa logica di `check_env.py` e di
+        `sources._load_whisper_model`: un backend basta.
+        """
+        if have("faster_whisper") or have("whisper"):
+            return True
+        try:
+            sys.path.insert(0, str(BASE / "tools"))
+            from whisper_cpp import find_binary
+            return find_binary() is not None
+        except Exception:
+            return False
     return {
         "python_docx": have("docx"),
         "edge_tts": have("edge_tts"),
         "pypdf": have("pypdf"),
         "youtube_transcript_api": have("youtube_transcript_api"),
-        "faster_whisper": have("faster_whisper"),
+        # chiave generica: il pannello non deve sapere quale backend sia in uso,
+        # solo se la trascrizione è possibile
+        "whisper": whisper_disponibile(),
         "ffmpeg": bool(shutil.which("ffmpeg")),
     }
 

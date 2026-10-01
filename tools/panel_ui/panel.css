@@ -114,6 +114,15 @@ transition:border-color .2s,background .2s}
 .uprow{display:flex;align-items:center;gap:10px;margin-top:8px;flex-wrap:wrap}
 .upmsg{font-size:12px;margin:6px 0 0}
 .upmsg.ok{color:var(--ok)}.upmsg.err{color:var(--err)}
+/* Esito della diagnostica: `pre` ha un font monospaced di default e margini
+   grossi, che in un riquadro stretto facevano uscire il testo dal bordo.
+   I colori usano le variabili del pannello (--acc/--txt/--bg): con nomi inesistenti
+   (`--accent`, `--fg`) il testo sarebbe risultato trasparente. */
+#diagnostica{margin:12px 0 0;padding:12px 14px;font-size:13px;line-height:1.6;
+  white-space:pre-wrap;word-break:break-word;
+  border:1px solid var(--line);border-radius:10px;
+  background:color-mix(in srgb,var(--acc) 8%,var(--bg));color:var(--txt)}
+#diagnostica[hidden]{display:none}
 .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
 .grid2 label{display:flex;flex-direction:column;gap:5px;color:var(--mut);font-size:13px}
 .grid2 input,.grid2 select{background:#0d1220;border:1px solid var(--line);color:var(--txt);border-radius:9px;padding:9px 12px;font-size:13px}

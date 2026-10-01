@@ -244,7 +244,6 @@ class WhisperCppModel:
             raise
         finally:
             watchdog.cancel()
-            raise
         if self._cancelled():
             raise ValueError("Trascrizione annullata dall'utente.")
         if proc.returncode != 0:

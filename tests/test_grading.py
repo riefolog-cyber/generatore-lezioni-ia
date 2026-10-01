@@ -15,6 +15,7 @@ Copre anche i due bug che hanno reso le lezioni inutilizzabili:
     rispondeva alla posizione invece che al contenuto.
 """
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -150,7 +151,7 @@ def _valuta(lezione, risposte):
                       '<script src="lesson-data.js')
     idx = idx.replace('<script src="main.js',
                       '<script src="main.js')
-    idx = idx.replace('</body>', '<pre id="r">…</pre>\n'
+    idx = idx.replace('</body>', '<pre id="r">PENDING</pre>\n'
                                  '<script src="verifica.js"></script>\n</body>')
     (L / "index.html").write_text(idx, encoding="utf-8")
 
@@ -172,13 +173,315 @@ def _valuta(lezione, risposte):
     dom = Path(out_f.name).read_text(encoding="utf-8", errors="replace")
     m = re.search(r'<pre id="r">(.*?)</pre>', dom, re.S)
     testo = (m.group(1) if m else "").strip()
-    assert testo and testo != "…", (
+    assert testo and testo != "PENDING", (
         f"il player non ha risposto (DOM {len(dom)} byte): "
         "LEARN_API mancante o errore JS in main.js")
     if testo.startswith("ERRORE"):
         pytest.fail(f"errore nel player: {testo}")
     import html as _h
     return json.loads(_h.unescape(testo))
+
+
+WB_JS = r"""
+window.addEventListener('load', () => setTimeout(() => {
+  const out = document.getElementById('r');
+  const esito = {};
+  try {
+    const A = window.LESSON_API, st = window.LESSON_STATE;
+    A.go(1);                                   // slide del quaderno
+    const caselle = [...document.querySelectorAll('.wbkta')];
+    esito.caselle = caselle.length;
+    // 1) risposta CORRETTA ma scritta diversamente dalla risposta attesa:
+    //    ordine diverso, plurale, accenti e punteggiatura
+    caselle[0].value = "E' l'UNITA' base, cioe' la vita!";
+    // 2) risposta SBAGLIATA: manca una parola chiave
+    caselle[1].value = "le piante crescono";
+    // 3) casella vuota: non deve poter essere verificata
+    const bottoni = [...document.querySelectorAll('.wbkbtn')];
+    esito.bottoni = bottoni.length;
+    bottoni[2].click();
+    esito.vuota_non_accolta = !caselle[2].classList.contains('done');
+    bottoni[0].click();
+    bottoni[1].click();
+    esito.esiti = st.results[1].workbook;
+    esito.ta0 = caselle[0].classList.contains('ok');
+    esito.ta1 = caselle[1].classList.contains('ko');
+    // il blocco deve contare nel punteggio come le altre attivita'
+    esito.punteggio = A.scoreMetrics();
+    esito.feedback = !!document.querySelector('.wbkfb');
+    esito.aiuto = !!document.querySelector('.wbkai');
+    // il menu ATTIVITA' deve aprire e contenere gli strumenti accessibilita'
+    const att = document.getElementById('btnAtt');
+    att.click();
+    const dd = document.getElementById('actdrop');
+    esito.menu_aperto = !dd.hidden;
+    esito.strumenti = ['btnZoom', 'btnContrast', 'btnSpeed']
+      .every(id => dd.querySelector('#' + id));
+    out.textContent = JSON.stringify(esito);
+  } catch (e) { out.textContent = 'ERRORE: ' + e.message; }
+}, 1200));
+"""
+
+
+def test_workbook_si_compila_e_si_verifica_nel_browser(lezione_wb):
+    """Il quaderno deve funzionare come farebbe lo studente, non solo in teoria.
+
+    Il punto delicato e' la tolleranza: una risposta corretta scritta diversamente
+    dalla risposta attesa (ordine delle parole, plurale, accenti, punteggiatura)
+    deve essere riconosciuta. Senza questo l'esercizio punisce chi scrive bene
+    e premia solo chi copia la soluzione.
+    """
+    r = _autoavvanza_gen(lezione_wb, WB_JS)
+    assert r["caselle"] == 3, f"il quaderno non ha reso 3 caselle: {r['caselle']}"
+    assert r["bottoni"] == 3
+    # 1) risposta corretta ma formulata diversamente
+    assert r["ta0"] is True, (
+        "una risposta corretta scritta diversamente e' stata respinta: "
+        "il confronto non tollera ordine/plurale/accenti")
+    assert r["esiti"][0] is True
+    # 2) risposta che manca di un concetto
+    assert r["ta1"] is True, "la risposta incompleta doveva risultare sbagliata"
+    assert r["esiti"][1] is False
+    # 3) casella vuota: la verifica deve rifiutarla, non contarla
+    assert r["vuota_non_accolta"] is True, (
+        "una casella vuota e' stata contata come verificata")
+    assert len(r["esiti"]) == 2, (
+        f"la casella vuota non doveva entrare nei risultati: {r['esiti']}")
+    # il punteggio deve contare il quaderno come le altre attivita':
+    # 3 quesiti in totale, 1 risposta corretta (la seconda e' sbagliata),
+    # quindi 1 punto su 3 disponibili.
+    assert r["punteggio"]["e"] == 1, f"punteggio errato: {r['punteggio']}"
+    assert r["punteggio"]["t"] == 3, "il quaderno non conta nel totale"
+    assert r["feedback"] is True, "manca il feedback alla risposta"
+    assert r["aiuto"] is True, "manca il suggerimento"
+
+
+def test_il_menu_attivita_apre_e_contiene_l_accessibilita(lezione_wb):
+    """Il menu ATTIVITA' deve aprirsi e contenere i tre strumenti: era questo
+    il punto della richiesta (l'Accessibilita' era in fondo al menu ☰)."""
+    r = _autoavvanza_gen(lezione_wb, WB_JS)
+    assert r["menu_aperto"] is True, "il menu Attivita' non si e' aperto"
+    assert r["strumenti"] is True, (
+        "il menu Attivita' non contiene testo/contrasto/velocita'")
+
+
+WB_SLIDES = [
+    {"title": "Modulo 1 - Argomento", "icon": "📘",
+     "blocks": [{"callout": "Modulo 1"}, {"h1": "Modulo 1"},
+                {"p": "Testo del modulo."}],
+     "narration": "Modulo 1."},
+    {"title": "Quaderno - modulo 1", "icon": "📝",
+     "blocks": [{"callout": "Quaderno di esercizi"},
+                {"workbook": [
+                    {"q": "Che cos'e' la cellula?",
+                     "r": "e' l'unita base della vita",
+                     "k": ["unita", "vita"],
+                     "sp": "La cellula e' la unita vivente di base.",
+                     "ai": "Pensa alla cosa piu' piccola che puo' vivere."},
+                    {"q": "Che cosa produce la fotosintesi?",
+                     "r": "le piante producono glucosio usando la luce",
+                     "k": ["glucosio", "fotosintesi"],
+                     "sp": "La fotosintesi produce glucosio.",
+                     "ai": "Guarda la parte del Sole."},
+                    {"q": "Dove avvengono i ribosomi?",
+                     "r": "nel citoplasma della cellula",
+                     "k": ["citoplasma"],
+                     "sp": "I ribosomi stanno nel citoplasma.",
+                     "ai": ""}]}],
+     "narration": "Ora rispondi per iscritto."},
+]
+WB_PAYLOAD = {"titolo": "Prova Quaderno", "slides": WB_SLIDES, "profilo": {}}
+
+
+@pytest.fixture(scope="module")
+def lezione_wb():
+    """Lezione con un solo blocco workbook: 3 quesiti, un punto ciascuno."""
+    import player_template as pt
+
+    d = Path(tempfile.mkdtemp())
+    pt.write_player(d, "Prova Quaderno", tema="dark")
+    (d / "lesson-data.js").write_text(
+        "window.LESSON_DATA = " + json.dumps(WB_PAYLOAD, ensure_ascii=False) + ";\n",
+        encoding="utf-8")
+    pt.bust_cache(d)
+    yield d
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def _autoavvanza_gen(lezione, js):
+    """Carica la lezione nel player REALE, esegue `js` e ne restituisce il JSON.
+
+    Versione generalizzata di `_autoavvanza`: inietta uno script qualsiasi,
+    cosi' lo stesso motore serve per il test di avanzamento e per il workbook.
+    """
+    if not CHROME:
+        _browser_obligatorio()
+    import html as _h
+    import re
+
+    import start_lesson
+
+    root = Path(tempfile.mkdtemp())
+    shutil.copytree(lezione, root / "l")
+    L = root / "l"
+    (L / "auto.js").write_text(js, encoding="utf-8")
+    idx = (L / "index.html").read_text(encoding="utf-8")
+    idx = idx.replace('</body>', '<pre id="r">PENDING</pre>\n'
+                                 '<script src="auto.js"></script>\n</body>')
+    (L / "index.html").write_text(idx, encoding="utf-8")
+    handler = functools.partial(start_lesson._RangeHandler, directory=str(root))
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    out_f = tempfile.NamedTemporaryFile(suffix=".html", delete=False)
+    out_f.close()
+    try:
+        with open(out_f.name, "w", encoding="utf-8") as fo:
+            # budget alto: alcuni script aspettano piu' secondi (click + attesa
+            # + ridisegno) e --dump-dom cattura il DOM quando scade il tempo
+            subprocess.run(
+                chrome_args(20000) + ["--dump-dom",
+                                     f"http://127.0.0.1:{httpd.server_address[1]}/l/index.html"],
+                stdout=fo, stderr=subprocess.DEVNULL, timeout=90)
+    finally:
+        httpd.shutdown()
+        shutil.rmtree(root, ignore_errors=True)
+    dom = Path(out_f.name).read_text(encoding="utf-8", errors="replace")
+    m = re.search(r'<pre id="r">(.*?)</pre>', dom, re.S)
+    testo = (m.group(1) if m else "").strip()
+    assert testo and testo != "PENDING", f"nessun risultato (DOM {len(dom)} byte)"
+    if testo.startswith("ERRORE"):
+        pytest.fail(testo)
+    return json.loads(_h.unescape(testo))
+
+
+BES_SLIDES = [
+    {"title": "Modulo 1 - Argomento", "icon": "📘",
+     "blocks": [{"callout": "Modulo 1"}, {"h1": "Modulo 1"}, {"p": "Testo."}],
+     "narration": "Modulo 1."},
+    # slide con DUE attivita': in BES/DSA deve restarne una sola
+    {"title": "Quiz e vero/falso - modulo 1", "icon": "❓",
+     "blocks": [{"quiz": {
+         "q": "Domanda con quattro opzioni",
+         "opts": [{"t": "giusta", "ok": True, "fb": "perche si"},
+                  {"t": "sbagliata A", "ok": False, "fb": ""},
+                  {"t": "sbagliata B", "ok": False, "fb": ""},
+                  {"t": "sbagliata C", "ok": False, "fb": ""}],
+         "ok": "Esatto!", "ko": "Rileggi."}},
+                {"vf": [{"t": "Affermazione", "ok": True, "fb": "s"},
+                        {"t": "Altra", "ok": False, "fb": "s"}]}],
+     "narration": "Verifica."},
+]
+BES_PAYLOAD = {"titolo": "Prova BES", "slides": BES_SLIDES, "profilo": {}}
+
+
+@pytest.fixture(scope="module")
+def lezione_bes():
+    import player_template as pt
+
+    d = Path(tempfile.mkdtemp())
+    pt.write_player(d, "Prova BES", tema="dark")
+    (d / "lesson-data.js").write_text(
+        "window.LESSON_DATA = " + json.dumps(BES_PAYLOAD, ensure_ascii=False) + ";\n",
+        encoding="utf-8")
+    pt.bust_cache(d)
+    yield d
+    shutil.rmtree(d, ignore_errors=True)
+
+
+BES_JS = r"""
+// Stessa forma del test del quaderno (che gira in Chrome headless):
+// `load` + un unico setTimeout. Niente `await`: le promise non si risolvono
+// sotto `--virtual-time-budget` e `--dump-dom` catturerebbe il placeholder.
+window.addEventListener('load', () => setTimeout(() => {
+  const out = document.getElementById('r');
+  const e = {};
+  try {
+    const A = window.LESSON_API;
+    A.go(1);
+    e.opzioni_prima = document.querySelectorAll('.opt').length;
+    e.vf_prima = !!document.querySelector('.vf');
+    e.fs_prima = getComputedStyle(document.querySelector('#slide p') ||
+      document.getElementById('slide')).fontSize;
+    const b = document.getElementById('btnBes');
+    e.bottone_bes = !!b;
+    b.click();
+    e.attiva = document.documentElement.dataset.bes === '1';
+    e.opzioni_dopo = document.querySelectorAll('.opt').length;
+    e.vf_dopo = !!document.querySelector('.vf');
+    e.nota = !!document.querySelector('.besnote');
+    e.fs_dopo = getComputedStyle(document.querySelector('#slide p') ||
+      document.getElementById('slide')).fontSize;
+    const testi = [...document.querySelectorAll('.opt')].map(x => x.textContent);
+    e.testi = testi;
+    e.giusta_presente = testi.some(t => t.includes('giusta'));
+    e.totale = A.scoreMetrics().t;
+    b.click();
+    e.dopo_disattivato = document.querySelectorAll('.opt').length;
+    e.vf_tornata = !!document.querySelector('.vf');
+    e.bes_spento = document.documentElement.dataset.bes !== '1';
+    out.textContent = JSON.stringify(e);
+  } catch (x) { out.textContent = 'ERRORE: ' + x.message; }
+}, 1200));
+"""
+
+
+def test_modalita_bes_riduce_le_attivita_ma_il_punteggio_no(lezione_bes):
+    """Il BES/DSA lato studente: meno roba da fare, ma gli stessi punti.
+
+    Nascondere un'attivita' non deve MAI regalare punti: se il denominatore
+    si riducesse, saltare le attivita' nascoste migliorerebbe il voto senza
+    che lo studente abbia imparato niente.
+    """
+    r = _autoavvanza_gen(lezione_bes, BES_JS)
+    assert r["bottone_bes"] is True, "manca l'interruttore BES/DSA"
+    # prima: 4 opzioni e la seconda attivita' presente
+    assert r["opzioni_prima"] == 4, f"il quiz non mostra 4 opzioni: {r['opzioni_prima']}"
+    assert r["vf_prima"] is True
+    # dopo: 3 opzioni, una sola attivita', nota esplicativa
+    assert r["attiva"] is True, "la modalita' non si e' attivata"
+    assert r["opzioni_dopo"] == 3, (
+        f"in BES/DSA le opzioni devono scendere a 3, sono {r['opzioni_dopo']}")
+    assert r["vf_dopo"] is False, "la seconda attivita' doveva essere nascosta"
+    assert r["nota"] is True, "manca la nota che spiega la riduzione"
+    # la risposta corretta non puo' sparire: altrimenti il quiz e' irrisolvibile
+    assert r["giusta_presente"] is True, (
+        f"la risposta corretta non e' fra le opzioni mostrate: {r['testi']}")
+    # il testo RENDERIZZATO deve crescere davvero (pixel, non variabile CSS)
+    def _px(v):
+        return float(str(v).replace("px", "").strip() or 0)
+    assert _px(r["fs_dopo"]) > _px(r["fs_prima"]), (
+        f"il testo non e' aumentato: {r['fs_prima']} -> {r['fs_dopo']}")
+    # il punteggio NON cambia: quiz 1 punto + vero/falso 2 quesiti = 3.
+    # Con l'attivita' nascosta il totale deve restare 3: ridurlo regalerebbe
+    # punti a chi non risponde, il difetto gia' corretto per le attivita' saltate.
+    assert r["totale"] == 3, (
+        f"il totale deve restare 3 (=1 quiz + 2 quesiti vero/falso) anche con "
+        f"una attivita' nascosta, e' {r['totale']}: nascondere non regala punti")
+    # disattivando, tutto torna
+    assert r["bes_spento"] is True
+    assert r["dopo_disattivato"] == 4, "disattivando devono tornare 4 opzioni"
+    assert r["vf_tornata"] is True, "disattivando l'attivita' deve tornare"
+
+
+def test_il_bottone_schermo_intero_e_in_testata():
+    """Lo studente chiedeva lo schermo intero VISIBILE: sta in testata,
+    non piu' sepolto dentro il menu ☰ (che sul telefono non si vede)."""
+    import player_template as pt
+
+    d = Path(tempfile.mkdtemp())
+    pt.write_player(d, "Prova Schermo", tema="dark")
+    html = (d / "index.html").read_text(encoding="utf-8")
+    js = (d / "main.js").read_text(encoding="utf-8")
+    assert 'id="btnFullTop"' in html, "il bottone in testata manca"
+    # deve stare nell'header, PRIMA del menu ☰
+    i_top = html.index('id="btnFullTop"')
+    i_menu = html.index('id="hmenu"')
+    assert i_top < i_menu, "il bottone deve stare in testata, non dentro il menu"
+    # un solo handler per i due pulsanti
+    assert "['btnFull', 'btnFullTop'].forEach" in js, (
+        "i due pulsanti devono condividere un handler unico")
+    assert js.count("btnFullTop") >= 2, "il bottone in testata non e' collegato"
+    shutil.rmtree(d, ignore_errors=True)
 
 
 # Struttura di `results` REALE (verificata in main.js):
@@ -330,7 +633,7 @@ def _clicca(lezione, piano):
     idx = (L / "index.html").read_text(encoding="utf-8")
     idx = idx.replace('<script src="lesson-data.js',
                       '<script src="piano.js"></script>\n<script src="lesson-data.js')
-    idx = idx.replace('</body>', '<pre id="r">…</pre>\n'
+    idx = idx.replace('</body>', '<pre id="r">PENDING</pre>\n'
                                  '<script src="clicca.js"></script>\n</body>')
     (L / "index.html").write_text(idx, encoding="utf-8")
 
@@ -351,7 +654,7 @@ def _clicca(lezione, piano):
     dom = Path(out_f.name).read_text(encoding="utf-8", errors="replace")
     m = re.search(r'<pre id="r">(.*?)</pre>', dom, re.S)
     testo = (m.group(1) if m else "").strip()
-    assert testo and testo != "…", f"nessun risultato (DOM {len(dom)} byte)"
+    assert testo and testo != "PENDING", f"nessun risultato (DOM {len(dom)} byte)"
     if testo.startswith("ERRORE"):
         pytest.fail(testo)
     return json.loads(_h.unescape(testo))
@@ -398,7 +701,7 @@ def _ordine_stabile(lezione):
     L = root / "l"
     (L / "ordine.js").write_text(ORDINE_JS, encoding="utf-8")
     idx = (L / "index.html").read_text(encoding="utf-8")
-    idx = idx.replace('</body>', '<pre id="r">…</pre>\n'
+    idx = idx.replace('</body>', '<pre id="r">PENDING</pre>\n'
                                  '<script src="ordine.js"></script>\n</body>')
     (L / "index.html").write_text(idx, encoding="utf-8")
     handler = functools.partial(start_lesson._RangeHandler, directory=str(root))
@@ -418,7 +721,7 @@ def _ordine_stabile(lezione):
     dom = Path(out_f.name).read_text(encoding="utf-8", errors="replace")
     m = re.search(r'<pre id="r">(.*?)</pre>', dom, re.S)
     testo = (m.group(1) if m else "").strip()
-    assert testo and testo != "…", f"nessun risultato (DOM {len(dom)} byte)"
+    assert testo and testo != "PENDING", f"nessun risultato (DOM {len(dom)} byte)"
     if testo.startswith("ERRORE"):
         pytest.fail(testo)
     d = json.loads(_h.unescape(testo))
@@ -488,7 +791,7 @@ def _autoavvanza(lezione):
     L = root / "l"
     (L / "auto.js").write_text(AUTOAVVIO_JS, encoding="utf-8")
     idx = (L / "index.html").read_text(encoding="utf-8")
-    idx = idx.replace('</body>', '<pre id="r">…</pre>\n'
+    idx = idx.replace('</body>', '<pre id="r">PENDING</pre>\n'
                                  '<script src="auto.js"></script>\n</body>')
     (L / "index.html").write_text(idx, encoding="utf-8")
     handler = functools.partial(start_lesson._RangeHandler, directory=str(root))
@@ -508,7 +811,7 @@ def _autoavvanza(lezione):
     dom = Path(out_f.name).read_text(encoding="utf-8", errors="replace")
     m = re.search(r'<pre id="r">(.*?)</pre>', dom, re.S)
     testo = (m.group(1) if m else "").strip()
-    assert testo and testo != "…", f"nessun risultato (DOM {len(dom)} byte)"
+    assert testo and testo != "PENDING", f"nessun risultato (DOM {len(dom)} byte)"
     if testo.startswith("ERRORE"):
         pytest.fail(testo)
     return json.loads(_h.unescape(testo))
@@ -572,7 +875,7 @@ def _valuta_clic_e_avanti(lezione):
     L = root / "l"
     (L / "avanti.js").write_text(JS, encoding="utf-8")
     idx = (L / "index.html").read_text(encoding="utf-8")
-    idx = idx.replace('</body>', '<pre id="r">…</pre>\n'
+    idx = idx.replace('</body>', '<pre id="r">PENDING</pre>\n'
                                  '<script src="avanti.js"></script>\n</body>')
     (L / "index.html").write_text(idx, encoding="utf-8")
     handler = functools.partial(start_lesson._RangeHandler, directory=str(root))
@@ -594,7 +897,7 @@ def _valuta_clic_e_avanti(lezione):
     import re
     m = re.search(r'<pre id="r">(.*?)</pre>', dom, re.S)
     testo = (m.group(1) if m else "").strip()
-    assert testo and testo != "…", f"nessun risultato (DOM {len(dom)} byte)"
+    assert testo and testo != "PENDING", f"nessun risultato (DOM {len(dom)} byte)"
     if testo.startswith("ERRORE"):
         pytest.fail(testo)
     return json.loads(_h.unescape(testo))
@@ -657,7 +960,7 @@ def test_la_risposta_corretta_non_e_mai_in_prima_posizione(lezione):
     L = root / "l"
     (L / "guardia.js").write_text(JS, encoding="utf-8")
     idx = (L / "index.html").read_text(encoding="utf-8")
-    idx = idx.replace('</body>', '<pre id="r">…</pre>\n'
+    idx = idx.replace('</body>', '<pre id="r">PENDING</pre>\n'
                                  '<script src="guardia.js"></script>\n</body>')
     (L / "index.html").write_text(idx, encoding="utf-8")
     handler = functools.partial(start_lesson._RangeHandler, directory=str(root))
@@ -677,7 +980,7 @@ def test_la_risposta_corretta_non_e_mai_in_prima_posizione(lezione):
     dom = Path(out_f.name).read_text(encoding="utf-8", errors="replace")
     m = re.search(r'<pre id="r">(.*?)</pre>', dom, re.S)
     testo = (m.group(1) if m else "").strip()
-    assert testo and testo != "…", f"nessun risultato (DOM {len(dom)} byte)"
+    assert testo and testo != "PENDING", f"nessun risultato (DOM {len(dom)} byte)"
     if testo.startswith("ERRORE"):
         pytest.fail(testo)
     d = json.loads(_h.unescape(testo))
@@ -685,3 +988,36 @@ def test_la_risposta_corretta_non_e_mai_in_prima_posizione(lezione):
         f"la risposta corretta e' comparsa per prima {d['prima']} volte su 400")
     assert len(d["dist"]) >= 2, (
         f"la risposta corretta compare sempre nella stessa posizione: {d['dist']}")
+
+
+# ------------------- BES/DSA: la classifica di classe deve RESTARE
+def test_in_bes_la_classifica_di_classe_resta_disponibile():
+    """La classifica si invia col bottone `sendbtn`, creato nel riepilogo.
+
+    Una versione precedente di `_nascondiCompetizione` provava a nascondere un
+    `rankBtn`: nel player quell'id NON esiste, quindi era un no-op. Il pericolo
+    e' che la riga sembrasse proteggere la classifica mentre non lo faceva, e
+    un domani qualcuno avrebbe "completato" il lavoro togliendo un id sbagliato.
+    Qui si verifica il comportamento REALE: con BES attivo il bottone c'e'.
+    """
+    js = (BASE / "tools" / "player_assets" / "main.js").read_text(encoding="utf-8")
+    i = js.find("function _nascondiCompetizione()")
+    assert i > 0
+    corpo = js[i:i + 700]
+    # gli id nascosti sono solo streak e score
+    ids = re.search(r"\[([^\]]*streak[^\]]*)\]\.forEach", corpo)
+    assert ids, "il ciclo di occultamento degli elementi di competizione e' sparito"
+    nascosti = [x.strip().strip("\'") for x in ids.group(1).split(",")]
+    assert "rankBtn" not in nascosti, (
+        "rankBtn non esiste nel player: nasconderlo e' un no-op fuorviante")
+    assert set(nascosti) == {"streak", "score"}, (
+        f"in BES/DSA vanno nascosti solo streak e score, non {nascosti}")
+    # il bottone della classifica esiste ed e' creato FUORI dal ramo `done > 0`
+    assert "'sendbtn', '🏆 Invia alla classifica di classe'" in js, (
+        "il bottone della classifica non c'e' piu'")
+    k = js.find("if (window.LESSON_DIR)")
+    assert k > 0
+    blocco = js[k:k + 200]
+    assert "done > 0" not in blocco, (
+        "il bottone della classifica non deve dipendere da `done > 0`: con zero "
+        "attivita' svolte lo studente deve poterlo usare lo stesso")

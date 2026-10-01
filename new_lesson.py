@@ -674,6 +674,13 @@ SCHEMA_MODULO = """{
                       "elementi": [{"testo": "concetto breve", "categoria": "categoria 1",
                                     "spiegazione": "perché finisce lì, 1 frase"}]},
   "flashcards": [{"termine": "concetto chiave", "definizione": "spiegazione in max 15 parole"}],
+  "workbook": [
+    {"domanda": "domanda che chiede una RISPOSTA LIBERA in una riga",
+     "risposta": "risposta attesa, 3-12 parole",
+     "chiavi": ["parola", "altra parola"],
+     "spiegazione": "perché questa è la risposta, 1 frase",
+     "aiuto": "suggerimento mostrato prima di rispondere, 1 frase breve"}
+  ],
   "quiz_esame": {
     "domanda": "domanda di SINTESI, mai identica a quella del quiz del modulo",
     "opzioni": [
@@ -696,6 +703,11 @@ MODULO:
 - "quiz_esame" è la domanda che verrà posta a FINE percorso: deve mettere
   insieme più concetti del modulo (sintesi, confronto, trasferimento) e NON
   può essere uguale al campo "quiz". È l'unica attività da generare sempre.
+- "workbook": 2-4 domande con RISPOSTA LIBERA (definisci, spiega, elenca,
+  confronta). La risposta attesa deve essere BREVE (3-12 parole) e verificabile:
+  indica in "chiavi" le parole che DEVONO comparire nella risposta corretta
+  (2-3 parole chiave, mai la risposta intera). Non porre domande con risposta
+  sì/no, che si risolvono con un quiz.
 - Rispondi SOLO con il JSON dello schema, nessun testo fuori dal JSON.
 
 SCHEMA JSON DELLE ATTIVITÀ (esatto, rispetta i nomi dei campi):
@@ -1085,6 +1097,41 @@ def _check_struct(struct):
                                     "correzione": str(e0["correzione"]),
                                     "spiegazione": str(e0.get("spiegazione") or "")})
         m["errori"] = good_er[:2]
+        # workbook: risposta libera breve. Le `chiavi` (parole che devono
+        # comparire nella risposta) sono il cuore della verifica: senza di
+        # esse l'esercizio sarebbe segnato sempre sbagliato, perché l'alunno
+        # non può sapere la formulazione esatta attesa. Se l'LLM non le dà
+        # (o le dà inutili) si ricavano dalle parole piene della risposta.
+        wb = m.get("workbook")
+        good_wb = []
+        if isinstance(wb, list):
+            for w0 in wb:
+                if not isinstance(w0, dict) or not w0.get("domanda") or not w0.get("risposta"):
+                    continue
+                risp = " ".join(str(w0["risposta"]).split())[:200]
+                if not risp:
+                    continue
+                parole_risposta = risp.split()
+                # una chiave utile e' una parola o una coppia: se e' lunga
+                # quanto tutta la risposta, servirebbe copiare il testo esatto
+                limite = max(1, len(parole_risposta) // 2)
+                chiavi = []
+                for k in (w0.get("chiavi") or []):
+                    k = " ".join(str(k).split()).lower()
+                    if k and len(k.split()) <= limite and k not in chiavi:
+                        chiavi.append(k)
+                if not chiavi:
+                    parole = [p.lower() for p in parole_risposta if len(p) > 3]
+                    # se la risposta e' una sola parola, basta quella
+                    chiavi = (parole or [p.lower() for p in parole_risposta])[:2]
+                if not chiavi:
+                    continue
+                good_wb.append({"domanda": str(w0["domanda"])[:220],
+                                "risposta": risp,
+                                "chiavi": chiavi,
+                                "spiegazione": str(w0.get("spiegazione") or ""),
+                                "aiuto": str(w0.get("aiuto") or "")})
+        m["workbook"] = good_wb[:4]
 
 
 def _flatten(ext, limit=None):
@@ -1229,7 +1276,8 @@ def fallback_structure(ext):
             "outro": "Hai completato il percorso: ricorda i concetti principali.",
             "citazione": "La conoscenza cresce quando la condividi e la verifichi.",
             "moduli": [{**m, "vero_falso": [], "sequenza": None, "compila": [],
-                        "scenari": None, "errori": [], "classificazione": None} for m in moduli]}
+                        "scenari": None, "errori": [], "classificazione": None,
+                        "workbook": []} for m in moduli]}
 
 
 # ================================================================== 3. slide
@@ -1241,6 +1289,7 @@ ICONS = {
     "seq": "🔢",
     "match": "🧩",
     "compila": "✏️",
+    "workbook": "📝",
     "scenario": "🎬",
     "flash": "🃏",
     "errore": "🔍",
@@ -1398,7 +1447,8 @@ def bloom_rubric_text(profilo, stats):
 # La classifica (trascina nella categoria) entra nella rotazione dalle slide
 # successive: compare circa ogni 4 moduli (es. al 5°), così il tipo resta una
 # sorpresa e non affolla i primi moduli.
-EXTRA_ROTATION_CLASS = ["vf", "compila", "seq", "classifica", "errore", "flashcards"]
+EXTRA_ROTATION_CLASS = ["vf", "compila", "seq", "classifica", "errore", "flashcards",
+                         "workbook"]
 
 # Priorità di profondità: quando un modulo ha PIÙ attività di quante ne
 # mostriamo, si tiene la più profonda (analisi > applicazione > comprensione >
@@ -1406,16 +1456,16 @@ EXTRA_ROTATION_CLASS = ["vf", "compila", "seq", "classifica", "errore", "flashca
 # senza sequenze (sprecando un intero turno) e, con 8+ moduli, finiva sempre
 # sulle stesse due voci.
 EXTRA_PRIORITY = ["classifica", "errore", "scenario", "seq", "match",
-                  "compila", "vf", "flashcards"]
+                  "workbook", "compila", "vf", "flashcards"]
 
 # Rotazioni per obiettivo Bloom: l'obiettivo scelto dal docente cambia
 # DAVVERO il tipo di attività, non solo il testo del prompt. "auto" mantiene
 # la rotazioneAmpia, con garanzia di copertura.
 ROT_PER_BLOOM = {
-    "conoscenza":   ["vf", "compila", "flashcards", "seq", "match"],
-    "comprensione": ["vf", "match", "flashcards", "scenario", "seq"],
-    "applicazione": ["scenario", "seq", "errore", "compila", "vf"],
-    "analisi":      ["errore", "classifica", "seq", "scenario", "match"],
+    "conoscenza":   ["vf", "compila", "flashcards", "workbook", "seq", "match"],
+    "comprensione": ["vf", "match", "flashcards", "workbook", "scenario", "seq"],
+    "applicazione": ["scenario", "seq", "errore", "workbook", "compila", "vf"],
+    "analisi":      ["errore", "classifica", "workbook", "seq", "scenario", "match"],
     "auto":         EXTRA_ROTATION_CLASS,
 }
 
@@ -1482,6 +1532,11 @@ def _modulo_ha(modulo, tipo):
         return isinstance(v, list) and len(v) >= 2
     if chiave in ("compila",):
         return isinstance(v, list) and len(v) >= 2
+    if chiave in ("workbook",):
+        # build_slides richiede >= 2 domande con risposta
+        return isinstance(v, list) and len(v) >= 2 and all(
+            isinstance(x, dict) and x.get("risposta") and x.get("chiavi")
+            for x in v)
     if chiave in ("sequenza",):
         # _check_struct richiede >= 3 passi
         return isinstance(v, dict) and len(v.get("passi") or []) >= 3
@@ -1635,6 +1690,19 @@ def build_slides(struct, draft=False, profilo=None):
                     "Completa le frasi: clicca il vuoto e scegli la parola giusta tra le opzioni.",
                     ICONS["compila"])
 
+        if "workbook" in extras:
+            wb = m.get("workbook") or []
+            if len(wb) >= 2:
+                items = [{"q": w["domanda"], "r": w["risposta"],
+                          "k": w.get("chiavi") or [],
+                          "sp": w.get("spiegazione") or "",
+                          "ai": w.get("aiuto") or ""} for w in wb[:4]]
+                add(f"Quaderno — modulo {i + 1}",
+                    [{"callout": "Quaderno di esercizi"},
+                     {"workbook": items}],
+                    "Ora rispondi per iscritto: scrivi la risposta a ogni domanda.",
+                    ICONS["workbook"])
+
         if "seq" in extras:
             seq = m.get("sequenza")
             if isinstance(seq, dict) and len(seq.get("passi", [])) >= 3:
@@ -1712,27 +1780,19 @@ def build_slides(struct, draft=False, profilo=None):
             "Mettiti alla prova: abbina ogni concetto alla definizione corretta.",
             ICONS["match"])
 
-    # glossario riepilogativo: gruppi per modulo con link alla slide del modulo
-    gloss = build_glossary(moduli)
-    if glossary_term_count(gloss) >= 3:
-        mod_slide_idx = {}
-        for si, s in enumerate(slides):
-            for i in range(len(moduli)):
-                if s["title"].startswith(f"Modulo {i + 1} –"):
-                    mod_slide_idx[i] = si
-        for g in gloss:
-            # link in base al modulo REALE del gruppo, non alla sua posizione
-            mi = g.get("mod_idx")
-            if mi is not None and mi in mod_slide_idx:
-                g["slide"] = mod_slide_idx[mi]
-        add("Glossario — parole chiave",
-            [{"callout": f"Glossario ({glossary_term_count(gloss)} termini)"},
-             {"glossario": {"instr": "Cerca un termine o sfoglia per modulo: "
-                                     "clicca per vedere la definizione.",
-                            "groups": gloss}}],
-            "Prima di concludere, ripassiamo le parole chiave della lezione, "
-            "raggruppate per modulo.",
-            ICONS["gloss"])
+    # Il glossario riepilogativo e' stato eliminato: aggiungeva una slide
+    # intera di sola consultazione, piu' un bottone nel menu che portava
+    # li'. I termini chiave restano gia' nelle flashcard e nei quiz di
+    # ogni modulo, quindi la lezione non perde contenuto utile.
+
+    # indice di ogni modulo -> slide: serve all'esame finale per il pulsante
+    # "Rileggi il modulo". Viveva dentro il blocco del glossario, che e' stato
+    # rimosso: senza ricostruirlo qui l'esame finale crashing con NameError.
+    mod_slide_idx = {}
+    for si, s in enumerate(slides):
+        for i in range(len(moduli)):
+            if s["title"].startswith(f"Modulo {i + 1} –"):
+                mod_slide_idx[i] = si
 
     # esame finale: domande dedicate di sintesi (non la copia dei quiz)
     exam = build_final_exam(moduli)

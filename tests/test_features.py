@@ -58,40 +58,105 @@ def test_glossary_real_definitions_only():
     assert "Concetto chiave" not in t["d"]  # mai definizioni inventate
 
 
-def test_glossary_slide_uses_glossario_block():
+def test_il_glossario_non_e_piu_una_slide():
+    """La lezione non genera piu' la slide del glossario.
+
+    Era una slide intera di sola consultazione piu' un bottone nel menu che
+    portava li': toglieva una slide dal percorso senza aggiungere esercizio.
+    """
     struct = {"titolo": "T", "sottotitolo": "s", "intro": "i",
               "outro": "o", "citazione": "c",
               "moduli": [_mod(f"M{i}") for i in range(4)]}
     slides = build_slides(struct)
-    glo = next(s for s in slides if s["title"].startswith("Glossario"))
-    blk = next(b for b in glo["blocks"] if "glossario" in b)
-    groups = blk["glossario"]["groups"]
-    assert glossary_term_count(groups) >= 3
-    # link alle slide dei moduli assegnati
-    assert any(g.get("slide") is not None for g in groups)
+    titles = [s["title"] for s in slides]
+    assert not any(t.startswith("Glossario") for t in titles), (
+        "la slide del glossario e' stata riaggiunta")
+    for s in slides:
+        for b in s.get("blocks", []):
+            assert "glossario" not in b, "resta un blocco glossario"
 
 
-def test_glossario_validation(tmp_path):
-    from common import validate_lesson
-    slides = [{"title": "Glossario", "audio": "./assets/audio/narration-01.mp3",
-               "duration": 3.0, "caption": "./assets/captions/narration-01.vtt",
-               "words": [[0, 1, "x"]],
-               "blocks": [{"glossario": {"groups": [
-                   {"modulo": "M1", "slide": 2,
-                    "terms": [{"t": "Alpha", "d": "prima"},
-                              {"t": "Beta", "d": "seconda"},
-                              {"t": "Gamma", "d": "terza"}]}]}}]}]
-    out = tmp_path / "L_lesson"
-    (out / "assets" / "audio").mkdir(parents=True)
-    (out / "assets" / "captions").mkdir(parents=True)
-    (out / "index.html").write_text("<html></html>", encoding="utf-8")
-    (out / "lesson-data.js").write_text("window.LESSON_DATA = {};", encoding="utf-8")
-    (out / "assets" / "audio" / "narration-01.mp3").write_bytes(b"\x00" * 2048)
-    (out / "assets" / "captions" / "narration-01.vtt").write_text(
-        "WEBVTT\n\n1\n00:00:00,000 --> 00:00:01,000\nx", encoding="utf-8")
-    ok, errs, stats = validate_lesson(out, slides)
-    assert ok, errs
-    assert stats["glossario"] == 3
+def test_nel_player_non_c_e_piu_il_glossario():
+    """Niente glossario nel player: nemmeno il bottone nel menu.
+
+    Tolto il glossario, il bottone sarebbe un salto a una slide inesistente
+    (il suo handler finiva sull'ultima slide quando non trovava quella giusta).
+    """
+    import player_template as pt
+    from player_assets import base_css, main_js
+
+    assert "btnGloss" not in str(pt.THEMES), "il bottone resta nelle stringhe"
+    assert "btnGloss" not in main_js(), "il bottone del glossario e' ancora cablato"
+    assert "blockGlossario" not in main_js(), "il blocco glossario e' ancora nel player"
+    assert "glosearch" not in base_css(), "il CSS del glossario e' rimasto"
+
+
+def test_flashcards_la_carta_si_gira_una_volta_sola():
+    """La carta si gira una volta sola: poi si passa all'esercizio.
+
+    Prima si poteva girare e rigirare all'infinito restando sulle carte: la
+    verifica sotto (la parte che conta per il punteggio) non veniva mai
+    svolta, quindi l'attivita' si saltava.
+    """
+    from player_assets import main_js
+    js = main_js()
+    assert "if (!girata) {" in js, "manca il blocco 'gira una volta sola'"
+    assert "girata = true;" in js
+    assert "card.classList.add('flip');" in js
+    assert "card.classList.toggle('flip');" not in js, (
+        "toggle significa che si torna indietro: la verifica resterebbe saltata")
+    assert "!c2.classList.contains('flip')" in js, (
+        "il bottone Gira deve saltare le carte gia' girate")
+
+
+def test_trova_l_errore_mostra_presto_il_suggerimento():
+    """Il suggerimento compare al primo errore, col numero di tentativo.
+
+    Il brano e' una frase di 15-25 parole cliccabili: senza un appiglio
+    presto lo studente clicca a caso e resta fermo sull'esercizio.
+    """
+    from player_assets import main_js
+    js = main_js()
+    assert "wrongPicks >= 1" in js, (
+        "il suggerimento arriva troppo tardi: dopo 2 errori si arriva al terzo")
+    assert "tentativo" in js, "manca il resoconto dei tentativi"
+
+
+def test_il_pulsante_classifica_e_in_evidenza():
+    """L'invio alla classifica non puo' passare inosservato.
+
+    Era un bottone grigio identico a 'CSV' e 'Stampa', quindi lo studente
+    chiudeva la lezione senza sapere che il risultato andava inviato.
+    """
+    from player_assets import base_css, main_js
+    js, css = main_js(), base_css()
+    assert "sendbtn" in js, "il bottone deve avere una classe dedicata"
+    assert "sendrow" in js
+    assert ".sendrow .sendbtn" in css
+    # a piena larghezza e colorato, non grigio come gli export
+    blocco = css.split(".sendrow .sendbtn {")[1].split("}")[0]
+    assert "width: 100%" in blocco
+    assert "linear-gradient(135deg, var(--accent)" in blocco
+
+
+def test_il_pulsante_classifica_compare_senza_attivita_svolte():
+    """Il bottone che conclude il percorso non puo' sparire.
+
+    Era dentro il ramo `if (done > 0)` degli export: con zero attivita'
+    svolte non compariva, e lo studente non aveva piu' modo di inviare il
+    risultato al docente.
+    """
+    from player_assets import main_js
+    js = main_js()
+    ramo = js.split("if (done > 0) {")[1]
+    # primo blocco chiuso del ramo: deve contenere SOLO l'export
+    primo = ramo.split("\n  }")[0]
+    assert "sendrow" not in primo, (
+        "il bottone classifica e' ancora dentro il ramo done > 0: sparisce "
+        "quando lo studente non ha svolto attivita'")
+    assert "sendrow" in js, "il bottone classifica deve esistere comunque"
+
+
 
 def test_final_exam_limit():
     mods = [_mod(f"M{i}") for i in range(7)]
@@ -99,13 +164,12 @@ def test_final_exam_limit():
     assert 1 <= len(exam) <= 5
 
 
-def test_build_slides_has_glossario_esame():
+def test_build_slides_ha_esame_e_conclusione():
     struct = {"titolo": "T", "sottotitolo": "s", "intro": "i",
               "outro": "o", "citazione": "c",
               "moduli": [_mod(f"M{i}") for i in range(4)]}
     slides = build_slides(struct)
     titles = [s["title"] for s in slides]
-    assert any(t.startswith("Glossario") for t in titles)
     assert any(t.startswith("Esame finale") for t in titles)
     assert titles[-1] == "Conclusione"
 
@@ -261,7 +325,13 @@ def test_player_classroom_modes_and_service_worker(tmp_path):
     assert 'id="btnModeTeacher"' not in html and 'id="btnModeExam"' in html
     assert 'id="examTimer"' in html and 'id="examBanner"' in html
     assert "btnModeTeacher" not in js and "data-mode=\"teacher\"" not in css
-    assert "const order = stableOrder(idx, bidx, 'quiz', q.opts.length," in js
+    # L'ordine delle opzioni resta stabile fra Indietro e Avanti, così lo
+    # studente risponde al contenuto e non alla posizione. La chiave di
+    # memorizzazione porta un suffisso quando il set mostrato cambia (BES/DSA
+    # ne mostra meno): senza, l'ordine salvato per 4 opzioni sarebbe
+    # riutilizzato su 3 e l'opzione mostrata non corrisponderebbe a quella
+    # salvata.
+    assert "stableOrder(idx, bidx, 'quiz' + (BES ? 'B' : ''), shown.length," in js
     assert "function shuffleOpts(opts)" in js
     assert "function stableOrder(idx, bidx, kind, n, factory)" in js
     assert "String.fromCharCode(65 + pos)" in js

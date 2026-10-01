@@ -60,10 +60,11 @@
         <option value="applicazione">Applicazione (usare una regola)</option>
         <option value="analisi">Analisi (distinguere, scomporre)</option>
       </select></label>
-      <label>Accessibilità <select id="profAccess">
-        <option value="standard" selected>Standard</option>
-        <option value="bes">BES / DSA (meno opzioni, carico ridotto)</option>
-      </select></label>
+      <!-- La voce "Accessibilita'" (Standard / BES-DSA) e' stata tolta dal
+           pannello: il BES/DSA si attiva dalla pagina dell'attivita' dello
+           studente (menu Attivita'), che riduce opzioni e attivita' subito,
+           senza rigenerare la lezione. Al docente qui restano i tre
+           parametri che cambiano il TESTO della lezione. -->
     </div>
     <details class="adv">
       <summary>⚙ Opzioni avanzate (rigenera, bozza, file unico)</summary>
@@ -279,11 +280,13 @@
   <div class="card">
     <h2>🛟 Assistenza rapida</h2>
     <div class="uprow">
-      <button class="mini" id="btnDiagnostica" type="button"
-              onclick="event.preventDefault(); if (typeof runDiagnostica === 'function') runDiagnostica(); else window.open('/api/diagnostica','_blank','noopener');">🔍 Controlla computer e rete</button>
+      <button class="mini" id="btnDiagnostica" type="button">🔍 Controlla computer e rete</button>
       <button class="mini ghost" onclick="location.href='/api/logs_download'">⬇ Scarica log per assistenza</button>
     </div>
-    <pre id="diagnostica" style="display:none"></pre>
+    <pre id="diagnostica" hidden></pre>
+    <noscript><p class="upmsg err">Per la diagnostica serve JavaScript.
+      Con il pannello aperto su questo computer, apri direttamente
+      <a href="/api/diagnostica" target="_blank" rel="noopener">/api/diagnostica</a>.</p></noscript>
   </div>
 </div>
 

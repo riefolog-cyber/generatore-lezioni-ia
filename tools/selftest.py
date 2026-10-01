@@ -235,9 +235,17 @@ def check_render(L, n_slides, errs):
         slide = re.search(r'<div id="slide"[^>]*>(.*?)</main>', dom, re.S)
         if not slide or len(slide.group(1)) < 200:
             errs.append(f"{L.name}: la slide risulta vuota (possibile errore JS)")
-        dots = len(re.findall(r'<span title=', dom))
-        if dots and dots != n_slides:
-            errs.append(f"{L.name}: i dots sono {dots}, attese {n_slides} slide")
+        # I pallini sono <button> (lo sono diventati per l'accessibilita':
+        # erano <span> irraggiungibili con la tastiera). Contarli come
+        # <span> faceva restare `dots` a 0 e il controllo non verificava
+        # NULLA: un player che non disegna piu' i pallini passava liscio.
+        # Ora si conta il contenitore #dots, cosi' il confronto e' obbligato.
+        m_dots = re.search(r'<div id="dots">(.*?)</div>', dom, re.S)
+        dots = len(re.findall(r'<button', m_dots.group(1))) if m_dots else 0
+        if not m_dots:
+            errs.append(f"{L.name}: i pallini di navigazione non ci sono")
+        elif dots != n_slides:
+            errs.append(f"{L.name}: i pallini sono {dots}, attese {n_slides} slide")
         console = Path(err_f.name).read_text(encoding="utf-8", errors="replace")
         uncaught = [l for l in console.splitlines() if "Uncaught" in l]
         for l in uncaught[:3]:

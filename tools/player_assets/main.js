@@ -165,7 +165,8 @@ try {
 function savePos() {
   try { localStorage.setItem(DATA_KEY, JSON.stringify({ slide: cur })); } catch (e) {}
 }
-const ACT_TYPES = ['quiz', 'match', 'vf', 'seq', 'compila', 'scenario', 'errore', 'classifica'];
+const ACT_TYPES = ['quiz', 'match', 'vf', 'seq', 'compila', 'workbook',
+                   'scenario', 'errore', 'classifica'];
 // Modalità "una sola attività": il docente condivide ?attivita=N e gli alunni
 // vedono SOLO il percorso che parte da quella slide (niente mappa, ricerca,
 // esame né salti a slide esterne): cliccando Avanti si prosegue il modulo.
@@ -184,6 +185,78 @@ const MODNAV = slides.map((s, i) => {
   return { i, n: +n, label };
 }).filter(Boolean);
 const LAST = slides.length - 1;
+
+// ------------------------------------------------------------- modalità BES/DSA
+// Fino a oggi il profilo BES/DSA esisteva SOLO in fase di generazione (meno
+// opzioni, meno attività) e nel player non c'era nulla: per lo studente che
+// riceve una lezione generata in modalità standard la differenza era ZERO.
+//
+// Qui è uno STUDENTE-SIDE toggle: riduce davvero il CARICO COGNITIVO, non
+// solo l'aspetto.
+//   - quiz/scenario: al massimo 3 opzioni, SEMPRE conservando quella giusta
+//     (tagliando a caso si possono perdere risposte utili: il quiz diventa
+//     irrisolvibile o fuorviante);
+//   - una sola attività per slide: le altre restano raggiungibili, non spariscono;
+//   - testo e spaziature più larghi;
+//   - via streak e contatore in testata: la competizione è ciò che lo STA
+//     (distrazione, frustrazione, ansia) sui profili BES/DSA. La CLASSIFICA
+//     di classe resta: è il canale con cui lo studente consegna il risultato.
+// La scelta resta sul dispositivo, quindi non va riattivata a ogni lezione.
+const BES_KEY = DATA_KEY + '-bes';
+// la lezione può dichiarare il profilo: se l'ha generata il docente in BES/DSA,
+// la modalita' parte gia' attiva e il docente vede che e' stata applicata.
+let BES = (data.profilo && data.profilo.accessibilita === 'bes') || false;
+try {
+  const scelto = localStorage.getItem(BES_KEY);
+  if (scelto === '1' || scelto === '0') BES = scelto === '1';
+} catch (e) {}
+// quante opzioni mostrare: 3 in BES/DSA. `_tagliaOpzioni` garantisce che la
+// risposta corretta resti fra quelle mostrate (vedi new_lesson._taglia_opzioni).
+function _tagliaOpzioni(opts, maxn) {
+  if (!Array.isArray(opts)) return [];
+  if (opts.length <= maxn) return opts;
+  const giuste = opts.filter(o => o && o.ok);
+  const altre = opts.filter(o => o && !o.ok);
+  // si tiene SEMPRE la risposta corretta: senza di essa il quiz non ha soluzione
+  const tenute = giuste.slice(0, 1).concat(altre.slice(0, Math.max(0, maxn - 1)));
+  return tenute;
+}
+function setBes(on) {
+  BES = !!on;
+  document.documentElement.dataset.bes = BES ? '1' : '';
+  try { localStorage.setItem(BES_KEY, BES ? '1' : '0'); } catch (e) {}
+  const b = _safe('btnBes');
+  if (b) {
+    b.setAttribute('aria-pressed', BES ? 'true' : 'false');
+    b.classList.toggle('on', BES);
+    const t = b.querySelector('.abtx');
+    if (t) t.textContent = BES ? 'BES/DSA: attiva' : 'Modalità BES/DSA';
+  }
+  // la slide corrente va ridisgnata: il numero di opzioni e' diverso
+  try { render(cur); } catch (e) {}
+  // nasconde DOPO il ridisegno, non prima: `render()` chiama `paintScore()`,
+  // che riaccende `score` e `streak`. Nascosti prima, tornavano visibili
+  // (l'ho visto nello screenshot: il contatore rimaneva in testata).
+  _nascondiCompetizione();
+  try { paintDots(); } catch (e) {}
+}
+function _nascondiCompetizione() {
+  // In BES/DSA via la serie di risposte giuste ("streak") e il contatore in
+  // testata: sono cio' che lo STA (frustrazione, ansia da confronto).
+  //
+  // La CLASSIFICA DI CLASSE invece RESTA: il pulsante "Invia alla classifica"
+  // si chiama `sendbtn`, nasce nel riepilogo e qui non e' mai stato toccato.
+  // Prima questa funzione provava a nascondere un `rankBtn` che nel player
+  // non esiste: un no-op che lasciava credere di nascondere la classifica.
+  // Se un domani si vorra' toglierla, il punto giusto e' qui sotto.
+  ['streak', 'score'].forEach(id => {
+    const n = _safe(id);
+    if (n) n.hidden = BES;
+  });
+}
+const _besBtn = _safe('btnBes');
+if (_besBtn) _besBtn.onclick = () => setBes(!BES);
+setBes(BES);
 
 // Modalità operative: studente (predefinita) ed esame.
 let lessonMode = 'student';
@@ -470,6 +543,7 @@ function slideTotal(i) {
     else if (b.classifica) t += (b.classifica.items || []).length;
     else if (b.vf) t += b.vf.length;
     else if (b.compila) t += b.compila.reduce((n, it) => n + blankCount(it), 0);
+    else if (b.workbook) t += (b.workbook || []).length;
   }
   return t;
 }
@@ -505,6 +579,11 @@ function grade(i) {
       const got = r.compila.slice(0, tot).filter(Boolean).length;
       e += got;
       log('compila', tot === 0 || got === tot);
+    } else if (b.workbook && Array.isArray(r.workbook)) {
+      const tot = b.workbook.length;
+      const got = r.workbook.slice(0, tot).filter(Boolean).length;
+      e += got;
+      log('workbook', tot === 0 || got === tot);
     }
   }
   return { e, t: slideTotal(i) };
@@ -561,7 +640,9 @@ function paintScore() {
   SCORE_REV++;
   const M = scoreMetrics();
   const st = $('#score');
-  if (st && M.t > 0) { st.hidden = false; st.textContent = '⭐ ' + M.e + '/' + M.t; }
+  // In BES/DSA il contatore e la serie restano nascosti: questa funzione viene
+  // richiamata a ogni risposta e li riaccenderebbe da sola (vedi _nascondiCompetizione).
+  if (st && M.t > 0 && !BES) { st.hidden = false; st.textContent = '⭐ ' + M.e + '/' + M.t; }
   else if (st) st.hidden = true;
   reportProgress(buildProgress());
   // streak: si aggiorna SOLO quando la slide completa è stata corretta (esito
@@ -572,7 +653,7 @@ function paintScore() {
       STREAK.cur = M.e === M.tSvolte ? STREAK.cur + 1 : 0;
       if (STREAK.cur > STREAK.best) { STREAK.best = STREAK.cur; saveStreak(); }
     }
-    if (STREAK.cur >= 2) { sc.hidden = false; sc.textContent = '🔥 ' + STREAK.cur + ' di fila'; }
+    if (STREAK.cur >= 2 && !BES) { sc.hidden = false; sc.textContent = '🔥 ' + STREAK.cur + ' di fila'; }
     else sc.hidden = true;
   }
   checkBadges();
@@ -1063,33 +1144,35 @@ function buildFinishPanel() {
     const bPr = el('button', null, '🖨 Stampa'); bPr.onclick = () => exportReport('stampa');
     exp.appendChild(bCsv); exp.appendChild(bJs); exp.appendChild(bPr);
     wrap.appendChild(exp);
-    // classifica di classe: manda il risultato al pannello del docente
-    if (window.LESSON_DIR) {
-      const crow = el('div', 'exprow');
-      const cbtn = el('button', null, '🏆 Invia alla classifica di classe');
-      cbtn.onclick = async () => {
-        const p = buildProgress();
-        if (!p.done) { alert('Prima svolgi almeno un\'attività.'); return; }
-        cbtn.disabled = true; cbtn.textContent = '⏳ Invio…';
-        try {
-          const r = await fetch('/api/classifica', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ lesson: window.LESSON_DIR, studente: p.studente,
-                                   punti: p.punti, totale: p.totale,
-                                   completata: p.completata,
-                                   copertura: p.copertura,
-                                   errori: p.errori,
-                                   tempo_min: Math.round(p.tempo_s / 6) / 10 }) });
-          const j = await r.json().catch(() => ({}));
-          cbtn.textContent = (r.ok && j.ok) ? '✓ Inviato in classifica!' : '✗ Invio fallito (aperto da file? usa il server)';
-        } catch (e) {
-          cbtn.textContent = '✗ Invio fallito (nessun server)';
-        }
-        cbtn.disabled = false;
-      };
-      crow.appendChild(cbtn);
-      wrap.appendChild(crow);
-    }
+  }
+  // Invia alla classifica di classe: FUORI dal ramo `done > 0` degli export.
+  // Era dentro, quindi con zero attivita' svolte spariva proprio il bottone
+  // che chiude il percorso: lo studente non aveva piu' modo di inviare.
+  if (window.LESSON_DIR) {
+    const crow = el('div', 'exprow sendrow');
+    const cbtn = el('button', 'sendbtn', '🏆 Invia alla classifica di classe');
+    cbtn.onclick = async () => {
+      const p = buildProgress();
+      if (!p.done) { alert('Prima svolgi almeno un\'attività.'); return; }
+      cbtn.disabled = true; cbtn.textContent = '⏳ Invio…';
+      try {
+        const r = await fetch('/api/classifica', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ lesson: window.LESSON_DIR, studente: p.studente,
+                                 punti: p.punti, totale: p.totale,
+                                 completata: p.completata,
+                                 copertura: p.copertura,
+                                 errori: p.errori,
+                                 tempo_min: Math.round(p.tempo_s / 6) / 10 }) });
+        const j = await r.json().catch(() => ({}));
+        cbtn.textContent = (r.ok && j.ok) ? '✓ Inviato in classifica!' : '✗ Invio fallito (aperto da file? usa il server)';
+      } catch (e) {
+        cbtn.textContent = '✗ Invio fallito (nessun server)';
+      }
+      cbtn.disabled = false;
+    };
+    crow.appendChild(cbtn);
+    wrap.appendChild(crow);
   }
   if (review.size > 0) {
     const rip = el('button', null, '🎯 Ripassa le slide segnalate (' + review.size + ')');
@@ -1181,9 +1264,33 @@ function render(i) {
   // proprio ordine stabile fra le visite (vedi stableOrder).
   // I blocchi senza tipo riconosciuto restituiscono null: vanno scartati qui,
   // altrimenti `b.style` su un nodo non-Elemento fa eccezione.
-  const blocks = (s.blocks || [])
-    .map((b, bi) => renderBlock(b, i, bi))
+  //
+  // BES/DSA: sulla slide resta UNA SOLA attività. È la leva più forte sul
+  // carico cognitivo — lo studente vede un quesito, risponde, passa avanti.
+  // Le altre NON vengono distrutte: restano nei dati, quindi disattivando la
+  // modalità riappaiono tutte, e il punteggio le conta comunque (il
+  // denominatore resta il totale reale, non quello ridotto: nasconderle non
+  // deve regalare punti).
+  const grezzi = s.blocks || [];
+  const primoAttivo = BES
+    ? grezzi.findIndex(b => b && ACT_TYPES.some(t => b[t]))
+    : -1;
+  const blocks = grezzi
+    .map((b, bi) => {
+      // dopo la prima attività, in BES/DSA, non si rende nulla
+      if (primoAttivo >= 0 && bi > primoAttivo) return null;
+      return renderBlock(b, i, bi);
+    })
     .filter(Boolean);
+  if (primoAttivo >= 0) {
+    const nascoste = grezzi.filter(b => b && ACT_TYPES.some(t => b[t])).length - 1;
+    if (nascoste > 0) {
+      box.appendChild(el('div', 'besnote',
+        '♿ Una attività alla volta. ' + nascoste
+        + (nascoste === 1 ? ' altra attività' : ' altre attività')
+        + ' restano disponibili se disattivi la modalità BES/DSA.'));
+    }
+  }
   blocks.forEach((b, k) => {
     // l'animazione di ingresso si applica solo se l'utente non ha chiesto
     // riduzione del movimento: sotto prefers-reduced-motion ogni blocco leggeva
@@ -1247,11 +1354,11 @@ function renderBlock(b, idx, bidx) {
   if (b.vf) return blockVf(b.vf, idx);
   if (b.seq) return blockSeq(b.seq, idx, bidx);
   if (b.compila) return blockCompila(b.compila, idx);
+  if (b.workbook) return blockWorkbook(b.workbook, idx);
   if (b.errore) return blockErrore(b.errore, idx, bidx);
   if (b.match) return blockMatch(b.match, idx, bidx);
   if (b.flashcards) return blockFlashcards(b.flashcards, idx);
   if (b.classifica) return blockClassify(b.classifica, idx);
-  if (b.glossario) return blockGlossario(b.glossario, idx);
   // tipo di blocco sconosciuto (o vuoto): niente da mostrare.
   // Restituiva un TextNode vuoto, che in render() finiva in
   // `b.style.animationDelay` -> TypeError e slide BLANKCA.
@@ -1279,13 +1386,19 @@ function answerFeedback(good, okTxt, koTxt, fbTxt) {
 function blockQuiz(q, idx, bidx) {
   const w = el('div', 'quiz');
   w.appendChild(el('q', null, q.q));
+  // In BES/DSA si mostrano al massimo 3 opzioni. `_tagliaOpzioni` tiene SEMPRE
+  // la risposta corretta: tagliando a cieco il quiz diventerebbe irrisolvibile.
+  // Il dataset conserva l'indice REALE in `q.opts`, quindi la valutazione
+  // continua a guardare l'opzione originaria, non la posizione mostrata.
+  const shown = BES ? _tagliaOpzioni(q.opts, 3) : q.opts;
   // Ordine casuale coerente: la lettera segue la posizione mostrata e il
   // dataset conserva l'indice reale per valutare correttamente la risposta.
   // L'ordine è memorizzato per (slide, blocco): resta identico fra Indietro e
   // Avanti, così lo studente risponde al contenuto e non alla posizione.
-  const order = stableOrder(idx, bidx, 'quiz', q.opts.length, () => shuffleOpts(q.opts));
+  const order = stableOrder(idx, bidx, 'quiz' + (BES ? 'B' : ''), shown.length,
+                            () => shuffleOpts(shown));
   order.forEach((k, pos) => {
-    const o = q.opts[k];
+    const o = shown[k];
     const btn = el('button', 'opt');
     btn.appendChild(el('span', 'letter', String.fromCharCode(65 + pos)));
     btn.appendChild(el('span', null, o.t));
@@ -1294,19 +1407,22 @@ function blockQuiz(q, idx, bidx) {
   });
   const fb = el('div', 'fb');
   w.appendChild(fb);
+  // indice della risposta corretta NEL SET MOSTRATO: con il taglio BES non
+  // coincide piu' con quello di `q.opts`, quindi va ricalcolato qui. Usare
+  // quello di `q.opts` evidenzierebbe un'opzione non presente a schermo.
+  const giIdx = shown.findIndex(o => o && o.ok);
   w.querySelectorAll('.opt').forEach(btn => {
     btn.onclick = () => {
       if (w.classList.contains('revealed')) return;
       const k = +btn.dataset.k;
-      const opt = q.opts[k];
+      const opt = shown[k];              // indice relativo a `shown`, non a q.opts
       const good = !!opt.ok;
       w.classList.add('revealed');
       w.querySelectorAll('.opt').forEach(b2 => b2.classList.remove('correct', 'wrong'));
       btn.classList.add(good ? 'correct' : 'wrong');
       btn.querySelector('.letter').textContent = good ? '✓' : '✗';
       if (!good) {
-        const gi = q.opts.findIndex(o => o.ok);
-        const g = [...w.querySelectorAll('.opt')].find(x => +x.dataset.k === gi);
+        const g = [...w.querySelectorAll('.opt')].find(x => +x.dataset.k === giIdx);
         if (g) { g.classList.add('correct'); g.querySelector('.letter').textContent = '✓'; }
       }
       fb.innerHTML = '';
@@ -1316,10 +1432,9 @@ function blockQuiz(q, idx, bidx) {
         // il feedback dell'opzione sbagliata scelta: lo studente sapeva perché
         // la sua era errata, ma non perché quella giusta è giusta — che è
         // l'informazione che trasforma una risposta corretta in apprendimento.
-        const gi = q.opts.findIndex(o => o.ok);
         const fbOk = el('div', 'fb ok giusto');
-        fbOk.appendChild(el('div', 'verdict', '✓ La risposta giusta: ' + q.opts[gi].t));
-        if (q.opts[gi].fb) fbOk.appendChild(el('div', 'item', q.opts[gi].fb));
+        fbOk.appendChild(el('div', 'verdict', '✓ La risposta giusta: ' + shown[giIdx].t));
+        if (shown[giIdx].fb) fbOk.appendChild(el('div', 'item', shown[giIdx].fb));
         fb.appendChild(fbOk);
         // scaffolding progressivo: l'aiuto cresce con gli errori
         fb.appendChild(scaffolding(1));
@@ -1344,8 +1459,13 @@ function blockQuiz(q, idx, bidx) {
 function blockScenario(s, idx, bidx) {
   const m = el('div', 'scn');
   m.appendChild(el('div', 'situ', s.situazione));
-  stableOrder(idx, bidx, 'scn', s.opts.length, () => shuffleOpts(s.opts)).forEach((k, pos) => {
-    const o = s.opts[k];
+  // BES/DSA: al massimo 3 opzioni, con la corretta sempre conservata. Qui la
+  // valutazione passa per `dataset.ok` e non per l'indice, quindi il taglio
+  // non richiede riallineare indici come nel quiz.
+  const shown = BES ? _tagliaOpzioni(s.opts, 3) : s.opts;
+  stableOrder(idx, bidx, 'scn' + (BES ? 'B' : ''), shown.length,
+              () => shuffleOpts(shown)).forEach((k, pos) => {
+    const o = shown[k];
     const btn = el('button', 'opt');
     btn.appendChild(el('span', 'letter', String.fromCharCode(65 + pos)));
     btn.appendChild(el('span', null, o.t));
@@ -1532,6 +1652,122 @@ function paintCompila(w, idx) {
   paintDots();
 }
 
+// ------------------------------------------------------------ WORKBOOK
+// Quaderno di esercizi: l'alunno SCRIVE la risposta a riga intera. Non
+// confrontiamo mai le stringhe letterali: l'ordine delle parole cambia,
+// i trattini/accenti variano e l'alfabeto del telefono è disordinato.
+// La verifica guarda le PAROLE CHIAVE che l'LLM ha dichiarato obbligatorie.
+function _normWb(s) {
+  return String(s || '')
+    .toLowerCase()
+    // NFD + via i diacritici combinanti: così "città" e "citta" sono uguali
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')              // via punteggiatura
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+// Confronto tollerante tra la parola scritta e la parola chiave.
+// Non basta l'uguaglianza: l'alunno scrive "cellule" per "cellula",
+// "clorofilliana" per "clorofilla", e sbagliare il plurale o usare un
+// aggettivo derivato NON è un errore di comprensione. Regola: si confronta
+// la radice (via la vocale finale, tipica del plurale italiano) e si
+// accetta un derivato breve. Il limite di 5 caratteri evita i falsi positivi
+// delle parole corte ("ora" dentro "orario", "casa" dentro "casale").
+function _parolaCorrisponde(hay, needle) {
+  if (hay === needle) return true;
+  const base = w => (w.length > 4 && /[aeio]$/.test(w)) ? w.slice(0, -1) : w;
+  const h2 = base(hay), n2 = base(needle);
+  if (h2 === n2 && h2.length >= 5) return true;
+  const [s, l] = h2.length <= n2.length ? [h2, n2] : [n2, h2];
+  return s.length >= 5 && l.indexOf(s) === 0 && l.length - s.length <= 4;
+}
+// quante chiavi compaiono nella risposta data dall'alunno
+function _chiaviTrovate(testo, chiavi) {
+  const parole = _normWb(testo).split(' ').filter(Boolean);
+  let ok = 0;
+  (chiavi || []).forEach(k => {
+    const parti = _normWb(k).split(' ').filter(Boolean);
+    if (!parti.length) return;
+    // una chiave di più parole: basta che compaia in sequenza
+    for (let i = 0; i + parti.length <= parole.length; i++) {
+      let uguale = true;
+      for (let j = 0; j < parti.length; j++) {
+        if (!_parolaCorrisponde(parole[i + j], parti[j])) { uguale = false; break; }
+      }
+      if (uguale) { ok++; return; }
+    }
+  });
+  return ok;
+}
+
+function blockWorkbook(items, idx) {
+  const w = el('div', 'wbk');
+  const esiti = [];
+  items.forEach((it, n) => {
+    const riga = el('div', 'wbkitem');
+    riga.appendChild(el('div', 'wbkq', (n + 1) + '. ' + it.q));
+    if (it.ai) {
+      const ai = el('button', 'wbkai', '💡 ' + it.ai);
+      ai.onclick = ev => { ev.stopPropagation(); ai.classList.toggle('on'); };
+      riga.appendChild(ai);
+    }
+    const ta = el('textarea', 'wbkta');
+    ta.rows = 2;
+    ta.placeholder = 'Scrivi qui la tua risposta…';
+    ta.setAttribute('aria-label', 'Risposta alla domanda ' + (n + 1));
+    riga.appendChild(ta);
+    const az = el('div', 'wbkact');
+    const bVerifica = el('button', 'wbkbtn', '✓ Verifica');
+    bVerifica.onclick = ev => {
+      ev.stopPropagation();
+      const testo = ta.value.trim();
+      if (!testo) {
+        msg.className = 'wbkmsg ko';
+        msg.textContent = 'Scrivi prima la risposta alla domanda ' + (n + 1) + '.';
+        return;
+      }
+      const chiavi = it.k || [];
+      const trovate = _chiaviTrovate(testo, chiavi);
+      const good = trovate === chiavi.length;
+      esiti[n] = good;
+      ta.classList.add('done', good ? 'ok' : 'ko');
+      ta.readOnly = true;              // una risposta verificata non si ricontrolla
+      bVerifica.disabled = true;
+      bVerifica.textContent = good ? '✓ Corretta' : '✗ Da rivedere';
+      const fb = el('div', 'wbkfb ' + (good ? 'ok' : 'ko'),
+        (good ? '✔ Esatto. ' : '✘ ' + (chiavi.length - trovate) + ' concett'
+          + (chiavi.length - trovate === 1 ? 'o' : 'i') + ' mancante'
+          + (chiavi.length - trovate === 1 ? 'e' : 'i') + '. ')
+        + (it.sp || ('La risposta attesa conteneva: ' + (it.r || ''))));
+      riga.appendChild(fb);
+      paintWorkbook(w, idx, items.length, esiti);
+    };
+    az.appendChild(bVerifica);
+    riga.appendChild(az);
+    w.appendChild(riga);
+  });
+  const msg = el('div', 'wbkmsg', 'Scrivi le risposte e verifica una alla volta.');
+  w.appendChild(msg);
+  return w;
+}
+
+function paintWorkbook(w, idx, tot, esiti) {
+  const risp = esiti.filter(x => x !== undefined);
+  const ok = risp.filter(Boolean).length;
+  results[idx] = results[idx] || {};
+  results[idx].workbook = esiti.map(x => !!x);
+  const msg = w.querySelector('.wbkmsg');
+  if (risp.length === tot) {
+    msg.textContent = ok === tot
+      ? 'Tutte le risposte corrette! 🎉' : 'Hai risposto a tutte: rivedi quelle segnate in rosso.';
+    msg.className = 'wbkmsg ' + (ok === tot ? 'ok' : 'ko');
+  } else {
+    msg.textContent = ok + ' / ' + tot + ' risposte corrette';
+    msg.className = 'wbkmsg';
+  }
+  paintDots();
+}
+
 function blockMatch(s, idx, bidx) {
   const m = el('div', 'match');
   m.appendChild(el('p', null, s.instr || 'Abbina ogni concetto alla definizione corretta.'));
@@ -1601,12 +1837,19 @@ function blockFlashcards(f, idx) {
     back.appendChild(el('div', 'fcdef', c.d));
     inner.appendChild(front); inner.appendChild(back);
     card.appendChild(inner);
+    let girata = false;
+    // una carta si gira UNA volta sola: prima si poteva tornare
+    // avanti/indietro all'infinito e la verifica sotto non veniva mai
+    // svolta, cioe' la parte che conta restava saltata.
     card.onclick = () => {
-      card.classList.toggle('flip');
+      if (!girata) {
+        girata = true;
+        card.classList.add('flip');
+        front.querySelector('.fchint').textContent = '\u2713 definizione mostrata';
+      }
       if (curC === k) return;
       curC = k;
       [...dotsW.children].forEach((d2, j) => d2.classList.toggle('on', j === k));
-      dotsW.dataset.viste = String(new Set([...dotsW.children].filter(x => x.classList.contains('on')).map(x => +x.dataset.k).concat(k)).size);
     };
     cards.push(card);
     deck.appendChild(card);
@@ -1617,7 +1860,11 @@ function blockFlashcards(f, idx) {
   m.appendChild(dotsW);
   const ctrl = el('div', 'fcctrl');
   const bFlip = el('button', null, '🔄 Gira');
-  bFlip.onclick = () => { if (cards[curC] || cards[0]) (cards[curC] || cards[0]).classList.toggle('flip'); };
+  bFlip.onclick = () => {
+    // stessa regola del tocco sulla carta: si gira una volta sola
+    const c2 = cards[curC] || cards[0];
+    if (c2 && !c2.classList.contains('flip')) c2.click();
+  };
   const bPrev = el('button', null, '←');
   bPrev.onclick = () => navC(-1);
   const bNext = el('button', null, '→');
@@ -1746,61 +1993,6 @@ function blockClassify(c, idx) {
   return m;
 }
 
-function blockGlossario(g, idx) {
-  const m = el('div', 'glos');
-  m.appendChild(el('p', null, g.instr || 'Cerca un termine o sfoglia per modulo.'));
-  const groups = (g.groups || []).filter(gr => gr && (gr.terms || []).length);
-  const total = groups.reduce((n, gr) => n + gr.terms.length, 0);
-  const search = el('input', 'glosearch');
-  search.type = 'search';
-  search.placeholder = '🔍 Cerca tra ' + total + ' termini…';
-  search.setAttribute('aria-label', 'Cerca nel glossario');
-  const count = el('div', 'glocount', total + ' termini · ' + groups.length + ' moduli');
-  const list = el('div', 'glolist');
-  m.appendChild(search); m.appendChild(count); m.appendChild(list);
-  function paint(filter) {
-    list.innerHTML = '';
-    const f = (filter || '').trim().toLowerCase();
-    let shown = 0, shownGroups = 0;
-    groups.forEach(gr => {
-      const terms = gr.terms.filter(t =>
-        !f || (t.t || '').toLowerCase().includes(f) || (t.d || '').toLowerCase().includes(f));
-      if (!terms.length) return;
-      shownGroups++;
-      list.appendChild(el('div', 'glogroup', '📖 ' + (gr.modulo || 'Modulo')));
-      terms.forEach(t => {
-        shown++;
-        const row = el('div', 'gloterm');
-        const btn = el('button');
-        btn.appendChild(el('span', null, t.t));
-        btn.appendChild(el('span', 'arrow', '▶'));
-        btn.onclick = () => row.classList.toggle('open');
-        row.appendChild(btn);
-        const def = el('div', 'glodef', t.d);
-        if (gr.slide !== null && gr.slide !== undefined && gr.modulo) {
-          const link = el('button', 'glomod', '→ Vedi: ' + gr.modulo);
-          link.onclick = (e) => { e.stopPropagation(); try { go(gr.slide); } catch (_) {} };
-          def.appendChild(el('br'));
-          def.appendChild(link);
-        }
-        row.appendChild(def);
-        list.appendChild(row);
-      });
-    });
-    if (!shown) list.appendChild(el('div', 'gloempty', 'Nessun termine trovato.'));
-    count.textContent = f
-      ? shown + ' risultati · ' + shownGroups + ' moduli'
-      : total + ' termini · ' + groups.length + ' moduli';
-  }
-  let deb = null;
-  search.addEventListener('input', () => {
-    clearTimeout(deb);
-    deb = setTimeout(() => paint(search.value), 140);
-  });
-  paint('');
-  return m;
-}
-
 function blockErrore(s, idx, bidx) {
   const m = el('div', 'erra');
   const badPhrase = (s.sbagliato || '').trim();
@@ -1894,18 +2086,18 @@ function blockErrore(s, idx, bidx) {
         paintDots();
       } else {
         wrongPicks++;
-        picked.classList.remove('pick');
-        picked.classList.add('miss');
-        b.classList.add('wrong');
-        hint.textContent = '\u274c Non \u00e8 la combinazione giusta: riprova.';
+        // resoconto: lo studente vede che gli errori contano e non
+        // pensa di essere bloccato su un esercizio impossibile
+        hint.textContent = '\u274c Non \u00e8 la combinazione giusta: riprova. '
+          + '(tentativo ' + (wrongPicks + 1) + ')';
         hint.style.color = 'var(--ko)';
         setTimeout(() => {
           picked.classList.remove('miss');
           b.classList.remove('wrong');
           hint.style.color = '';
         }, 900);
-        if (badPhrase && wrongPicks >= 2) {
-          hintBox.textContent = '\ud83d\udca1 Suggerimento: focalizzati su \u201c' + badPhrase + '\u201d.';
+        if (badPhrase && wrongPicks >= 1) {
+          hintBox.textContent = '\ud83d\udca1 Suggerimento: la parte sbagliata \u00e8 \u201c'
           hintBox.hidden = false;
         }
       }
@@ -1934,14 +2126,8 @@ if (_safe('btnSpeed')) _safe('btnSpeed').onclick = () => {
   rateIdx = (rateIdx + 1) % RATE_VALORI.length;
   applyRate();
 };
-if (_safe('btnGloss')) {
-  // il glossario stava solo come slide: da un telefono, per usarlo si
-  // attraversava l'intera lezione. Ora è sempre a portata di un tocco.
-  _safe('btnGloss').onclick = () => {
-    const i = slides.findIndex(s => (s.title || '').startsWith('Glossario'));
-    go(i >= 0 ? i : LAST);
-  };
-}
+// il glossario e' stato eliminato: la lezione non lo genera piu' e il
+// bottone nel menu sarebbe rimasto un salto a una slide inesistente.
 const preAudio = new Audio();   // usato SOLO per scaldare la cache del browser
 preAudio.preload = 'auto';
 let preloadedUrl = null;
@@ -2155,7 +2341,6 @@ if (_seek) _seek.onclick = e => {
 
 // ------------------------------------------------ accessibility
 const accMenu = _safe('accMenu');
-const btnAcc = _safe('btnAcc');
 const btnZoom = _safe('btnZoom');
 let fsLvl = 0;
 try { fsLvl = +(localStorage.getItem('lesson-fs') || 0); } catch (e) {}
@@ -2184,12 +2369,29 @@ function toggleContrast() { applyContrast(document.documentElement.dataset.contr
   try { c = localStorage.getItem('lesson-contrast') || '0'; } catch (e) {}
   if (c === '1') document.documentElement.dataset.contrast = '1';
 })();
-if (btnAcc && accMenu) {
-  btnAcc.onclick = e => { e.stopPropagation(); accMenu.hidden = !accMenu.hidden; };
+// L'Accessibilita' e' stata spostata dal menu header (☰) a un menu
+// ATTIVITA' dedicato: nel menu header finiva in fondo alla lista, sotto
+// Stampa/Tema, e sul telefono non si vedeva. `accMenu` resta il
+// contenitore dei tre strumenti (testo, contrasto, velocita' audio).
+(function actMenu() {
+  const b = _btn('btnAtt'), drop = _btn('actdrop');
+  if (!b || !drop) return;
+  const apri = on => {
+    drop.hidden = !on;
+    b.setAttribute('aria-expanded', on ? 'true' : 'false');
+  };
+  b.onclick = e => { e.stopPropagation(); apri(drop.hidden); };
   document.addEventListener('click', e => {
-    if (!accMenu.hidden && !accMenu.contains(e.target) && e.target !== btnAcc) accMenu.hidden = true;
+    if (!drop.hidden && !drop.contains(e.target) && e.target !== b) apri(false);
   });
-}
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape' && !drop.hidden) { apri(false); b.focus(); }
+  });
+  // dopo aver usato uno strumento il menu si richiude: altrimenti copre
+  // il testo mentre si guarda il risultato dell'ingrandimento
+  drop.querySelectorAll('button').forEach(x =>
+    x.addEventListener('click', () => setTimeout(() => apri(false), 60)));
+})();
 // L'alto contrasto era raggiungibile SOLO con Ctrl+Alt+T (una scorciatoia
 // che né studenti né docenti conoscono). Ora c'è un bottone che dice cosa fa.
 const btnContrast = _safe('btnContrast');
@@ -2216,7 +2418,8 @@ try {
 
 // velocità audio, play continuo e glossario vengono applicati piu' in basso,
 // subito dopo la creazione di `audio`: vedi la sezione "audio".
-// menu header (Stampa / Tema / Accessibilità con etichette)
+// menu header (Stampa / Tema / Badge: l'Accessibilita' ora sta nel menu
+// ATTIVITA', quindi qui basta chiudere il menu dopo ogni comando)
 (function headerMenu() {
   const btn = _btn('btnMenu'), drop = _btn('hdrop');
   if (!btn || !drop) return;
@@ -2228,8 +2431,139 @@ try {
     if (e.key === 'Escape' && !drop.hidden) drop.hidden = true;
   });
   drop.querySelectorAll('button').forEach(b => {
-    if (b.id !== 'btnAcc') b.addEventListener('click', () => { drop.hidden = true; });
+    b.addEventListener('click', () => { drop.hidden = true; });
   });
+})();
+
+// ------------------------------------------------- schermo intero
+// Sul telefono la lezione si legge meglio a tutto schermo: via i bordi del
+// browser e lo schermo diventa tutto attivita'.
+//
+// "In automatico" finisce sul PRIMO TOCCO, non al caricamento. Motivo: la
+// Fullscreen API accetta la richiesta solo dentro un gesto reale dell'utente
+// (user activation). Chiamarla senza gesto viene ignorata da ogni browser,
+// quindi un vero auto-fullscreen all'avvio e' impossibile e provarlo produrrebbe
+// solo un errore in console. Il primo tocco e' l'attimo lecito: per lo
+// studente il risultato e' lo stesso, cioe' la lezione che si apre gia' a
+// schermo intero.
+//
+// Se lo studente esce a meta' perche' gli da fastidio, non lo riportiamo piu'
+// dentro (scelta salvata sul dispositivo), altrimenti sarebbe una gabbia.
+(function fullscreenAuto() {
+  const root = document.documentElement;
+  const entering = () => root.requestFullscreen
+    || root.webkitRequestFullscreen || root.msRequestFullscreen;
+  const uscita = () => document.exitFullscreen || document.webkitExitFullscreen
+    || document.msExitFullscreen;
+  const attivo = () => !!(document.fullscreenElement || document.webkitFullscreenElement
+    || document.msFullscreenElement);
+  const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches
+    || window.navigator.standalone === true;
+  const KEY = DATA_KEY + '-fullscreen';
+  // solo telefono/tablet: sul PC non deve scattare nulla all'avvio
+  const schermoPiccolo = () => window.matchMedia('(max-width: 900px), (pointer: coarse)').matches;
+  let rinunciato = false;
+  try { rinunciato = localStorage.getItem(KEY) === 'no'; } catch (e) {}
+
+  // avviso: riuso lo stile del toast dei badge (nessun popup di sistema)
+  function avviso(tit, desc) {
+    const t = el('div', 'badge-toast');
+    t.appendChild(el('span', 'bicon', '\u26f6'));
+    const tx = el('div');
+    tx.appendChild(el('div', 'btit', tit));
+    tx.appendChild(el('div', 'bdesc', desc));
+    t.appendChild(tx);
+    document.body.appendChild(t);
+    setTimeout(() => t.remove(), 5200);
+  }
+
+  function aggiorna() {
+  function aggiorna() {
+    const on = attivo();
+    // il testo si aggiorna su ENTRAMBI i pulsanti (testata e menu)
+    [_safe('btnFull'), _safe('btnFullTop')].forEach(n => {
+      if (!n) return;
+      n.setAttribute('aria-pressed', on ? 'true' : 'false');
+      const lab = n.querySelector('span:not(.ic)');
+      if (lab) lab.textContent = on ? 'Esci' : 'Schermo';
+    });
+  }
+  }
+
+  // entra davvero: ritorna true se siamo a schermo intero (o la promessa va)
+  function entra() {
+    const r = entering();
+    if (!r) return false;
+    try {
+      const p = r.call(root);
+      // Chrome/Firefox restituiscono una promessa: se il browser rifiuta
+      // (nessuna activation, gesto consumato) non dobbiamo insistere
+      if (p && p.catch) p.catch(() => {});
+      return true;
+    } catch (err) { return false; }
+  }
+
+  function primaVolta() {
+    if (attivo() || rinunciato || isStandalone()) return;
+    if (!schermoPiccolo()) return;
+    if (!entering()) {
+      // iPhone: la Fullscreen API non esiste su Safari mobile. Li' l'unica
+      // strada e' l'app installata, quindi si spiega invece di fallire
+      // in silenzio (il banner resta, non e' un blocco).
+      try {
+        if (!localStorage.getItem(KEY + '-hint')) {
+          localStorage.setItem(KEY + '-hint', '1');
+          avviso('Per vedere tutto: aggiungi l\'app',
+            'Condividi \u2192 "Aggiungi alla schermata Home", poi apri la lezione '
+            + 'dalla sua icona: spariscono le barre del browser.');
+        }
+      } catch (e) {}
+      return;
+    }
+    // il primo tocco e' il momento lecito: aggancio e vado subito a schermo intero
+    const armi = e => {
+      document.removeEventListener('pointerdown', armi, true);
+      document.removeEventListener('touchstart', armi, true);
+      document.removeEventListener('click', armi, true);
+      document.removeEventListener('keydown', armi, true);
+      entra();
+      aggiorna();
+    };
+    document.addEventListener('pointerdown', armi, true);
+    document.addEventListener('touchstart', armi, true);
+    document.addEventListener('click', armi, true);
+    document.addEventListener('keydown', armi, true);
+  }
+
+  // Un solo handler per i DUE pulsanti (testata e menu): il bottone in
+  // testata e' la richiesta dello studente, quello nel menu resta per il PC.
+  const avvia = () => {
+    if (attivo()) {
+      // uscita VOLUNTARIA: da qui in avanti non ripartiamo piu' da soli
+      try { localStorage.setItem(KEY, 'no'); } catch (e) {}
+      const e2 = uscita();
+      if (e2) { try { e2.call(document); } catch (err) {} }
+      return;
+    }
+    if (entra()) { aggiorna(); return; }
+    if (isStandalone()) {
+      avviso('Gi\u00e0 a schermo intero',
+        'La lezione occupa tutto lo schermo: esci con la freccia di iOS.');
+    } else {
+      avviso('Schermo intero',
+        'Su questo telefono: Condividi \u2192 "Aggiungi alla schermata Home".'
+        + ' Poi apri la lezione dalla sua icona: niente barre, solo attivit\u00e0.');
+    }
+  };
+  ['btnFull', 'btnFullTop'].forEach(id => {
+    const n = _safe(id);
+    if (n) n.onclick = avvia;
+  });
+
+  aggiorna();
+  ['fullscreenchange', 'webkitfullscreenchange'].forEach(ev =>
+    document.addEventListener(ev, aggiorna));
+  primaVolta();
 })();
 
 // ---------------------------------------------------------------- nav

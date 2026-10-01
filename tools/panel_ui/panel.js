@@ -77,7 +77,7 @@ function depChips(d) {
     ['edge_tts', 'edge-tts (voce)'],
     ['pypdf', 'pypdf (.pdf)'],
     ['youtube_transcript_api', 'youtube-transcript-api (YouTube)'],
-    ['faster_whisper', 'Whisper (trascrizione audio locale)'],
+    ['whisper', 'Whisper (trascrizione audio locale)'],
     ['ffmpeg', 'ffmpeg (audio)'],
   ];
   return map.map(([k, label]) =>
@@ -330,9 +330,14 @@ $('#btnCancelJob').onclick = async () => {
 };
 
 function profilo() {
+  // `accessibilita` non e' piu' un selettore del pannello: il BES/DSA si
+  // attiva dallo studente, in pagina (menu Attivita'). Qui resta il valore di
+  // impostazione, cosi' chi lo vuole può preimpostarlo da config.json o da
+  // riga di comando senza passare dal pannello.
+  const acc = $('#profAccess');
   return { durata: $('#profDurata').value, livello: $('#profLivello').value,
            obiettivo: $('#profObiettivo').value,
-           accessibilita: $('#profAccess').value };
+           accessibilita: acc ? acc.value : 'standard' };
 }
 
 async function gen(name) {
@@ -478,7 +483,8 @@ async function refreshPlayer() {
     refresh();
   } catch (e) { m.textContent = '✗ ' + e.message; }
 }
-setInterval(() => { if (busy) refreshProg(); }, 2000);
+function visibile() { return !document.hidden; }
+setInterval(() => { if (busy && visibile()) refreshProg(); }, 2000);
 
 $('#btnText').onclick = () => {
   const t = $('#txtBody').value.trim();
@@ -553,8 +559,12 @@ document.addEventListener('keydown', e => {
 $('#btnLan').onclick = loadLan;
 async function runDiagnostica() {
   const box = $('#diagnostica');
+  const btn = $('#btnDiagnostica');
+  // `hidden` e non uno stile inline: `box.hidden = false` NON annullerebbe
+  // un eventuale `style="display:none"`, e il risultato resterebbe invisibile.
   box.hidden = false;
   box.textContent = 'Controllo in corso…';
+  if (btn) btn.disabled = true;   // due clic = due richieste a /api/diagnostica
   try {
     const d = await api('diagnostica');
     const lines = [];
@@ -563,14 +573,49 @@ async function runDiagnostica() {
     else lines.push('• Indirizzo rete: non rilevato');
     lines.push('• Porta del server: ' + d.port);
     lines.push('• Wi-Fi: ' + (d.wifi_ok ? 'collegata' : 'non disponibile o da controllare'));
+    // L'IP configurato che non coincide e' la causa numero 1 del telefono che
+    // non si connette. `url_lan` e' costruito sull'IP configurato, quindi
+    // riproporlo sarebbe inutile: qui si indica l'indirizzo REALE rilevato.
     if (d.same_configured_ip === false && d.lan_ip_fisso) {
-      lines.push('• Attenzione: l\'IP configurato non coincide con quelli rilevati.');
+      const reale = (d.lan_ips || [])[0];
+      if (reale) {
+        lines.push('• Attenzione: l\'IP configurato (' + d.lan_ip_fisso + ') non è su '
+          + 'questo computer. Ora il pannello è su ' + reale + ': correggi '
+          + '"IP fisso" nelle Impostazioni, altrimenti i telefoni non si collegano.');
+      } else {
+        lines.push('• Attenzione: l\'IP configurato (' + d.lan_ip_fisso + ') non è stato '
+          + 'rilevato. Verifica la rete o lascia vuoto "IP fisso" nelle Impostazioni.');
+      }
     }
     if (d.disk_free_gb != null) lines.push('• Spazio disco: ' + d.disk_free_gb + ' GB liberi');
-    lines.push('• Firewall: Windows/ antivirus possono chiedere conferma alla prima apertura.');
+    // Le dipendenze mancanti spiegano metà dei "non funziona": senza ffmpeg
+    // non c'è audio, senza pypdf i PDF non si leggono. Erano calcolate dal
+    // backend e mai mostrate: il docente non poteva sapere perché mancava.
+    const nomi = { docx: 'documenti Word', edge_tts: 'voce (edge-tts)',
+                   pypdf: 'file PDF', youtube_transcript_api: 'trascrizioni YouTube',
+                   ffmpeg: 'audio (ffmpeg)' };
+    const mancanti = Object.keys(d.deps || {}).filter(k => !d.deps[k]);
+    if (mancanti.length) {
+      lines.push('• Funzionalità limitate, manca: '
+        + mancanti.map(k => nomi[k] || k).join(', '));
+    } else {
+      lines.push('• Tutte le funzionalità sono installate.');
+    }
+    if (d.lezioni === 0) {
+      lines.push('• Nessuna lezione generata: la lista è vuota, gli studenti '
+        + 'non hanno nulla da aprire.');
+    } else {
+      lines.push('• Lezioni disponibili: ' + d.lezioni);
+    }
+    lines.push('• Firewall: Windows/antivirus possono chiedere conferma alla prima apertura.');
     if (d.warnings && d.warnings.length) lines.push(...d.warnings.map(x => '• ' + x));
     box.textContent = lines.join('\n');
-  } catch (e) { box.textContent = 'Diagnostica non disponibile: ' + e.message; }
+  } catch (e) {
+    box.textContent = 'Diagnostica non disponibile: ' + e.message
+      + '\nVerifica che il pannello sia ancora in esecuzione, poi riprova.';
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 $('#btnDiagnostica').onclick = runDiagnostica;
 function copyText(v, btn) {
@@ -909,4 +954,9 @@ loadVoices();
 refresh();
 loadLan();
 loadSettings();
-setInterval(() => { if (!busy) refresh(); }, 4000);
+setInterval(() => { if (!busy && visibile()) refresh(); }, 4000);
+// tornando in primo piano l'elenco va ricaricato subito: con la scheda
+// nascosta i timer sono throttlati e la lista potrebbe essere vecchia
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) { refresh(); if (busy) refreshProg(); }
+});

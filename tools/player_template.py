@@ -202,11 +202,12 @@ def write_player(out_dir: Path, titolo: str, tema: str = 'dark'):
 <html lang="it" data-theme="{_esc(tema)}">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>{_esc(titolo)}</title>
 <meta name="theme-color" content="#0b111d">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="{_esc(titolo[:12])}">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="manifest" href="manifest.json">
 <link rel="stylesheet" href="main.css?v=4">
 <script>window.LESSON_DIR = {json.dumps(out_dir.name)};</script>
@@ -224,21 +225,29 @@ def write_player(out_dir: Path, titolo: str, tema: str = 'dark'):
   <span id="examTimer" class="hchip" hidden>⏱ --:--</span>
   <span id="classTimer" class="hchip" hidden>⏱ --:--</span>
   <button id="btnModeExam" class="hbtn" title="Modalità esame: domande casuali e timer">⏱<span class="hbtntxt">Esame</span></button>
-  <button id="btnMute" class="hbtn" title="Disattiva la voce per tutta la lezione" aria-pressed="false"><span class="hbtnico">🔊</span><span class="hbtntxt">Audio</span></button>
-  <button id="btnSearch" class="hbtn" title="Cerca nella lezione (F)">🔍<span class="hbtntxt">Cerca</span></button>
-  <div id="hmenu">
-    <button id="btnMenu" class="hbtn" title="Altre azioni: stampa, tema, accessibilità">☰<span class="hbtntxt">Menu</span></button>
-    <div id="hdrop" hidden>
-      <button id="btnPrint" title="Stampa / PDF della lezione intera"><span class="ic">🖨</span><span>Stampa / PDF</span></button>
-      <button id="btnTheme" title="Tema chiaro / scuro"><span class="ic">☀️</span><span>Tema chiaro / scuro</span></button>
-      <button id="btnAcc" title="Accessibilità: testo più grande, alto contrasto (Ctrl+Alt+T)"><span class="ic">♿</span><span>Accessibilità</span></button>
-      <button id="btnBadges" title="I tuoi badge collezionabili"><span class="ic">🏅</span><span>Badge</span></button>
-      <div id="accMenu" hidden>
+  <button id="btnFullTop" class="hbtn" title="Schermo intero (F11)" aria-pressed="false"><span class="hbtnico">⛶</span><span class="hbtntxt">Schermo</span></button>
+  <div id="actmenu">
+    <button id="btnAtt" class="hbtn" title="Accessibilità e strumenti di lavoro" aria-haspopup="true" aria-expanded="false">⚙<span class="hbtntxt">Attività</span></button>
+    <div id="actdrop" hidden>
+      <button id="btnBes" class="abb" aria-pressed="false" title="Modalità BES/DSA: meno opzioni, una attività alla volta, testo più grande, senza classifica">
+        <span class="abic">♿</span><span class="abtx">Modalità BES/DSA</span></button>
+      <div id="accMenu">
+        <div class="accLab">♿ Accessibilità</div>
         <button id="btnZoom" class="abar" title="Dimensione del testo (F)">A</button>
         <button id="btnContrast" class="abar" title="Alto contrasto (Ctrl+Alt+T)">◐</button>
         <button id="btnSpeed" class="abar" title="Velocita di riproduzione dell'audio">1×</button>
-        <button id="btnGloss" class="abar" title="Glossario sempre raggiungibile">📖</button>
       </div>
+    </div>
+  </div>
+  <button id="btnMute" class="hbtn" title="Disattiva la voce per tutta la lezione" aria-pressed="false"><span class="hbtnico">🔊</span><span class="hbtntxt">Audio</span></button>
+  <button id="btnSearch" class="hbtn" title="Cerca nella lezione (F)">🔍<span class="hbtntxt">Cerca</span></button>
+  <div id="hmenu">
+    <button id="btnMenu" class="hbtn" title="Altre azioni: stampa, schermo intero, tema, badge">☰<span class="hbtntxt">Menu</span></button>
+    <div id="hdrop" hidden>
+      <button id="btnPrint" title="Stampa / PDF della lezione intera"><span class="ic">🖨</span><span>Stampa / PDF</span></button>
+      <button id="btnFull" title="Schermo intero / torna alla finestra (F11)"><span class="ic">⛶</span><span>Schermo intero</span></button>
+      <button id="btnTheme" title="Tema chiaro / scuro"><span class="ic">☀️</span><span>Tema chiaro / scuro</span></button>
+      <button id="btnBadges" title="I tuoi badge collezionabili"><span class="ic">🏅</span><span>Badge</span></button>
     </div>
   </div>
 </header>
