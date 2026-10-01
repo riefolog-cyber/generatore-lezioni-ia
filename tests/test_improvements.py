@@ -667,7 +667,6 @@ def test_whisper_cpp_il_cammino_felice_non_crassa():
     download, nessuna CPU.
     """
     import json
-    import subprocess
     from types import SimpleNamespace
     import whisper_cpp
 
