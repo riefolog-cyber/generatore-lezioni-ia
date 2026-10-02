@@ -163,6 +163,36 @@ def is_url(value):
     return isinstance(value, str) and value.lower().startswith(("http://", "https://"))
 
 
+# Il docente incolla piu' link insieme: uno per riga, o separati da uno spazio
+# o da una virgola. Senza spezzarli finivano tutti dentro un unico "source" e
+# la richiesta produceva una lezione sola (o falliva: il titolo del video non
+# era piu' ricavabile dalla stringa intera).
+_LINK_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+
+# Oltre 10 link non ha senso: la coda ne tiene 5 e ogni build richiede minuti
+# di sintesi vocale. Il pannello avvisa e lascia fuori quello che eccede.
+MAX_BUILD_LINKS = 10
+
+
+def split_links(text, max_items=MAX_BUILD_LINKS):
+    """I link presenti in un testo, nell'ordine e senza ripetizioni.
+
+    Accetta un link per riga, piu' link separati da spazi o virgole e link
+    mescolati a parole ("guarda https://… e poi https://…"). Toglie la
+    punteggione finale della frase, che non fa parte dell'indirizzo.
+    """
+    trovati, visti = [], set()
+    for m in _LINK_RE.finditer(str(text or "")):
+        url = m.group(0).rstrip(".,;:!?")
+        chiave = url.lower()
+        if url and chiave not in visti:
+            visti.add(chiave)
+            trovati.append(url)
+        if len(trovati) >= max_items:
+            break
+    return trovati
+
+
 def is_youtube(url):
     host = re.sub(r"^https?://", "", url.lower()).split("/", 1)[0]
     return host in ("youtube.com", "www.youtube.com", "m.youtube.com",

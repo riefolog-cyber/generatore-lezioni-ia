@@ -161,3 +161,115 @@ def test_rifiuti_usi_json_e_drainano_il_corpo(server):
                                  "Content-Length": "5000"})
     assert status == 403
     assert json.loads(body)["ok"] is False
+
+
+# ------------------------------------------------------- piu' link insieme
+def _build(server, payload):
+    status, body = _req(server, "POST", "/api/build",
+                        body=json.dumps(payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json"})
+    return status, json.loads(body)
+
+
+@pytest.fixture
+def avvio_falso(server, monkeypatch):
+    """`start_job` registrato invece che eseguito: nessuna lezione vera, ma si
+    vede esattamente cosa il pannello accoderebbe."""
+    import panel
+    partiti = []
+
+    def fake_start(fn, kind, source):
+        partiti.append((source, fn))
+        return True, True
+
+    monkeypatch.setattr(panel, "start_job", fake_start)
+    monkeypatch.setattr(panel, "_rate_ok", lambda ip: True)
+    return partiti
+
+
+def test_build_unisce_piuo_link_in_una_lezione(server, avvio_falso):
+    """Sezione 2, piu' link: UNA sola generazione che li unisce.
+
+    Non una lezione per link: il materiale viene letto da ogni fonte e
+    accorpato in un unico documento.
+    """
+    import new_lesson
+    partiti = avvio_falso
+    usate = []
+    monkey = new_lesson.build_from_sources
+    new_lesson.build_from_sources = lambda srcs, **kw: (
+        usate.append(list(srcs)) or ("Lezione_multipla_lesson", True))
+    try:
+        links = ["https://uno.example/a", "https://due.example/b", "https://tre.example/c"]
+        status, j = _build(server, {"sources": links})
+        assert status == 200, j
+        assert j["started"] is True and j["merged"] is True
+        assert j["sources"] == links
+        assert len(partiti) == 1, "un solo job per tutti i link"
+        assert "3 fonti" in partiti[0][0]
+        partiti[0][1]()                      # esegue il job finto
+        assert usate == [links]
+    finally:
+        new_lesson.build_from_sources = monkey
+
+
+def test_build_accetta_piuo_link_incollati_in_un_link(server, avvio_falso):
+    """Il caso reale: due indirizzi incollati insieme separati da uno spazio."""
+    import new_lesson
+    partiti = avvio_falso
+    usate = []
+    monkey = new_lesson.build_from_sources
+    new_lesson.build_from_sources = lambda srcs, **kw: (
+        usate.append(list(srcs)) or ("Due_lesson", True))
+    try:
+        status, j = _build(server, {"source": "https://uno.example/a https://due.example/b"})
+        assert status == 200, j
+        assert j["merged"] is True and j["count"] == 1
+        partiti[0][1]()
+        assert usate == [["https://uno.example/a", "https://due.example/b"]]
+    finally:
+        new_lesson.build_from_sources = monkey
+
+
+def test_build_link_inutilizzabile_non_blocca_gli_altri(server, avvio_falso):
+    import new_lesson
+    partiti = avvio_falso
+    usate = []
+    monkey = new_lesson.build_from_sources
+    new_lesson.build_from_sources = lambda srcs, **kw: (
+        usate.append(list(srcs)) or ("Due_lesson", True))
+    try:
+        status, j = _build(server, {"sources": ["https://uno.example/a",
+                                                "non-e-un-link", "https://due.example/b"]})
+        assert status == 200, j
+        assert any("non-e-un-link" in s["source"] for s in j["skipped"])
+        partiti[0][1]()
+        assert usate == [["https://uno.example/a", "https://due.example/b"]]
+    finally:
+        new_lesson.build_from_sources = monkey
+
+
+def test_build_un_solo_link_resta_una_generazione_singola(server, avvio_falso):
+    """Un link sola deve fare esattamente il percorso di prima."""
+    import new_lesson
+    partiti = avvio_falso
+    usate = []
+    monkey = new_lesson.build_from_source
+    new_lesson.build_from_source = lambda src, **kw: (
+        usate.append(src) or ("Una_lesson", True))
+    try:
+        status, j = _build(server, {"source": "https://uno.example/a"})
+        assert status == 200, j
+        assert j["started"] is True and "merged" not in j
+        assert j["sources"] == ["https://uno.example/a"]
+        assert len(partiti) == 1
+        partiti[0][1]()
+        assert usate == ["https://uno.example/a"]
+    finally:
+        new_lesson.build_from_source = monkey
+
+
+def test_build_senza_link_utilizzabili_rifiuta(server, avvio_falso):
+    status, j = _build(server, {"sources": ["non-e-un-link"]})
+    assert status == 400
+    assert j["started"] is False and j["reason"]

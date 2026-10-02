@@ -4,16 +4,45 @@ from __future__ import annotations
 
 import collections
 import contextlib
+import io
 import sys
 import threading
 import time
 
 
 class LogWriter:
-    """Writer che instrada stdout/stderr del job nel log del pannello."""
+    """Writer che instrada stdout/stderr del job nel log del pannello.
+
+    Implementa l'intero protocollo text-stream, non solo `write`:
+    con la classe ridotta a `write` il job moriva a metà generazione
+    (audio neurale, slide 13) con
+    `AttributeError: 'LogWriter' object has no attribute 'flush'`,
+    perché `print(..., flush=True)` — usato in new_lesson.generate_audio,
+    nelle barre di avanzamento e nei worker TTS — chiama `flush()`.
+    Lo stesso valeva per `logging.StreamHandler(sys.stdout)` (tools.common
+    flusha a ogni record) e per tqdm, che chiede `isatty()`/`fileno()`.
+    """
+
+    encoding = "utf-8"
+    errors = "replace"
+    newlines = None
+    closed = False
 
     def __init__(self, log):
         self.log = log
+        self._bufs = {}
+
+    def _pending(self):
+        key = threading.get_ident()
+        buf = self._bufs.get(key, "")
+        self._bufs[key] = buf
+        return key, buf
+
+    def _emit(self, line):
+        stripped = line.rstrip()
+        if stripped:
+            with self.log.lock:
+                self.log.append(stripped)
 
     def write(self, text):
         # contratto file-like: restituire i caratteri davvero scritti.
@@ -21,11 +50,66 @@ class LogWriter:
         # diverso dai caratteri emessi: trappola per chi riusa la classe.
         if not text:
             return 0
-        stripped = text.rstrip()
-        if stripped:
-            with self.log.lock:
-                self.log.append(stripped)
+        # print() scrive un argomento alla volta: senza bufferare i frammenti
+        # `print("slide", 3, "ok", flush=True)` finiva sul pannello come tre
+        # righe separate ("slide", "3", "ok"). Si emette solo la riga
+        # completa, e il buffer è per-thread perché i worker della sintesi
+        # scrivono in parallelo sullo stesso redirect globale.
+        key, buf = self._pending()
+        parts = (buf + text).split("\n")
+        self._bufs[key] = parts[-1]
+        for part in parts[:-1]:
+            self._emit(part)
         return len(text)
+
+    def writelines(self, lines):
+        for line in lines:
+            self.write(line)
+
+    def flush(self):
+        """Svuota la riga parziale del thread corrente.
+
+        Il log in memoria è già visibile al pannello: flush non serve per
+        la durata, ma `print(..., flush=True)` senza newline finale deve
+        comunque comparire.
+        """
+        self.flush_all()
+        return None
+
+    def flush_all(self):
+        """Svuota i buffer di ogni thread che ha scritto.
+
+        Chiamato a fine job: un worker che muore con `print(..., end="")`
+        lascia la riga a metà nel suo thread-local, invisibile per gli altri.
+        """
+        for key in list(self._bufs):
+            buf = self._bufs.pop(key, "")
+            if buf:
+                self._emit(buf)
+
+    def isatty(self):
+        # False di proposito: tqdm/progress bar senza TTY smettono di
+        # emettere ANSI e non ripuliscono la riga a metà log.
+        return False
+
+    def fileno(self):
+        # Nessun fd: `os.fstat(sys.stdout.fileno())` deve poter fallire
+        # in modo pulito invece di trovarsi un attributo inesistente.
+        raise io.UnsupportedOperation("LogWriter non è un file reale")
+
+    def readable(self):
+        return False
+
+    def writable(self):
+        return True
+
+    def seekable(self):
+        return False
+
+    def close(self):
+        # Il redirect non "chiude" lo stream: chiudere qui lascerebbe
+        # bloccate le print successive del pannello stesso.
+        return None
 
 
 class PanelLog(collections.deque):
@@ -137,6 +221,7 @@ class JobManager:
                     with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
                         fn()
                 finally:
+                    writer.flush_all()
                     sys.stdout, sys.stderr = old_out, old_err
                 j_ok = True
                 with self.lock:

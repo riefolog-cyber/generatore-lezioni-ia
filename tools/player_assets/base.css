@@ -554,47 +554,59 @@ main { position: relative; z-index: 1; flex: 1; display: flex; min-height: 0; }
   border-radius: 11px; padding: 10px 14px; animation: rise .25s both; }
 
 /* ------------------------------------------------ audio bar */
+/* Barre in basso (audio + navigazione): tenute VOLTAMIGLIE perche' rubano
+   altezza all'attivita'. I bersagli di tocco sui schermi tattili restano
+   44px (vedi il blocco "(pointer: coarse)" piu' in basso): qui si riduce
+   l'ingombro visivo, non l'area cliccabile. */
 #audioBar {
-  position: relative; z-index: 5; display: flex; align-items: center; gap: 10px;
-  flex-wrap: wrap; padding: 9px 18px;
+  position: relative; z-index: 5; display: flex; align-items: center; gap: 8px;
+  /* UNA riga sola, sempre: play, riascolta, seek e tempo affiancati. Con
+     flex-wrap la barra andava su due-tre righe (soprattutto su finestra
+     stretta) e rubava metà schermo all'attività. */
+  flex-wrap: nowrap;
+  padding: 4px 14px;
   border-top: 1px solid var(--line);
   background: color-mix(in srgb, var(--bg2) 80%, transparent);
   backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
   transition: background .3s ease, border-color .3s ease;
 }
 #btnPlay {
-  width: 42px; height: 42px; border-radius: 50%; border: none; cursor: pointer;
-  background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--accent-ink); font-size: 16px;
-  flex: 0 0 auto; box-shadow: 0 4px 16px color-mix(in srgb, var(--accent) 45%, transparent);
+  width: 32px; height: 32px; border-radius: 50%; border: none; cursor: pointer;
+  background: linear-gradient(135deg, var(--accent), var(--accent2)); color: var(--accent-ink); font-size: 14px;
+  flex: 0 0 auto; box-shadow: 0 3px 10px color-mix(in srgb, var(--accent) 40%, transparent);
   transition: transform .15s;
 }
-#btnPlay:hover { transform: scale(1.1); }
+#btnPlay:hover { transform: scale(1.08); }
 .abar {
   border: 1px solid var(--line); background: var(--card); color: var(--text);
-  border-radius: 10px; min-width: 40px; height: 34px; padding: 0 10px; cursor: pointer;
-  font-size: 13px; font-weight: 700; flex: 0 0 auto; font-family: inherit;
+  border-radius: 9px; min-width: 32px; height: 26px; padding: 0 8px; cursor: pointer;
+  font-size: 12px; font-weight: 700; flex: 0 0 auto; font-family: inherit;
   transition: border-color .2s, color .2s, box-shadow .2s, transform .15s;
 }
 .abar:hover { border-color: var(--accent); transform: translateY(-1px); }
 /* stato attivo dei toggle: usato dai tasti velocita e play continuo */
 .abar.on { color: var(--accent-ink); background: var(--accent);
   border-color: var(--accent); font-weight: 800; }
-#seek { flex: 1; height: 7px; border-radius: 4px;
+#seek { flex: 1 1 90px; min-width: 48px; height: 5px; border-radius: 4px;
   background: color-mix(in srgb, var(--line) 75%, transparent); position: relative; cursor: pointer;
   overflow: hidden; }
 #fill { position: absolute; inset: 0; border-radius: 4px;
   background: linear-gradient(90deg, var(--accent), var(--accent2));
   transform: scaleX(0); transform-origin: left center; will-change: transform; }
-#tt { font-size: 12.5px; color: var(--muted); min-width: 92px; text-align: right;
+#tt { font-size: 12px; color: var(--muted); min-width: 0; text-align: right;
+  flex: 0 0 auto; white-space: nowrap;
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
-#cap { min-height: 22px; font-size: .82em; color: var(--muted); font-weight: 600;
-  text-align: center; flex: 1; }
+/* Il sottotitolo vive in UNA riga: è la frase che la voce sta leggendo e va
+   letta mentre avanza, ma se va a capo la barra cresce e l'attività sotto
+   sparisce. Frase lunga -> puntini di sospensione, testo intero nel tooltip. */
+#cap { font-size: .82em; color: var(--muted); font-weight: 600;
+  text-align: center; flex: 1 1 0; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* I sottotitoli NON spariscono su schermi piccoli: sotto i 760 px passavano
    a display:none, cioè lo studente su telefono restava senza la trascrizione
-   della lezione. Su schermi stretti vanno a capo, non eliminati. */
+   della lezione. Restano IN UNA RIGA (il testo intero è nel tooltip). */
 @media (max-width: 760px) {
-  #cap { font-size: .78em; min-height: 32px; }
-  #audioBar { flex-wrap: wrap; }
+  #cap { font-size: .78em; }
 }
 #audioErr { color: var(--warn, #ffd166); font-size: 12px; font-weight: 600; flex: 0 0 auto;
   border: 1px solid color-mix(in srgb, var(--warn, #ffd166) 40%, transparent);
@@ -840,27 +852,34 @@ html[data-mode="exam"] #map { opacity: .35; pointer-events: none; }
 /* ------------------------------------------------ nav */
 nav {
   position: relative; z-index: 5;
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 11px calc(18px + env(safe-area-inset-right)) calc(11px + env(safe-area-inset-bottom)) calc(18px + env(safe-area-inset-left));
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 5px calc(18px + env(safe-area-inset-right)) calc(5px + env(safe-area-inset-bottom)) calc(18px + env(safe-area-inset-left));
   background: color-mix(in srgb, var(--bg2) 80%, transparent);
   backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
   transition: background .3s ease, border-color .3s ease;
 }
 nav button {
   border: 1px solid var(--line); background: var(--card); color: var(--text);
-  border-radius: 12px; padding: 10px 20px; cursor: pointer; font-size: 14px; font-weight: 700;
+  border-radius: 10px; padding: 6px 14px; cursor: pointer; font-size: 13px; font-weight: 700;
   transition: border-color .2s, transform .15s, box-shadow .2s;
 }
 nav button:hover { border-color: var(--accent); }
 nav button.primary {
   background: linear-gradient(135deg, var(--accent), var(--accent2));
-  border: none; color: var(--accent-ink); box-shadow: 0 6px 20px color-mix(in srgb, var(--accent) 40%, transparent);
+  border: none; color: var(--accent-ink); box-shadow: 0 3px 12px color-mix(in srgb, var(--accent) 40%, transparent);
 }
-nav button.primary:hover { transform: translateY(-2px); }
+nav button.primary:hover { transform: translateY(-1px); }
 nav button:disabled { opacity: .35; cursor: default; transform: none !important; box-shadow: none !important; }
 button:active:not(:disabled) { transform: scale(.96); }
-#dots { display: flex; gap: 7px; flex-wrap: wrap; justify-content: center; align-items: center; }
-#dots button { position: relative; padding: 0; border: none; font: inherit;
+/* I pallini stanno su UNA riga scorrevole a ogni larghezza: con 35 slide
+   andavano a tre righe e la barra di navigazione diventava alta metà schermo.
+   Il pallino corrente viene riportato in vista da paintDots(). */
+#dots { display: flex; gap: 7px; flex-wrap: nowrap; justify-content: center;
+  align-items: center; flex: 1 1 auto; min-width: 0;
+  overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+  -ms-overflow-style: none; overscroll-behavior-x: contain; }
+#dots::-webkit-scrollbar { display: none; }
+#dots button { position: relative; padding: 0; border: none; font: inherit; flex: 0 0 auto;
   width: 12px; height: 12px; border-radius: 50%;
   background: var(--line); background-clip: padding-box;
   border: 5px solid transparent; /* area di tocco allargata, pallino invariato */
@@ -1135,7 +1154,7 @@ button, .hchip, #seek, .abar, .hbtn {
   .hbtn .hbtntxt { display: none; }
   .hbtn { padding: 6px 10px; }
   /* nav su due righe: dots sopra, pulsanti sotto a tutta larghezza */
-  nav { flex-wrap: wrap; gap: 9px; padding: 10px 12px; }
+  nav { flex-wrap: wrap; gap: 6px; padding: 6px 12px; }
   /* dots: una riga sola e scorrevole invece di piu righe di pallini
      enormi, che si mangiavano meta' schermo e nascondevano l'attivita' */
   #dots {
@@ -1146,8 +1165,8 @@ button, .hchip, #seek, .abar, .hbtn {
   #dots::-webkit-scrollbar { display: none; }
   /* i pallini restano pallini: niente flex: 1 1 0 (-> ellissi giganti) */
   #dots button { flex: 0 0 auto; }
-  nav button { flex: 1 1 0; padding: 11px 8px; font-size: 13.5px; white-space: nowrap; }
-  #audioBar { gap: 8px; padding: 8px 12px; }
+  nav button { flex: 1 1 0; padding: 7px 8px; font-size: 13px; white-space: nowrap; }
+  #audioBar { gap: 6px; padding: 4px 12px; }
   #tt { min-width: 0; }
   .clzones { grid-template-columns: 1fr; }
   #map { gap: 7px; padding: 8px 12px 2px; }

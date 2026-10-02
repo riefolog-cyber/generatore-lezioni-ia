@@ -346,6 +346,11 @@ def _regole_adattive(nchars, profilo=None):
   "errore" riporta ESATTAMENTE le parole sbagliate del brano).
 - Ogni modulo ha ESATTAMENTE 3 "flashcards" termine/definizione sui concetti
   chiave (definizioni brevi, definizioni diverse tra loro).
+- Ogni modulo ha 1 "quiz_esame": domanda di SINTESI (mette insieme piu' concetti
+  del modulo), diversa dal "quiz" di questo modulo.
+- Ogni modulo ha 2 "workbook" (risposta libera breve, 3-12 parole, con 2-3
+  "chiavi" obbligatorie): una di definizione, una di applicazione. Se il
+  modulo non offre niente da far scrivere, riducile a 1.
 - SOLO se il materiale offre concetti raggruppabili in 2-3 CATEGORIE nette
   (es. cause/effetti, vero/mito, tipi), aggiungi anche "classificazione":
   2-3 categorie, 4-6 elementi (testo breve max 6 parole, categoria esistente).
@@ -364,6 +369,10 @@ def _regole_adattive(nchars, profilo=None):
   "errore" riporta ESATTAMENTE le parole sbagliate del brano).
 - Ogni modulo ha ESATTAMENTE 3 "flashcards" termine/definizione sui concetti
   chiave (definizioni brevi, definizioni diverse tra loro).
+- Ogni modulo ha 1 "quiz_esame": domanda di SINTESI (mette insieme piu' concetti
+  del modulo), diversa dal "quiz" di questo modulo.
+- Ogni modulo ha 2 "workbook" (risposta libera breve, 3-12 parole, con 2-3
+  "chiavi" obbligatorie): una di definizione/spiegazione, una di applicazione.
 - SOLO se il materiale offre concetti raggruppabili in 2-3 CATEGORIE nette
   (es. cause/effetti, vero/mito, tipi), aggiungi anche "classificazione":
   2-3 categorie, 4-6 elementi (testo breve max 6 parole, categoria esistente).
@@ -794,7 +803,7 @@ def _llm_attivita_moduli(struct, testo, regole, profilo, models):
         return
     campi = ("quiz_narrazione", "quiz", "quiz_esame", "abbinamenti", "vero_falso",
              "sequenza", "compila", "scenari", "errori", "classificazione",
-             "flashcards")
+             "flashcards", "workbook")
     # istruzioni di profilo calcolate UNA volta, non una per modulo
     istruzioni = profilo_istruzioni(profilo)
     reuse = CONFIG.get("llm_cache_attivita", True)
@@ -814,11 +823,21 @@ def _llm_attivita_moduli(struct, testo, regole, profilo, models):
         # contesto: finestra attorno al modulo, non la TESTA del documento.
         # testo[:1500] era identico per ogni modulo E già inviato per intero
         # nella chiamata di fase 1: 1500 caratteri ridondanti per modulo.
+        # il livello Bloom del modulo entra nel prompt: e' lui che decide quali
+        # attività servono (ricordare per una comprensione, analizzare per
+        # un'analisi) e senza questo il modello rispondeva sempre con lo
+        # stesso mix, indipendentemente dall'obiettivo del modulo
+        bloom = _bloom_valido(modulo.get("bloom"))
+        obiettivo_modulo = (
+            f"- Livello Bloom di QUESTO modulo: {bloom}. Scegli le attività "
+            f"adatte a {BLOOM_LABEL.get(bloom, bloom)}: "
+            f"{_ATTIVITA_PER_BLOOM.get(bloom, '')}\n" if bloom else "")
         prompt = PROMPT_ATTIVITA.format(
             indice=posizione + 1, totale=len(moduli),
             modulo=json.dumps({k: modulo.get(k) for k in ("titolo", "testo", "punti", "keywords")},
                               ensure_ascii=False),
-            regole=regole, schema_modulo=SCHEMA_MODULO,
+            regole=regole + "\n" + obiettivo_modulo,
+            schema_modulo=SCHEMA_MODULO,
             profilo_istruzioni=istruzioni,
             contesto=_contesto_modulo(testo, modulo, posizione, len(moduli)))
         try:
@@ -1402,6 +1421,17 @@ BLOOM_VALIDI = ("conoscenza", "comprensione", "applicazione", "analisi")
 BLOOM_LABEL = {"conoscenza": "Conoscenza", "comprensione": "Comprensione",
                "applicazione": "Applicazione", "analisi": "Analisi"}
 
+# Quale attività favorisce quale livello Bloom. Le rotazioni sotto servono a
+# SCEGLIERE le slide; questa mappa arriva anche al prompt, così il modello
+# genera attività adatte all'obiettivo del singolo modulo e non sempre lo
+# stesso mix di quattro tipi.
+_ATTIVITA_PER_BLOOM = {
+    "conoscenza": "ricordare e riconoscere: vero/falso, compila il vuoto, flashcards.",
+    "comprensione": "spiegare e collegare: vero/falso, sequenza, scenario, workbook.",
+    "applicazione": "usare una regola o una procedura: scenario, sequenza, workbook, compila.",
+    "analisi": "distinguere e valutare: trova l'errore, classificazione, workbook.",
+}
+
 
 def _bloom_valido(v):
     """Normalizza un livello Bloom dichiarato dall'LLM, o None."""
@@ -1447,25 +1477,30 @@ def bloom_rubric_text(profilo, stats):
 # La classifica (trascina nella categoria) entra nella rotazione dalle slide
 # successive: compare circa ogni 4 moduli (es. al 5°), così il tipo resta una
 # sorpresa e non affolla i primi moduli.
-EXTRA_ROTATION_CLASS = ["vf", "compila", "seq", "classifica", "errore", "flashcards",
-                         "workbook"]
+EXTRA_ROTATION_CLASS = ["vf", "compila", "seq", "classifica", "errore", "scenario",
+                         "flashcards", "workbook"]
 
 # Priorità di profondità: quando un modulo ha PIÙ attività di quante ne
 # mostriamo, si tiene la più profonda (analisi > applicazione > comprensione >
 # conoscenza). Prima la rotazione ciclica poteva assegnare `seq` a un modulo
 # senza sequenze (sprecando un intero turno) e, con 8+ moduli, finiva sempre
 # sulle stesse due voci.
-EXTRA_PRIORITY = ["classifica", "errore", "scenario", "seq", "match",
+# `match` NON e' qui: e' l'unico tipo senza slide propria (vive solo nel
+# riepilogo finale), quindi metterlo in rotazione consumava un turno che
+# poi non produceva nulla.
+EXTRA_PRIORITY = ["classifica", "errore", "scenario", "seq",
                   "workbook", "compila", "vf", "flashcards"]
 
 # Rotazioni per obiettivo Bloom: l'obiettivo scelto dal docente cambia
-# DAVVERO il tipo di attività, non solo il testo del prompt. "auto" mantiene
-# la rotazioneAmpia, con garanzia di copertura.
+# DAVVERO il tipo di attività, non solo il testo del prompt. Vale per
+# l'obiettivo della lezione E per il livello Bloom dichiarato da ogni
+# modulo (vedi `_extra_keys`). "auto" mantiene la rotazione ampia, con
+# garanzia di copertura.
 ROT_PER_BLOOM = {
-    "conoscenza":   ["vf", "compila", "flashcards", "workbook", "seq", "match"],
-    "comprensione": ["vf", "match", "flashcards", "workbook", "scenario", "seq"],
+    "conoscenza":   ["vf", "compila", "flashcards", "workbook", "seq"],
+    "comprensione": ["vf", "flashcards", "workbook", "scenario", "seq"],
     "applicazione": ["scenario", "seq", "errore", "workbook", "compila", "vf"],
-    "analisi":      ["errore", "classifica", "workbook", "seq", "scenario", "match"],
+    "analisi":      ["errore", "classifica", "workbook", "seq", "scenario"],
     "auto":         EXTRA_ROTATION_CLASS,
 }
 
@@ -1524,7 +1559,9 @@ def _modulo_ha(modulo, tipo):
     chiave = CAMPO_DI.get(tipo, tipo)
     v = modulo.get(chiave)
     if chiave in ("flashcards",):
-        return isinstance(v, list) and len(v) >= 1
+        # build_slides pretende almeno 2 carte: con 1 sola il modulo passava
+        # il gate e non produceva nessuna slide (turno sprecato)
+        return isinstance(v, list) and len(v) >= 2
     if chiave in ("abbinamenti",):
         return isinstance(v, list) and len(v) >= 2
     if chiave in ("vero_falso",):
@@ -1540,7 +1577,15 @@ def _modulo_ha(modulo, tipo):
     if chiave in ("sequenza",):
         # _check_struct richiede >= 3 passi
         return isinstance(v, dict) and len(v.get("passi") or []) >= 3
-    if chiave in ("errori", "scenari"):
+    if chiave == "errori":
+        return isinstance(v, list) and len(v) >= 1
+    if chiave == "scenari":
+        # _check_struct tiene il PRIMO scenario e lo lascia come dizionario:
+        # guardando solo `isinstance(list)` il tipo non entrava MAI nella
+        # rotazione e "Cosa faresti?" non compariva in nessuna lezione,
+        # nonostante il player sappia disegnarlo e il contatore lo dichiarasse
+        if isinstance(v, dict):
+            return bool(v.get("situazione"))
         return isinstance(v, list) and len(v) >= 1
     if chiave in ("classificazione",):
         # chiave normalizzata `elementi`, >= 4 elementi su >= 2 categorie
@@ -1566,8 +1611,16 @@ def _extra_keys(i, modulo=None, profilo=None, usati=()):
     "Trova l'errore" ovunque (misurato su una build reale). Con il passo 1, su
     una lezione in cui l'LLM ha prodotto 8 tipi diversi, ogni tipo compare una
     volta sola finché ce ne sono.
+
+    La rotazione segue il livello Bloom che il modello ha dichiarato per
+    QUEL modulo, non solo l'obiettivo generale della lezione: un modulo di
+    Conoscenza non merita un'analisi crittica, e viceversa. Il modello può
+    sbagliare il livello dichiarato: in quel caso il gate `disponibili` (che
+    richiede che l'attività esista davvero nel modulo) impedisce comunque di
+    proporre qualcosa che il materiale non contiene.
     """
-    obiettivo = (profilo or {}).get("obiettivo") or "auto"
+    obiettivo = _bloom_valido((modulo or {}).get("bloom")) or \
+        (profilo or {}).get("obiettivo") or "auto"
     rot = ROT_PER_BLOOM.get(obiettivo) or EXTRA_ROTATION_CLASS
     maxn = _extra_max(profilo)
     if modulo is None:
@@ -1763,14 +1816,21 @@ def build_slides(struct, draft=False, profilo=None):
                         "Ora ordina gli elementi: trascina o clicca ciascuno nella categoria giusta.",
                         ICONS["classifica"])
 
-    # abbinamento riepilogo (una sola attività, presa da tutti i moduli)
+    # abbinamento riepilogo (una sola attività, presa da tutti i moduli):
+    # ora 2 coppie per modulo e non 1, altrimenti il riepilogo pesava una
+    # frazione minima del materiale della lezione
     pairs = []
     for m in moduli:
+        n = 0
         for ab in m.get("abbinamenti", []):
             if ab.get("termine") and ab.get("definizione"):
-                pairs.append({"term": ab["termine"], "def": ab["definizione"]})
+                coppia = {"term": ab["termine"], "def": ab["definizione"]}
+                if coppia not in pairs:
+                    pairs.append(coppia)
+                    n += 1
+            if n >= 2:
                 break
-        if len(pairs) >= 6:
+        if len(pairs) >= 8:
             break
     if len(pairs) >= 2:
         add("Mettiti alla prova: abbina",
@@ -1794,8 +1854,11 @@ def build_slides(struct, draft=False, profilo=None):
             if s["title"].startswith(f"Modulo {i + 1} –"):
                 mod_slide_idx[i] = si
 
-    # esame finale: domande dedicate di sintesi (non la copia dei quiz)
-    exam = build_final_exam(moduli)
+    # esame finale: domande dedicate di sintesi (non la copia dei quiz).
+    # il tetto di 5 domande lasciava fuori gli ultimi moduli di una lezione
+    # da 7-8 moduli: ora copre tutti i moduli, con un massimo per non
+    # trasformare la fine del percorso in un interrogatorio.
+    exam = build_final_exam(moduli, max_q=min(len(moduli), 8))
     for j, eq in enumerate(exam):
         # la soglia è calcolata sul totale REALE delle domande emesse e
         # mostrata al docente nel report; il player la ricalcola e la applica
@@ -2551,6 +2614,82 @@ def build_from_source(path, force=False, bozza=False, no_cache=False,
         _unlock_build()
 
 
+def _merge_sources(estrazioni, fonti=()):
+    """Unisce piu' estrazioni in UN solo materiale didattico.
+
+    Il docente che incolla tre link vuole UNA lezione che li metta insieme,
+    non tre lezioni: qui le sezioni di ogni fonte vengono accodate con
+    l'intestazione della fonte, cosi' il LLM vede un unico documento e sa
+    dire quale link sta usando per ogni modulo.
+    """
+    n = len(estrazioni)
+    titoli, sections = [], []
+    for i, ext in enumerate(estrazioni, 1):
+        titolo = (ext.get("title") or "").strip() or f"Fonte {i}"
+        titoli.append(titolo)
+        gruppo = f"Fonte {i} — {titolo}" if n > 1 else titolo
+        for j, sec in enumerate(ext.get("sections") or []):
+            paras = list(sec.get("paras") or [])
+            if not paras:
+                continue
+            # ogni sezione senza intestazione propria porta il nome del gruppo:
+            # cosi' il LLM sa da quale link arriva, anche in mezzo al testo
+            heading = sec.get("heading") or (gruppo if n > 1 else None)
+            sections.append({"heading": heading, "paras": paras})
+    titolo_lezione = (" — ".join(t[:60] for t in titoli) if n <= 2
+                      else f"{titoli[0][:50]} — +{n - 1} altre fonti")
+    return {"title": titolo_lezione, "sections": sections, "fonti": list(fonti)}
+
+
+def build_from_sources(sources, force=False, bozza=False, no_cache=False,
+                       single=False, keep_folder=False, profilo=None):
+    """UNA lezione che unisce il contenuto di piu' fonti (link o file).
+
+    Usata dalla sezione "genera da link" del pannello quando gli indirizzi
+    sono piu' di uno: i materiali vengono letti uno alla volta (cosi' il
+    log dice quale link sta leggendo) e poi uniti in un solo documento.
+    """
+    sources = [str(s) for s in (sources or []) if str(s or "").strip()]
+    if not sources:
+        raise ValueError("Nessuna fonte da generare.")
+    if not _lock_build():
+        print(f"  ⚠ Un'altra generazione è già in corso ({LOCK.name} presente): "
+              "salto la lezione multi-fonte.")
+        return None, False
+    try:
+        from sources import extract_source
+        estrazioni = []
+        for i, src in enumerate(sources, 1):
+            display = src if is_url(src) else Path(src).name
+            _set_progress("lettura materiale", 3, f"fonte {i}/{len(sources)}: {display}")
+            print(f"\n[fonte {i}/{len(sources)}] {display}", flush=True)
+            try:
+                estrazioni.append(extract_source(src))
+            except Exception as exc:  # noqa: BLE001
+                # una fonte irraggiungibile non annulla le altre: la lezione
+                # esce con i materiali che sono arrivati, e il motivo resta
+                # nel log
+                print(f"  ⚠ fonte {i} non utilizzabile ({str(exc)[:140]}): "
+                      "la lezione continua con le altre", flush=True)
+        if not estrazioni:
+            raise ValueError("Nessuna delle fonti indicate è utilizzabile.")
+        if len(estrazioni) < len(sources):
+            print(f"  → lezione costruita su {len(estrazioni)}/{len(sources)} fonti.",
+                  flush=True)
+        est = _merge_sources(estrazioni, fonti=sources)
+        etichette = ", ".join((e.get("title") or "")[:48] for e in estrazioni)
+        return _build_impl(None, force=force, bozza=bozza, no_cache=no_cache,
+                           single=single, keep_folder=keep_folder, profilo=profilo,
+                           ext=est, display=f"{len(estrazioni)} fonti ({etichette})")
+    finally:
+        try:
+            from sources import set_transcription_progress
+            set_transcription_progress(None)
+        except Exception:
+            pass
+        _unlock_build()
+
+
 PROGRESS_FILE = BASE / ".progress.json"
 
 
@@ -2579,8 +2718,9 @@ def _complete_modules(testo, struct, nmin, profilo):
     mini_prompt = (
         "Aggiungi ESATTAMENTE {need} moduli didattici sullo stesso materiale, "
         "stesso schema JSON dei moduli "
-        "(titolo/testo/punti/keywords/narrazione/quiz_narrazione/quiz/abbinamenti/"
-        "vero_falso/sequenza/compila/scenari/errori/flashcards). "
+        "(titolo/testo/punti/keywords/narrazione/quiz_narrazione/quiz/quiz_esame/"
+        "abbinamenti/vero_falso/sequenza/compila/scenari/errori/classificazione/"
+        "flashcards/workbook). "
         # NB: le graffe del JSON sono raddoppiate "{{" / "}}". Con una sola
         # coppia, `.format()` le leggeva come placeholder: il retry parziale
         # moriva subito con KeyError('"moduli"') e la lezione restava con
@@ -2611,10 +2751,11 @@ def _complete_modules(testo, struct, nmin, profilo):
 
 
 def _build_impl(source, force=False, bozza=False, no_cache=False,
-                single=False, keep_folder=False, profilo=None):
+                single=False, keep_folder=False, profilo=None, ext=None, display=None):
     log = setup_logging()
-    src = str(source)
-    display = src if is_url(src) else Path(src).name
+    src = str(source or "")
+    if display is None:
+        display = src if is_url(src) else (Path(src).name if src else "materiale")
 
     t0 = time.time()
     _times = {}
@@ -2647,18 +2788,36 @@ def _build_impl(source, force=False, bozza=False, no_cache=False,
         _set_progress("trascrizione audio Whisper", overall, extra)
     set_transcription_progress(_transcription_progress)
     t_read = time.time()
-    ext = extract_source(src)
+    if ext is None:
+        ext = extract_source(src)
     _times["lettura"] = round(time.time() - t_read, 1)
     print(f'[1/6] Materiale letto ({len(ext["sections"])} sezioni), '
           f'titolo: {ext["title"][:60]}')
 
-    stem = sanitize_stem(ext["title"] if is_url(src) else Path(src).stem)
+    nome_base = Path(src).stem if (src and not is_url(src)) else ext["title"]
+    stem = sanitize_stem(nome_base)
+    if len(ext.get("fonti") or []) > 1:
+        # piu' fonti unite: il nome preso dal primo titolo non distingue due
+        # insiemi diversi che iniziano dallo stesso link (A+B e poi A+C finivano
+        # nella stessa cartella, la seconda build diceva "esiste gia'"), quindi
+        # il nome porta l'impronta breve dell'insieme di link
+        impronta = hashlib.sha1("|".join(ext["fonti"]).encode("utf-8")).hexdigest()[:6]
+        stem = f"{stem[:33]}_{impronta}"
     out_dir = BASE / f"{stem}_lesson"
-    if out_dir.exists() and not force:
+    if out_dir.exists() and not force and (out_dir / "lesson-data.js").is_file():
         print(f"  → {out_dir.name} esiste già, salto (usa --force per rigenerare)")
         return out_dir, False
+    if out_dir.exists():
+        # cartella a meta' (build interrotta: il player c'e', i dati no). Non e'
+        # una lezione, quindi non deve BLOCCARE la nuova generazione: il
+        # Professore riscriveva la lezione e si trovava davanti un "esiste
+        # gia', salto" con la lezione mai generata, e in pannello una cartella
+        # vuota. Qui la cartella viene raddoppiata con `rmtree` piu' sotto.
+        print(f"  → {out_dir.name} incompleta (generazione interrotta): "
+              "la ricostruisco", flush=True)
 
-    _set_progress("strutturazione LLM", 15)
+    _set_progress("strutturazione LLM", 15,
+                  "il modello struttura i contenuti: può durare qualche minuto")
     t_llm = time.time()
     if bozza:
         print("[2/6] Modalità BOZZA: salto LLM, struttura dal docx (senza quiz).")
@@ -2687,9 +2846,13 @@ def _build_impl(source, force=False, bozza=False, no_cache=False,
     n_sc = sum(1 for m in moduli if m.get("scenari"))
     n_er = sum(1 for m in moduli if m.get("errori"))
     n_fc = sum(1 for m in moduli if m.get("flashcards"))
+    n_cl = sum(1 for m in moduli if m.get("classificazione"))
+    n_wb = sum(1 for m in moduli if m.get("workbook"))
+    n_ex = sum(1 for m in moduli if m.get("quiz_esame"))
     print(f"  Moduli: {len(moduli)} | Quiz: {n_quiz} | V/F: {n_vf} | Sequenze: {n_seq} | "
           f"Compila: {n_cp} | Scenari: {n_sc} | Errori: {n_er} | Abbinamenti: {n_ab} | "
-          f"Flashcards: {n_fc}")
+          f"Flashcards: {n_fc} | Classifica: {n_cl} | Quaderno: {n_wb} | "
+          f"Domande d'esame: {n_ex}")
 
     _set_progress("costruzione slide", 55)
     print("[3/6] Costruisco le slide (narrazione dentro ogni passaggio)…")
@@ -2698,6 +2861,10 @@ def _build_impl(source, force=False, bozza=False, no_cache=False,
     _times["slide"] = round(time.time() - t_sl, 1)
 
     if out_dir.exists():
+        if force and (out_dir / "lesson-data.js").is_file():
+            # rigenerazione esplicita su una lezione gia' buona: lo dice, cosi'
+            # il docente non crede di aver generato una lezione nuova
+            print(f"  → rigenero {out_dir.name} (sostituisco la lezione esistente)")
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
 
@@ -2726,7 +2893,9 @@ def _build_impl(source, force=False, bozza=False, no_cache=False,
     print(f'Slide: {stats["slide"]} | Quiz: {stats["quiz"]} | V/F: {stats.get("vf", 0)} | '
           f'Sequenze: {stats.get("seq", 0)} | Compila: {stats.get("compila", 0)} | '
           f'Scenari: {stats.get("scenario", 0)} | Errori: {stats.get("errore", 0)} | '
-          f'Matching: {stats["matching"]} | Audio: {stats["audio"]}')
+          f'Matching: {stats["matching"]} | Flashcards: {stats.get("flashcards", 0)} | '
+          f'Classifica: {stats.get("classifica", 0)} | Quaderno: {stats.get("workbook", 0)} | '
+          f'Audio: {stats["audio"]}')
     if errs:
         print("ERRORI:")
         for e in errs:

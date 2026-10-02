@@ -136,6 +136,20 @@ def _modulo_ricco():
         flashcards=[{"termine": "t", "definizione": "d"}])
 
 
+def _modulo_ricco_con_bloom(bloom):
+    """`_modulo_ricco` + il livello Bloom che il modello dichiara."""
+    m = _modulo_ricco()
+    m["scenari"] = {"situazione": "s", "opzioni": [{"testo": "a", "corretta": True},
+                                                  {"testo": "b", "corretta": False}]}
+    m["classificazione"] = {
+        "categorie": ["A", "B"],
+        "elementi": [{"testo": "x", "categoria": "A"}, {"testo": "y", "categoria": "B"},
+                     {"testo": "z", "categoria": "A"}, {"testo": "w", "categoria": "B"}]}
+    m["flashcards"] = [{"termine": "t", "definizione": "d"}] * 2
+    m["bloom"] = bloom
+    return m
+
+
 def test_extra_keys_usa_solo_attivita_disponibili():
     """Il modulo ha solo vero/falso e un quiz: la rotazione non deve assegnare
     `seq` o `classifica`, che il costruttore scarterebbe."""
@@ -264,6 +278,87 @@ def test_workbook_finisce_in_una_slide():
     assert set(blocchi[0]["workbook"][0]) == {"q", "r", "k", "sp", "ai"}
 
 
+def test_workbook_arriva_dal_modello_alle_slide(monkeypatch):
+    """Il quaderno esisteva in ogni pezzo del codice tranne in UNO: la lista dei
+    campi copiati dalla risposta del modello. Il tipo non entrava mai nella
+    lezione, perche' la risposta veniva scartata prima di arrivare al modulo."""
+    risposta = {"workbook": [
+        {"domanda": "Definisci il rischio", "risposta": "la probabilita' di danno",
+         "chiavi": ["probabilita", "danno"]},
+        {"domanda": "Applica il concetto", "risposta": "valuto prima la probabilita",
+         "chiavi": ["probabilita"]}]}
+    monkeypatch.setattr(nl, "_llm_json", lambda *a, **k: (dict(risposta), "modello"))
+    monkeypatch.setitem(nl.CONFIG, "llm_cache_attivita", False)
+    struct = {"titolo": "T", "moduli": [_modulo_con(titolo="M")]}
+    nl._llm_attivita_moduli(struct, "testo del modulo", "- regole", {},
+                            ["modello"])
+    assert struct["moduli"][0].get("workbook"), (
+        "il workbook prodotto dal modello non e' finito nel modulo")
+    slides = nl.build_slides(struct, profilo={"obiettivo": "applicazione"})
+    assert any(b.get("workbook") for s in slides for b in (s.get("blocks") or []))
+
+
+# ------------------------------------------------- scenario: attivita' mai usata
+def test_scenario_ammesso_anche_normalizzato_come_dizionario():
+    """`_check_struct` tiene il primo scenario e lo lascia come dizionario,
+    ma il gate accettava solo una lista: "Cosa faresti?" non entrava mai nella
+    rotazione e non compariva in nessuna lezione."""
+    assert nl._modulo_ha({"scenari": {"situazione": "s", "opzioni": []}},
+                         "scenario") is True
+    # la forma lista resta valida (l'LLM puo' non essere normalizzato)
+    assert nl._modulo_ha({"scenari": [{"situazione": "s"}]}, "scenario") is True
+    assert nl._modulo_ha({"scenari": []}, "scenario") is False
+    assert nl._modulo_ha({"scenari": {}}, "scenario") is False
+
+
+def test_scenario_finisce_in_una_slide():
+    m = _modulo_con(scenari=[{"situazione": "Un allarme suona in classe",
+                              "opzioni": [
+                                  {"testo": "a", "corretta": True},
+                                  {"testo": "b", "corretta": False},
+                                  {"testo": "c", "corretta": False}],
+                              "conclusione": "perche' si agisce cosi'"}])
+    nl._check_struct({"moduli": [m]})
+    slides = nl.build_slides({"titolo": "T", "moduli": [m]},
+                             profilo={"obiettivo": "applicazione"})
+    blocchi = [b for s in slides for b in (s.get("blocks") or [])
+               if b.get("scenario")]
+    assert blocchi, "lo scenario non e' finito in nessuna slide"
+    assert len(blocchi[0]["scenario"]["opts"]) == 3
+
+
+def test_flashcards_solo_con_due_carte():
+    """Con una carta sola il modulo passava il gate e non produceva slide:
+    un turno di rotazione sprecato."""
+    assert nl._modulo_ha({"flashcards": [{"termine": "t", "definizione": "d"}]},
+                         "flashcards") is False
+    assert nl._modulo_ha({"flashcards": [{"termine": "t", "definizione": "d"}] * 2},
+                         "flashcards") is True
+
+
+def test_match_non_consuma_turni_di_rotazione():
+    """Il riepilogo "abbina" e' l'unico tipo senza slide propria: metterlo in
+    rotazione assegnava un turno che poi non produceva nessuna attivita'."""
+    for rot in nl.ROT_PER_BLOOM.values():
+        assert "match" not in rot
+    assert "match" not in nl.EXTRA_PRIORITY
+
+
+def test_rotazione_segue_il_bloom_del_modulo():
+    """L'obiettivo della lezione non basta: ogni modulo dichiara il proprio
+    livello Bloom, e le attività devono seguirlo."""
+    ricco = _modulo_ricco()
+    conoscenza = _modulo_ricco_con_bloom("conoscenza")
+    analisi = _modulo_ricco_con_bloom("analisi")
+    scelte_c = nl._extra_keys(0, modulo=conoscenza, profilo={"obiettivo": "analisi"})
+    scelte_a = nl._extra_keys(0, modulo=analisi, profilo={"obiettivo": "conoscenza"})
+    assert scelte_c != scelte_a, (
+        "il Bloom del modulo non cambia le attivita' proposte")
+    # il profilo resta il fallback quando il modulo non dichiara un livello
+    assert nl._extra_keys(0, modulo=ricco, profilo={"obiettivo": "conoscenza"}) == \
+        nl._extra_keys(0, modulo=_modulo_ricco(), profilo={"obiettivo": "conoscenza"})
+
+
 # ------------------------------------------------------------ build_final_exam
 def _modulo_esame(chiave, testo="d"):
     q = {"domanda": f"domanda {testo}",
@@ -294,6 +389,29 @@ def test_esame_ripresa_segnalata_ma_mai_silenziosamente():
 def test_esame_rispetta_il_tetto():
     moduli = [_modulo_esame("quiz_esame", f"d{i}") for i in range(9)]
     assert len(nl.build_final_exam(moduli, max_q=5)) == 5
+
+
+def test_esame_coverre_tutti_i_moduli_una_lezione_lunga():
+    """Con il tetto fisso di 5 domande, gli ultimi 2-3 moduli di una lezione da
+    7-8 moduli non venivano mai esaminati."""
+    moduli = [_modulo_esame("quiz_esame", f"d{i}") for i in range(8)]
+    assert len(nl.build_final_exam(moduli, max_q=min(len(moduli), 8))) == 8
+
+
+def test_esame_copre_i_moduli_oltre_quinto():
+    """Verifica end-to-end: dalla struttura alle slide di esame."""
+    moduli = []
+    for i in range(7):
+        q = {"domanda": f"sintesi {i}",
+             "opzioni": [{"testo": "a", "corretta": True},
+                        {"testo": "b", "corretta": False}],
+             "ok": "ok", "ko": "ko"}
+        moduli.append(_modulo_con(titolo=f"Modulo {i + 1}", quiz=q, quiz_esame=q))
+    slides = nl.build_slides({"titolo": "T", "moduli": moduli},
+                             profilo={"obiettivo": "comprensione"})
+    esame = [b for s in slides for b in (s.get("blocks") or [])
+             if (b.get("quiz") or {}).get("exam")]
+    assert len(esame) == 7, f"solo {len(esame)} domande d'esame su 7 moduli"
 
 
 def test_esame_opzioni_brevi_e_corretta_presente():

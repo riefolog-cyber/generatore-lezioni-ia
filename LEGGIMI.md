@@ -8,7 +8,9 @@ il **pannello di controllo** (pagina grafica), con cui puoi:
 1. caricare il **materiale**: trascinalo nella zona tratteggiata del pannello
    o usa "Sfoglia" (documenti, `.pptx`, `.epub`, `.mp3`, `.m4a`, `.wav`) e premi
    **Carica e genera**;
-2. generare da **link** (sito web o video YouTube);
+2. generare da **link** (sito web o video YouTube): ne puoi incollare **più di
+   uno**, uno per riga, e allora viene generata **una sola lezione che ne unisce
+   i contenuti** (fino a 10 link per richiesta);
 3. impostare il **profilo lezione**: durata (breve/standard/approfondita),
    livello (base/intermedio/avanzato), obiettivo Bloom
    (conoscenza/comprensione/applicazione/analisi) e accessibilità

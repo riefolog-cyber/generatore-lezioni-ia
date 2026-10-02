@@ -84,6 +84,10 @@ def lesson_info(base, name):
         "size": size,
         "duration": round(duration, 1),
         "modified": lesson.stat().st_mtime,
+        # cartella a meta': il player c'e' ma i dati no. Il pannello non la
+        # mostra come apribile e non la offre agli alunni (start_lesson.
+        # list_lessons la esclude dall'indice e dal server).
+        "incompleta": not (lesson / "lesson-data.js").is_file(),
     }
 
 

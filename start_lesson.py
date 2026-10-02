@@ -29,8 +29,22 @@ except Exception:
     safe_request_path = None  # guardia anti-traversal non disponibile
 
 
-def list_lessons():
+def list_lesson_dirs():
+    """Cartelle *_lesson con l'index del player, anche se i dati non ci sono."""
     return sorted(p for p in BASE.glob("*_lesson") if p.is_dir() and (p / "index.html").exists())
+
+
+def list_lessons():
+    """Lezioni COMPLETE, cioè apribili.
+
+    Serve anche `lesson-data.js`: il player lo carica per primo e, se manca,
+    lo studente cade su un 404 e su una pagina bianca. Una build interrotta
+    (Ctrl+C, rete caduta, errore in sintesi) scrive il player prima dell'audio
+    e i dati solo alla fine: la cartella a meta' finiva cosi' nell'indice e
+    nel pannello come se fosse pronta. Il pannello la mostra lo stesso, ma
+    etichettata "incompleta" e senza link (vedi tools/lesson_admin.lesson_info).
+    """
+    return [p for p in list_lesson_dirs() if (p / "lesson-data.js").is_file()]
 
 
 def find_port(start=DEFAULT_PORT, tries=10):

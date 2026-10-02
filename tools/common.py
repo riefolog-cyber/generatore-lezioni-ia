@@ -272,6 +272,7 @@ def validate_lesson(out_dir, slides):
         errs.append("lesson-data.js mancante")
     quiz = matching = vf = seq = compila = scenario = errore = flashcards = glossario = 0
     classifica = 0
+    workbook = 0
     seen_audio = set()
     for i, s in enumerate(slides):
         for b in s.get("blocks", []):
@@ -354,6 +355,16 @@ def validate_lesson(out_dir, slides):
                             or not (0 <= it.get("cat", -1) < len(cats))):
                         errs.append(f"slide {i + 1}: elemento classifica malformato")
                         break
+            if "workbook" in b:
+                # il quaderno (risposta libera) esiste nel player e viene
+                # valutato, ma non era controllato: una domanda senza chiavi
+                # non può mai essere data per corretta dallo studente
+                workbook += 1
+                for w in (b["workbook"] if isinstance(b["workbook"], list) else []):
+                    if not isinstance(w, dict) or not w.get("q") or not w.get("k"):
+                        errs.append(f"slide {i + 1}: domanda di quaderno malformata "
+                                    "(manca la domanda o le parole chiavi)")
+                        break
             if "glossario" in b:
                 gl = b["glossario"]
                 groups = gl.get("groups", []) if isinstance(gl, dict) else []
@@ -410,6 +421,7 @@ def validate_lesson(out_dir, slides):
         "errore": errore,
         "flashcards": flashcards,
         "classifica": classifica,
+        "workbook": workbook,
         "glossario": glossario,
         "matching": matching,
         "audio": len(seen_audio),

@@ -529,6 +529,221 @@ def test_job_manager_runs_and_invalidates():
     assert "invalidate" in events and manager.pending_source("uno") is False
 
 
+def test_job_prints_with_flush_do_not_crash():
+    """`print(..., flush=True)` dentro il job non deve uccidere la build.
+
+    Regressione: LogWriter implementava solo `write`, quindi la sintesi
+    neurale moriva a metà ("'LogWriter' object has no attribute 'flush'").
+    """
+    import io as _io
+    import logging
+    from tools.jobs import JobManager, LogWriter
+
+    manager = JobManager(lambda *a: None, lambda: None, lambda text: None)
+
+    def job():
+        print("sintesi slide 1 [edge] ok", flush=True)
+        print("coda: 2", file=sys.stderr, flush=True)
+        print("multi", "righe", flush=True)
+        # logging.StreamHandler flusha lo stream a ogni record
+        log = logging.getLogger("lezioni-test")
+        log.setLevel(logging.INFO)
+        log.addHandler(logging.StreamHandler(sys.stdout))
+        log.info("record dal logger")
+
+    assert manager.start(job, "generazione", "due") == (True, False)
+    for _ in range(200):
+        if not manager.state["running"]:
+            break
+        time.sleep(0.01)
+    assert manager.state["ok"] is True, manager.state["error"]
+    righe = "\n".join(manager.log)
+    assert "sintesi slide 1 [edge] ok" in righe
+    assert "coda: 2" in righe and "multi righe" in righe
+    assert "record dal logger" in righe
+
+    # contratto text-stream per tqdm/subprocess e altri consumatori
+    w = LogWriter(manager.log)
+    assert w.isatty() is False and w.writable() and not w.readable()
+    assert w.seekable() is False
+    assert w.flush() is None
+    w.writelines(["uno\n", "due\n"])
+    with pytest.raises(_io.UnsupportedOperation):
+        w.fileno()
+
+
+def test_lezione_incompleta_non_blocca_la_rigenerazione(tmp_path, monkeypatch):
+    """Una cartella a meta' non e' una lezione: deve poter essere ricostruita.
+
+    Con il controllo "la cartella esiste, quindi salto", il docente che
+    rigenerava un materiale restava con la lezione mai generata e il pannello
+    gli annunciava il job come completato.
+    """
+    import new_lesson as nl
+
+    monkeypatch.setattr(nl, "BASE", tmp_path)
+    monkeypatch.setattr(nl, "PROGRESS_FILE", tmp_path / ".progress.json")
+    monkeypatch.setattr(nl, "generate_audio", lambda out, slides: (0, {}))
+    monkeypatch.setattr(nl, "extract_source",
+                        lambda src: {"title": "Alpha",
+                                     "sections": [{"heading": "Uno",
+                                                   "paras": ["testo alpha " * 30]}]})
+    rotta = tmp_path / "Alpha_lesson"
+    rotta.mkdir()
+    (rotta / "index.html").write_text("<html>player</html>", encoding="utf-8")
+
+    out, _ok = nl.build_from_source("https://a.example/1", bozza=True)
+    # l'audio e' fittizio (generate_source finto): ok=False per i file audio
+    # mancanti. Quel che conta e' che la lezione sia STATA ricostruita.
+    assert (rotta / "lesson-data.js").is_file()
+    # il player a meta' e' stato sostituito, non lasciato com'era
+    assert "player" not in (rotta / "index.html").read_text(encoding="utf-8")
+
+    # adesso che la lezione e' completa, senza --force il salto torna (ed e'
+    # quello che il pannello deve segnalare come errore, non come successo)
+    prima = (rotta / "lesson-data.js").read_text(encoding="utf-8")
+    out, ok = nl.build_from_source("https://a.example/1", bozza=True)
+    assert ok is False, "una lezione completa senza --force deve essere saltata"
+    assert (rotta / "lesson-data.js").read_text(encoding="utf-8") == prima
+
+
+def test_pannello_non_dichiara_completato_una_lezione_non_prodotta(tmp_path):
+    """Senza lesson-data.js non e' stata prodotta nessuna lezione: il job deve
+    fallire con un motivo che dice cosa fare, non annunciare "JOB COMPLETATO"."""
+    import panel
+
+    vuota = tmp_path / "Alpha_lesson"
+    vuota.mkdir()
+    with pytest.raises(RuntimeError) as exc:
+        panel._verifica_prodotto(vuota, False, False)
+    assert "Rigenera" in str(exc.value)
+
+    # lezione generata con avvisi: lesson-data.js c'e', quindi non e' un errore
+    (vuota / "lesson-data.js").write_text("window.LESSON_DATA = {};", encoding="utf-8")
+    panel._verifica_prodotto(vuota, False, False)
+
+    # modalita' file unico: la cartella viene rimossa di proposito
+    panel._verifica_prodotto(tmp_path / "Alpha_singola.html", False, True)
+
+
+def test_piu_fonti_producono_una_sola_lezione(tmp_path, monkeypatch):
+    """Sezione 2 con piu' link: UNA cartella che unisce i materiali.
+
+    Prima della fusione ogni link generava una lezione per conto suo, e il
+    docente che voleva un percorso su due fonti non lo poteva avere.
+    """
+    import new_lesson as nl
+    import sources
+
+    monkeypatch.setattr(nl, "BASE", tmp_path)
+    monkeypatch.setattr(nl, "PROGRESS_FILE", tmp_path / ".progress.json")
+    monkeypatch.setattr(nl, "generate_audio", lambda out, slides: (0, {}))
+
+    def fake_extract(src):
+        if "a.example" in src:
+            return {"title": "Alpha",
+                    "sections": [{"heading": "Uno", "paras": ["testo alpha " * 30]}]}
+        if "b.example" in src:
+            return {"title": "Beta",
+                    "sections": [{"heading": None, "paras": ["testo beta " * 30]}]}
+        raise ValueError("link non raggiungibile")
+
+    monkeypatch.setattr(sources, "extract_source", fake_extract)
+    out, _ok = nl.build_from_sources(["https://a.example/1", "https://b.example/2"],
+                                     bozza=True)
+    lezioni = sorted(p.name for p in tmp_path.glob("*_lesson"))
+    assert len(lezioni) == 1, f"una lezione sola per due fonti, trovate: {lezioni}"
+    # il nome porta il titolo unito piu' l'impronta dell'insieme di link
+    assert lezioni[0].startswith("Alpha_Beta_"), lezioni[0]
+    assert (tmp_path / lezioni[0] / "lesson-data.js").is_file()
+
+    # una fonte irraggiungibile non annulla le altre: la lezione esce lo stesso
+    out, _ok = nl.build_from_sources(["https://a.example/1", "https://c.example/3"],
+                                     bozza=True)
+    lezioni = sorted(p.name for p in tmp_path.glob("*_lesson"))
+    assert len(lezioni) == 2, lezioni
+
+    # due insiemi diversi che iniziano dallo stesso link non devono condividere
+    # la cartella, altrimenti la seconda build si ferma su "esiste gia'"
+    terza = [p.name for p in tmp_path.glob("Alpha_*_lesson")
+             if p.name != lezioni[0]]
+    assert terza, "il nome della lezione non distingue l'insieme dei link"
+
+
+def test_merge_sources_unisce_i_contenuti_di_piu_link():
+    """Più link = un solo documento: le sezioni si accodano con l'intestazione
+    della fonte, così il modello sa da dove arriva ogni parte."""
+    from new_lesson import _merge_sources
+
+    estrazioni = [
+        {"title": "Prima fonte", "sections": [
+            {"heading": "Introduzione", "paras": ["uno", "due"]},
+            {"heading": None, "paras": ["tre"]},
+            {"heading": "Vuota", "paras": []}]},
+        {"title": "Seconda fonte", "sections": [
+            {"heading": None, "paras": ["quattro"]}]},
+    ]
+    m = _merge_sources(estrazioni)
+    assert m["title"] == "Prima fonte — Seconda fonte"
+    assert [s["paras"][0] for s in m["sections"]] == ["uno", "tre", "quattro"]
+    assert m["sections"][0]["heading"] == "Introduzione"
+    # senza intestazione propria: nome del gruppo (quindi la fonte)
+    assert m["sections"][1]["heading"] == "Fonte 1 — Prima fonte"
+    assert m["sections"][2]["heading"] == "Fonte 2 — Seconda fonte"
+    # oltre due fonti il titolo resta leggibile
+    tre = _merge_sources([{"title": "A" * 90, "sections": [{"paras": ["x"]}]},
+                          {"title": "B", "sections": [{"paras": ["y"]}]},
+                          {"title": "C", "sections": [{"paras": ["z"]}]}])
+    assert len(tre["title"]) <= 70 and "+2 altre fonti" in tre["title"]
+
+
+def test_lezione_interrotta_non_e_pubblicata(tmp_path, monkeypatch):
+    """Una build interrotta non deve finire nell'indice degli studenti.
+
+    Il player viene scritto prima dell'audio e `lesson-data.js` solo alla
+    fine: a build fermata a meta' restava una cartella con index.html ma senza
+    dati, che il pannello e l'hub offrivano come se fosse pronta (404 su
+    lesson-data.js e pagina bianca per chi la apriva).
+    """
+    import start_lesson
+    from tools.lesson_admin import lesson_info
+
+    lesson = tmp_path / "Prova_lesson"
+    (lesson / "assets").mkdir(parents=True)
+    (lesson / "index.html").write_text("<html>player</html>", encoding="utf-8")
+    monkeypatch.setattr(start_lesson, "BASE", tmp_path)
+
+    assert [p.name for p in start_lesson.list_lesson_dirs()] == ["Prova_lesson"]
+    assert start_lesson.list_lessons() == []          # non pubblicata
+    assert lesson_info(tmp_path, "Prova_lesson")["incompleta"] is True
+
+    (lesson / "lesson-data.js").write_text(
+        'window.LESSON_DATA = {"titolo":"Prova","slides":[]};\n', encoding="utf-8")
+    assert [p.name for p in start_lesson.list_lessons()] == ["Prova_lesson"]
+    assert lesson_info(tmp_path, "Prova_lesson")["incompleta"] is False
+
+
+def test_split_links_accetta_piuo_link_incolti():
+    """Sezione 2: uno per riga, o tutti incollati con spazi e virgole."""
+    from sources import MAX_BUILD_LINKS, split_links
+
+    assert split_links("https://uno.example/a\nhttps://due.example/b") == [
+        "https://uno.example/a", "https://due.example/b"]
+    assert split_links("uno https://uno.example/a due https://due.example/b tre") == [
+        "https://uno.example/a", "https://due.example/b"]
+    # punteggiatura della frase NON fa parte dell'indirizzo
+    assert split_links("leggi https://uno.example/a, poi https://due.example/b.") == [
+        "https://uno.example/a", "https://due.example/b"]
+    # stessi link ripetuti = una lezione sola
+    assert split_links("https://uno.example/a\nhttps://UNO.example/A") == [
+        "https://uno.example/a"]
+    assert split_links("nessun link qui") == []
+    assert split_links(None) == []
+    # tetto: oltre il massimo non si guarda piu' in la'
+    assert len(split_links("\n".join(f"https://n{i}.example/a" for i in range(20)))) == \
+        MAX_BUILD_LINKS
+
+
 def test_whisper_cache_progress_and_cancel(tmp_path, monkeypatch):
     from types import SimpleNamespace
     import sources

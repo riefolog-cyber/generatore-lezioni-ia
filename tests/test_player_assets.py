@@ -219,6 +219,48 @@ def test_i_pallini_non_occupano_lo_schermo_su_telefono():
     assert "#dots button { flex: 0 0 auto; }" in mobile, (
         "senza flex: 0 0 auto i pallini prendono flex: 1 1 0 e diventano ellissi")
 # ------------------------------------------------- comfort sul telefono
+def test_le_barre_in_fondo_occupano_poco_altezza():
+    """Audio e navigazione stanno in fondo pagina e rubano altezza all'attivita'.
+
+    Erano alte (audio: 9px di padding, play 42px, bottoni 34px, seek 7px;
+    nav: 11px di padding, bottoni 10px/20px): su una slide con attivita' il
+    fondo dello schermo finiva per essere quasi tutto bottoni. Ridotto
+    l'ingombro VISIVO, ma i bersagli di tocco sui schermi tattili restano
+    44px: si tocca comodo senza rubare spazio all'esercizio.
+    """
+    css = (ASSETS / "base.css").read_text(encoding="utf-8")
+    audio = css.split("audio bar */")[1].split("@media")[0]
+    assert "padding: 4px 14px;" in audio, "la barra audio deve essere piatta"
+    assert "width: 32px; height: 32px" in audio, "il play e' troppo grande"
+    assert "height: 26px;" in audio, "i tasti audio sono troppo alti"
+    assert "height: 5px;" in audio, "la seek e' troppo alta"
+    nav = css.split("nav */")[1].split("@media")[0]
+    assert "padding: 5px calc(18px" in nav, "la barra di navigazione e' troppo alta"
+    assert "padding: 6px 14px;" in nav, "i bottoni Avanti/Indietro sono troppo alti"
+    coarse = css.split("@media (pointer: coarse)")[1].split("@media")[0]
+    assert "min-height: 44px;" in coarse, (
+        "l'area di tocco da 44px sui tattili non si puo' perdere")
+    # una riga sola: play e barra di avanzamento AFFIANCATI
+    assert "flex-wrap: nowrap;" in audio, (
+        "con flex-wrap la barra audio va su due-tre righe e ruba mezzo schermo "
+        "all'attivita'")
+    assert "text-overflow: ellipsis" in audio and "min-height" not in audio.split("#cap")[1].split("}")[0], (
+        "il sottotitolo deve stare in una riga (con puntini), non far crescere la barra")
+    dots = css.split("#dots {")[1].split("}")[0]
+    assert "flex-wrap: nowrap;" in dots, (
+        "i pallini su una lezione lunga andrebbero su tre righe: la barra in "
+        "basso deve restare alta una riga")
+    assert "overflow-x: auto;" in dots, (
+        "la riga dei pallini deve essere scorrevole su schermo largo")
+    # il pallino corrente va riportato in vista, altrimenti su slide alte
+    # resterebbe fuori dal visibile
+    js = (ASSETS / "main.js").read_text(encoding="utf-8")
+    assert "dots.scrollLeft" in js, (
+        "su una lezione lunga il pallino corrente deve scorrere in vista")
+    assert "_elCap.title = capTxt" in js, (
+        "il sottotitolo in una riga deve mostrare il testo intero nel tooltip")
+
+
 def test_la_lezione_usa_area_sicura_e_gesti_del_dito():
     """Su telefono: niente tagli sotto la tacca, niente pull-to-refresh.
 

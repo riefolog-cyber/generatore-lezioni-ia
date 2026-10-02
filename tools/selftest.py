@@ -129,8 +129,8 @@ def check_data(L, errs, stats):
     for i, s in enumerate(slides):
         for b in s.get("blocks", []):
             if any(k in b for k in ("quiz", "match", "vf", "seq", "compila",
-                                    "scenario", "errore", "flashcards",
-                                    "glossario")):
+                                    "workbook", "scenario", "errore", "flashcards",
+                                    "classifica", "glossario")):
                 acts += 1
         if s.get("audio"):
             if not (L / s["audio"].lstrip("./")).exists():

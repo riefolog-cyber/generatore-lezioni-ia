@@ -96,11 +96,26 @@ button.mini{padding:5px 11px;font-size:12px}
 .urlrow{display:flex;gap:8px}
 .urlrow input{flex:1;background:#0d1220;border:1px solid var(--line);color:var(--txt);
 border-radius:9px;padding:9px 12px;font-size:13px}
+/* la sezione "genera da link" accetta piu' link: serve un'area di testo che
+   occupi la riga come un input, ma resti alta e ridimensionabile */
+.urlrow textarea{flex:1;min-width:220px;background:#0d1220;border:1px solid var(--line);
+color:var(--txt);border-radius:9px;padding:9px 12px;font:13px/1.5 inherit;resize:vertical}
+.urlrow .grow{flex:1 1 320px}
 .opts{display:flex;flex-wrap:wrap;gap:14px;margin-top:12px;font-size:13px;color:var(--mut)}
 .opts label{display:flex;gap:6px;align-items:center;cursor:pointer}
 pre{background:#0a0f1c;border:1px solid var(--line);border-radius:10px;padding:12px;
 height:160px;overflow:auto;font:12px/1.55 Consolas,'Cascadia Mono',monospace;margin:0;
 white-space:pre-wrap;word-break:break-word}
+/* Barra di generazione in fondo pagina: occupa il MINIMO necessario, cosi'
+   l'elenco delle lezioni e le attivita' restano visibili senza scorrere.
+   Il bottone "⤢" la ingrandisce quando serve leggere il dettaglio. */
+.logcard{padding:12px 18px 10px;margin-bottom:12px}
+.logcard h2{margin:0 0 8px;gap:8px}
+/* la fase sta sulla riga del titolo: una riga risparmiata, non un blocco */
+.logcard .prog{flex:1 1 auto;min-width:0;color:var(--warn);font-size:12px;
+font-weight:400;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#log{height:74px;padding:8px 10px;font:11.5px/1.45 Consolas,'Cascadia Mono',monospace}
+#log.big{height:min(46vh,380px);font-size:12.5px;line-height:1.55}
 #lan{color:var(--warn)}
 a.apri{text-decoration:none;color:#8ecaff;font-weight:700}
 .empty{color:var(--mut);font-size:13px;padding:8px 0}

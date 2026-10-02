@@ -521,6 +521,15 @@ function paintDots() {
     d.tabIndex = i === cur ? 0 : -1;
     if (review.has(i)) d.classList.add('rv');
   });
+  // la riga dei pallini e' UNA sola e scorrevole (su una lezione da 35 slide
+  // andava a tre righe e la barra in basso rubava mezzo schermo): quindi il
+  // pallino corrente va portato in vista, altrimenti su slide alte resterebbe
+  // fuori dal visibile
+  const att = dots.children[cur];
+  if (att && dots.scrollWidth > dots.clientWidth + 4) {
+    const want = att.offsetLeft - (dots.clientWidth - att.offsetWidth) / 2;
+    dots.scrollLeft = Math.max(0, want);
+  }
   const n = doneCount();
   const st = _safe('stat');
   if (st) {
@@ -1818,6 +1827,14 @@ function blockMatch(s, idx, bidx) {
   return m;
 }
 
+// ------------------------------------------------ attività: carte da girare
+// Una carta mostra la definizione e TORNIA DA SOLA sulla faccia originale
+// dopo qualche secondo: si rilegge cliccando di nuovo, ma il mazzo non
+// resta girato e bloccato sul retro (il comportamento precedente, in cui la
+// carta si girava una volta sola e restava cosi', non permetteva di
+// rivedere la definizione senza uscire e rientrare nella slide).
+const FLASH_VISIBLE_MS = 3000;
+
 function blockFlashcards(f, idx) {
   const m = el('div', 'flash');
   m.appendChild(el('p', null, f.instr || 'Studia le carte, poi mettiti alla prova.'));
@@ -1831,25 +1848,30 @@ function blockFlashcards(f, idx) {
     const front = el('div', 'fcface fcfront');
     front.appendChild(el('span', 'fclabel', 'Termine ' + (k + 1) + '/' + f.cards.length));
     front.appendChild(el('div', 'fcterm', c.t));
-    front.appendChild(el('div', 'fchint', 'clicca per girare'));
+    const hint = el('div', 'fchint', 'clicca per girare');
+    front.appendChild(hint);
     const back = el('div', 'fcface fcback');
     back.appendChild(el('span', 'fclabel', 'Definizione'));
     back.appendChild(el('div', 'fcdef', c.d));
     inner.appendChild(front); inner.appendChild(back);
     card.appendChild(inner);
-    let girata = false;
-    // una carta si gira UNA volta sola: prima si poteva tornare
-    // avanti/indietro all'infinito e la verifica sotto non veniva mai
-    // svolta, cioe' la parte che conta restava saltata.
     card.onclick = () => {
-      if (!girata) {
-        girata = true;
-        card.classList.add('flip');
-        front.querySelector('.fchint').textContent = '\u2713 definizione mostrata';
+      if (curC !== k) {
+        curC = k;
+        [...dotsW.children].forEach((d2, j) => d2.classList.toggle('on', j === k));
       }
-      if (curC === k) return;
-      curC = k;
-      [...dotsW.children].forEach((d2, j) => d2.classList.toggle('on', j === k));
+      // clicchi di fila: ogni click rivede la definizione, poi la carta
+      // torna sulla faccia originale (il timer precedente va annullato, o
+      // una carta cliccata due volte tornerebbe su al primo scadere)
+      if (card.flipT) clearTimeout(card.flipT);
+      card.classList.add('flip');
+      hint.textContent = '✓ definizione mostrata · torna su';
+      card.flipT = setTimeout(() => {
+        card.flipT = 0;
+        if (!card.isConnected) return;   // slide cambiata: non toccare il vecchio DOM
+        card.classList.remove('flip');
+        hint.textContent = 'clicca per girare';
+      }, FLASH_VISIBLE_MS);
     };
     cards.push(card);
     deck.appendChild(card);
@@ -1861,9 +1883,9 @@ function blockFlashcards(f, idx) {
   const ctrl = el('div', 'fcctrl');
   const bFlip = el('button', null, '🔄 Gira');
   bFlip.onclick = () => {
-    // stessa regola del tocco sulla carta: si gira una volta sola
+    // stessa regola del tocco sulla carta: mostra e torna su da sola
     const c2 = cards[curC] || cards[0];
-    if (c2 && !c2.classList.contains('flip')) c2.click();
+    if (c2) c2.click();
   };
   const bPrev = el('button', null, '←');
   bPrev.onclick = () => navC(-1);
@@ -2169,7 +2191,7 @@ function loadAudio(i, autoplay) {
   chunks = buildChunks(wordTimings);
   const fill = _btn('fill'); if (fill) fill.style.width = '0%';
   const tt = _btn('tt'); if (tt) tt.textContent = fmt(0) + ' / ' + fmt(dur);
-  const cap = _btn('cap'); if (cap) cap.textContent = '';
+  const cap = _btn('cap'); if (cap) { cap.textContent = ''; cap.title = ''; }
   const bp = _btn('btnPlay'); if (bp) bp.textContent = '▶';
   const aerr = _btn('audioErr'); if (aerr) aerr.hidden = true;
   if (s.audio) {
@@ -2292,7 +2314,9 @@ function tick() {
   const c = chunks[_capIdx];
   const capTxt = (c && t >= c.a && t < c.b) ? c.t.join(' ') : '';
   if (capTxt !== _lastCap) {
-    if (_elCap) _elCap.textContent = capTxt;
+    // il sottotitolo vive in UNA riga sola (con i puntini di sospensione se
+    // la frase e' lunga): il testo intero resta nel tooltip
+    if (_elCap) { _elCap.textContent = capTxt; _elCap.title = capTxt; }
     _lastCap = capTxt;
   }
   raf = requestAnimationFrame(tick);

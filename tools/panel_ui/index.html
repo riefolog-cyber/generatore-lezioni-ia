@@ -99,9 +99,16 @@
   <div class="card">
     <h2><span class="step">2</span> Oppure genera da un link</h2>
     <div class="urlrow">
-      <input id="url" placeholder="https://it.wikipedia.org/wiki/…  oppure  https://www.youtube.com/watch?v=…">
+      <textarea id="url" rows="3" class="grow"
+        placeholder="https://it.wikipedia.org/wiki/…&#10;https://www.youtube.com/watch?v=…&#10;https://www.raiplay.it/video/…"></textarea>
       <button id="btnUrl" class="primary">Genera da link</button>
     </div>
+    <div class="upmsg" style="font-size:12px;margin-top:8px">
+      Un link per riga. Con <b>più link</b> viene generata <b>una sola lezione che ne unisce
+      i contenuti</b> (fino a 10 per richiesta): il modello legge ogni fonte e la tratta
+      come un unico materiale. Puoi anche incollarli tutti insieme, separati da uno spazio.
+    </div>
+    <div class="upmsg" id="urlMsg" hidden></div>
   </div>
 
   <div class="card">
@@ -172,12 +179,14 @@
     <div class="upmsg" id="edMsg" hidden></div>
   </div>
 
-  <div class="card">
+  <div class="card logcard">
     <h2>Log di generazione <span id="jobinfo" style="color:var(--mut);font-weight:400;font-size:12px"></span>
+      <span id="progTxt" class="prog"></span>
+      <button class="mini ghost" id="btnLogBig" type="button"
+              title="Ingrandisci il log (per leggere tutto il dettaglio)">⤢</button>
       <button class="mini ghost" id="btnCancelQ" type="button" hidden>Svuota coda</button>
       <button class="mini ghost" id="btnCancelJob" type="button" hidden>⏹ Annulla trascrizione</button></h2>
-    <div class="urlrow" style="margin-bottom:8px"><span id="progTxt" style="color:var(--warn);font-size:12px"></span></div>
-    <pre id="log">Il log apparirà qui durante la generazione…</pre>
+    <pre id="log" title="Il log si aggiorna da solo: le ultime righe sono in fondo">Il log apparirà qui durante la generazione…</pre>
   </div>
 
   <div class="card">
@@ -253,7 +262,7 @@
     <h2>📚 Istruzioni</h2>
     <div class="grid2">
       <div><b>1. Carica</b><br><span class="empty">Trascina qui un documento. Per un audio MP3/M4A/WAV spunta «Trascrizione audio con Whisper».</span></div>
-      <div><b>2. Genera</b><br><span class="empty">Scegli durata e livello, poi premi «Carica e genera». Puoi usare anche un link o incollare testo.</span></div>
+      <div><b>2. Genera</b><br><span class="empty">Scegli durata e livello, poi premi «Carica e genera». Puoi usare anche un link (o più link, uno per riga) o incollare testo.</span></div>
       <div><b>3. Condividi</b><br><span class="empty">Apri il QR a schermo intero e fai scansione dal telefono. Vuoi un tempo limite? Arma «⏱ Timer attività»: lo vedranno in alto, con la stessa ora di fine per tutti.</span></div>
       <div><b>4. Assistenza</b><br><span class="empty">Se un dispositivo non si collega, premi «Controlla computer e rete».</span></div>
     </div>

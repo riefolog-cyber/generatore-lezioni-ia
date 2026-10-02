@@ -91,22 +91,28 @@ def test_nel_player_non_c_e_piu_il_glossario():
     assert "glosearch" not in base_css(), "il CSS del glossario e' rimasto"
 
 
-def test_flashcards_la_carta_si_gira_una_volta_sola():
-    """La carta si gira una volta sola: poi si passa all'esercizio.
+def test_flashcards_la_carta_torna_sulla_faccia_originale():
+    """La definizione si vede e POI la carta torna sul termine.
 
-    Prima si poteva girare e rigirare all'infinito restando sulle carte: la
-    verifica sotto (la parte che conta per il punteggio) non veniva mai
-    svolta, quindi l'attivita' si saltava.
+    Prima la carta si girava una volta sola e RESTAVA girata: per rivedere la
+    definizione bisognava uscire e rientrare nella slide, e con piu' carte
+    girate il mazzo sembrava bloccato. Ora ogni click mostra la definizione e
+    un timer la riporta sulla faccia del termine; il click successivo la
+    rivede. La verifica sotto resta in pagina, quindi l'attivita' non viene
+    saltata.
     """
     from player_assets import main_js
     js = main_js()
-    assert "if (!girata) {" in js, "manca il blocco 'gira una volta sola'"
-    assert "girata = true;" in js
+    assert "FLASH_VISIBLE_MS" in js, "manca la durata di lettura della definizione"
     assert "card.classList.add('flip');" in js
-    assert "card.classList.toggle('flip');" not in js, (
-        "toggle significa che si torna indietro: la verifica resterebbe saltata")
-    assert "!c2.classList.contains('flip')" in js, (
-        "il bottone Gira deve saltare le carte gia' girate")
+    assert "card.classList.remove('flip');" in js, (
+        "la carta deve tornare sul termine, non restare girata")
+    assert "if (card.flipT) clearTimeout(card.flipT);" in js, (
+        "clicchi di fila: senza annullare il timer precedente la carta torna su "
+        "al primo scadere, non dopo l'ultimo click")
+    assert "if (!girata) {" not in js, "il blocco 'gira una volta sola' e' ancora"
+    assert "!c2.classList.contains('flip')" not in js, (
+        "il bottone Gira deve poter rivedere la carta mostrata")
 
 
 def test_trova_l_errore_mostra_presto_il_suggerimento():

@@ -56,8 +56,9 @@ from class_repository import add_result as _class_repo_add, authorized as _class
 from class_repository import list_results as _class_repo_list, reset as _class_repo_reset  # noqa: E402
 from http_safety import (  # noqa: E402
     LOOPBACK_HOSTS, host_allowed, same_origin_post, safe_request_path)
-from sources import SUPPORTED_EXT, is_url  # noqa: E402
-from start_lesson import _RangeHandler, _hub_page, find_port, list_lessons  # noqa: E402
+from sources import MAX_BUILD_LINKS, SUPPORTED_EXT, is_url, split_links  # noqa: E402
+from start_lesson import (  # noqa: E402
+    _RangeHandler, _hub_page, find_port, list_lesson_dirs, list_lessons)
 
 CONFIG = load_config()
 DEFAULT_PORT = int(CONFIG.get("porta", 8341))
@@ -357,6 +358,30 @@ def start_job(fn, kind, source):
     return _JOBS.start(fn, kind, source)
 
 
+def _verifica_prodotto(out, ok, single):
+    """Alza se la build non ha prodotto una lezione, anche se è tornata senza
+    eccezioni.
+
+    La build salta (cartella già esistente) restituendo la cartella con
+    `ok=False`: il runner la leggeva come job riuscito e il log annunciava
+    "✔ JOB COMPLETATO" senza che un solo file fosse stato scritto. Il segnale
+    che distingue le due situazioni è `lesson-data.js`, scritto solo a
+    fine percorso: senza, la lezione non esiste.
+    """
+    if single:                       # modalità file unico: la cartella sparisce
+        return
+    cartella = Path(str(out))
+    if cartella.suffix == ".html" or (cartella / "lesson-data.js").is_file():
+        return
+    nome = cartella.name
+    if ok:
+        return
+    raise RuntimeError(
+        f"Nessuna lezione generata: «{nome}» esiste gia'. "
+        "Per sostituirla spunta «Rigenera anche le lezioni gia' esistenti» "
+        "e riavvia la richiesta.")
+
+
 def cancel_queue():
     return _JOBS.cancel_queue()
 
@@ -599,7 +624,8 @@ def _lesson_details(name):
         info = lesson_info(BASE, name)
     except Exception:
         info = {"name": name, "title": name.replace("_lesson", ""),
-                "size": 0, "duration": 0, "modified": 0}
+                "size": 0, "duration": 0, "modified": 0,
+                "incompleta": not (d / "lesson-data.js").is_file()}
     _LESSON_INFO_CACHE[name] = (stamp, info)
     return info
 
@@ -618,7 +644,11 @@ def _state():
     now = time.time()
     if _STATE_CACHE["data"] is not None and now - _STATE_CACHE["at"] < _STATE_TTL:
         return _STATE_CACHE["data"]
-    lessons = [_lesson_details(l.name) for l in list_lessons()]
+    # list_lesson_dirs, non list_lessons: una build interrotta lascia la
+    # cartella senza lesson-data.js e il docente deve poterla VEDERE (e
+    # cancellarla) invece di trovarla sparita. `incompleta` la tiene fuori
+    # dagli studenti e dai link "Apri".
+    lessons = [_lesson_details(l.name) for l in list_lesson_dirs()]
     try:
         from tools.lesson_admin import list_archived
         archived = list_archived(BASE)
@@ -865,6 +895,10 @@ class PanelHandler(_RangeHandler):
         risultato, il runner metteva `ok=True` e il pannello annunciava
         "JOB COMPLETATO" scrivendo in cronologia un successo per una lezione
         che non era stata generata. Il runner deve vedere l'eccezione.
+
+        Stessa cosa quando la build SALTA (lezione gia' esistente): restituiva
+        la cartella con `ok=False` e il log diceva "JOB COMPLETATO" senza che
+        nulla fosse stato scritto. Meglio un errore esplicito e azionabile.
         """
         import new_lesson
         if text is not None:
@@ -878,6 +912,7 @@ class PanelHandler(_RangeHandler):
             raise RuntimeError(
                 "Generazione saltata: un'altra generazione e' gia' in corso. "
                 "Riprova fra poco.")
+        _verifica_prodotto(out, ok, single)
         return out, ok
 
     def _require_teacher(self):
@@ -998,35 +1033,120 @@ class PanelHandler(_RangeHandler):
         return str(p)
 
     def _parse_build(self):
+        """Materiali da generare: uno o piu'.
+
+        Accetta `source` (un materiale, come prima) e `sources` (lista di
+        link): con piu' link la lezione che esce e' UNA sola e ne unisce i
+        contenuti. Un link che non si puo' usare non butta via gli altri:
+        finisce in `scartati`, che il pannello mostra nel log.
+        """
         from common import normalize_profilo
         data = self._read_json_body()
-        src = self._resolve_source(str(data.get("source") or ""))
         force = bool(data.get("force"))
         bozza = bool(data.get("bozza"))
         single = bool(data.get("single"))
         whisper = bool(data.get("whisper"))
-        if Path(src).suffix.lower() in (".mp3", ".m4a", ".wav") and not whisper:
-            raise ValueError("Per generare da audio devi confermare la trascrizione Whisper.")
         profilo = normalize_profilo(data.get("profilo") or {
             "durata": data.get("durata"), "livello": data.get("livello"),
             "obiettivo": data.get("obiettivo")})
-        return src, force, bozza, single, profilo
+
+        raw = data.get("sources")
+        if raw is None:
+            one = data.get("source")
+            # `source` puo' essere un file caricato: si spezza solo se e' un URL,
+            # perche' il nome di un file non contiene link da estrarre
+            raw = split_links(one) if is_url(one) else [one]
+        elif isinstance(raw, str):
+            raw = split_links(raw)
+        else:
+            raw = list(raw)
+        items, errori = [], []
+        if len(raw) > MAX_BUILD_LINKS:
+            ecceduti = len(raw) - MAX_BUILD_LINKS
+            raw = raw[:MAX_BUILD_LINKS]
+            errori.append({"source": f"{ecceduti} link in più",
+                           "reason": f"Massimo {MAX_BUILD_LINKS} link per richiesta: "
+                                     "quelli in fondo sono stati ignorati."})
+        for entry in raw:
+            if not str(entry or "").strip():
+                continue
+            try:
+                src = self._resolve_source(str(entry).strip())
+            except ValueError as exc:
+                errori.append({"source": str(entry)[:80], "reason": str(exc)})
+                continue
+            if Path(src).suffix.lower() in (".mp3", ".m4a", ".wav") and not whisper:
+                errori.append({"source": Path(src).name,
+                               "reason": "Per generare da audio devi confermare la trascrizione Whisper."})
+                continue
+            items.append((src, force, bozza, single, profilo))
+        if not items:
+            # nessun materiale utilizzabile: 400 con il motivo vero
+            raise ValueError(errori[0]["reason"] if errori
+                             else "Indica almeno un link o un materiale da generare.")
+        return items, errori
+
+    def _genera_multipla(self, srcs, force, bozza, single, profilo):
+        """UN solo job che unisce piu' fonti in UNA lezione."""
+        import new_lesson
+        out, ok = new_lesson.build_from_sources(srcs, force=force, bozza=bozza,
+                                                single=single, profilo=profilo)
+        if out is None:
+            raise RuntimeError(
+                "Generazione saltata: un'altra generazione e' gia' in corso. "
+                "Riprova fra poco.")
+        _verifica_prodotto(out, ok, single)
+        return out, ok
 
     def _start(self, parsed):
-        src, force, bozza, single, profilo = parsed
-        source_name = Path(src).name if not is_url(src) else src
-        if _material_job_pending(source_name):
-            state = "già in lavorazione" if JOB["running"] else "già in coda"
-            self._json({"started": False,
-                        "reason": f"Attenzione: questo materiale è {state}."}, 409)
+        items, errori = parsed
+        scartati = list(errori)
+        # N link = UNA build (il materiale viene unito), quindi il rate limit
+        # si consuma una volta sola: il dispatcher ha gia' addebitato lo slot.
+        usabili = []
+        for src, force, bozza, single, profilo in items:
+            source_name = Path(src).name if not is_url(src) else src
+            if _material_job_pending(source_name):
+                # un materiale gia' in coda resta in coda: la lezione unita
+                # uscirebbe dai soli materiali disponibili adesso
+                state = "già in lavorazione" if JOB["running"] else "già in coda"
+                scartati.append({"source": source_name,
+                                 "reason": f"Attenzione: questo materiale è {state}."})
+                continue
+            usabili.append((src, force, bozza, single, profilo))
+        if not usabili:
+            self._json({"started": False, "reason": scartati[0]["reason"],
+                        "skipped": scartati}, 409)
             return
+        if len(usabili) == 1:
+            src, force, bozza, single, profilo = usabili[0]
+            nome = Path(src).name if not is_url(src) else src
+            started, queued = start_job(
+                lambda: self._genera_e_verifica(src, force, bozza, single, profilo),
+                "generazione", nome)
+            if not started:
+                self._json({"started": False,
+                            "reason": "Coda piena (5 job): attendi la fine.",
+                            "skipped": scartati}, 409)
+                return
+            self._json({"started": True, "queued": queued, "count": 1,
+                        "sources": [nome], "skipped": scartati})
+            return
+        # piu' fonti: un solo job che le legge e le unisce in una lezione sola
+        srcs = [u[0] for u in usabili]
+        etichetta = f"{len(srcs)} fonti: " + ", ".join(
+            (s if is_url(s) else Path(s).name) for s in srcs)[:90]
+        force, bozza, single, profilo = usabili[0][1:]
         started, queued = start_job(
-            lambda: self._genera_e_verifica(src, force, bozza, single, profilo),
-            "generazione", Path(src).name if not is_url(src) else src)
+            lambda: self._genera_multipla(srcs, force, bozza, single, profilo),
+            "generazione", etichetta)
         if not started:
-            self._json({"started": False, "reason": "Coda piena (5 job): attendi la fine."}, 409)
+            self._json({"started": False, "reason": "Coda piena (5 job): attendi la fine.",
+                        "skipped": scartati}, 409)
             return
-        self._json({"started": True, "queued": queued})
+        self._json({"started": True, "queued": queued, "count": 1, "merged": True,
+                    "sources": [s if is_url(s) else Path(s).name for s in srcs],
+                    "skipped": scartati})
 
     def _start_text(self):
         from common import normalize_profilo

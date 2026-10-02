@@ -192,6 +192,18 @@ async function addManuale() {
 }
 
 function lessonRow(l) {
+  if (l.incompleta) {
+    // build interrotta: il player c'e' ma i dati no, quindi aprire la lezione
+    // darebbe un 404 su lesson-data.js. Resta in elenco (per non lasciare
+    // cartelle fantasma) ma senza "Apri": si puo' solo eliminare, oppure
+    // rigenerare il materiale dalla sezione 1/2.
+    return `<div class="row" data-lesson-search="${escAttr(((l.title || '') + ' ' + l.name).toLowerCase())}">
+      <span class="name">${esc(l.title)}<div class="meta">⚠ generazione interrotta: nessun contenuto salvato.
+        Rigenera il materiale dalla sezione 1 o 2.</div></span>
+      <span class="badge">incompleta</span>
+      <button class="mini ghost" onclick="lessonAction('${escAttr(l.name)}','delete')" title="Elimina">🗑</button>
+    </div>`;
+  }
   const mins = Math.max(1, Math.round((l.duration || 0) / 60));
   return `<div class="row" data-lesson-search="${escAttr(((l.title || '') + ' ' + l.name).toLowerCase())}">
     <span class="name">${esc(l.title)}<div class="meta">${fmtSize(l.size)} · ${mins} min</div></span>
@@ -228,7 +240,7 @@ async function refresh() {
 
     const mats = s.materials;
     $('#materials').innerHTML = mats.length ? mats.map(m => {
-      const exists = s.lessons.some(l => l.name === m.lesson);
+      const exists = s.lessons.some(l => l.name === m.lesson && !l.incompleta);
       return `<div class="row">
         <span class="name">${esc(m.name)}</span>
         <span class="meta">${fmtSize(m.size)}</span>
@@ -280,6 +292,16 @@ function addLog(lines) {
   el.scrollTop = el.scrollHeight;
 }
 
+// La barra in fondo e' tenuta bassa per lasciare spazio alle lezioni: si
+// ingrandisce solo quando il docente chiede di leggere il dettaglio.
+function toggleLog() {
+  const el = $('#log');
+  el.classList.toggle('big');
+  $('#btnLogBig').textContent = el.classList.contains('big') ? '⤡' : '⤢';
+  el.scrollTop = el.scrollHeight;
+}
+$('#btnLogBig').onclick = toggleLog;
+
 async function pollLog() {
   // cursore MONOTONO assoluto fornito dal server: prima si indicizzava
   // s.lines (finestra scorrevole di 200 righe dentro un deque di 500), quindi
@@ -299,6 +321,7 @@ async function pollLog() {
       busy = false;
       document.querySelectorAll('button').forEach(b => b.disabled = false);
       if (s.error) addLog(['✗ ' + s.error]);
+      refreshProg();   // stato finale della fase, non quello lasciato a meta'
       refresh();
       return;
     }
@@ -312,11 +335,16 @@ async function startJob(path, payload) {
   try {
     const j = await api(path, { method: 'POST', headers: {'Content-Type': 'application/json'},
                      body: JSON.stringify(payload) });
-    if (j.queued) addLog(['⏳ accodato: partirà dopo quello in corso']);
+    if (j.merged) addLog(['▶ una lezione che unisce ' + (j.sources || []).length + ' fonti: ' + (j.sources || []).join(' · ')]);
+    else if (j.queued) addLog(['⏳ accodato: partirà dopo quello in corso']);
+    // link rifiutati (gia' in coda, coda piena, non utilizzabili): la richiesta
+    // puo' essere partita lo stesso, quindi non sono un errore della chiamata
+    (j.skipped || []).forEach(s => addLog(['✗ ' + s.source + ': ' + s.reason]));
     // pollLog gira comunque, anche in coda: senza questo `busy` restava true
     // per sempre e i pulsanti "Svuota coda" / "Annulla" morivano.
     await pollLog();
-  } catch (e) { addLog(['✗ ' + e.message]); busy = false; await refresh(); }
+    return true;
+  } catch (e) { addLog(['✗ ' + e.message]); busy = false; await refresh(); return false; }
 }
 
 
@@ -367,7 +395,9 @@ function renderFocusList() {
   const box = $('#focusList');
   if (!box) return;
   const q = ($('#focusSearch').value || '').trim().toLowerCase();
-  const all = (window._stateLessons || []);
+  // niente lezioni incomplete: non si aprono, quindi condividerle mostrerebbe
+  // agli studenti una pagina bianca
+  const all = (window._stateLessons || []).filter(l => !l.incompleta);
   const hits = all.filter(l => !q
     || ((l.title || '') + ' ' + l.name).toLowerCase().includes(q));
   if (!hits.length) {
@@ -388,7 +418,7 @@ function renderFocusList() {
   });
 }
 async function selectFocus(name) {
-  const l = (window._stateLessons || []).find(x => x.name === name);
+  const l = (window._stateLessons || []).find(x => x.name === name && !x.incompleta);
   if (!l) return;
   // la lezione scelta diventa anche quella "in classe": il QR principale
   // della card Condividi punterà a lei, così alunni e docente sono allineati
@@ -461,10 +491,21 @@ async function lessonAction(lesson, action) {
 async function refreshProg() {
   try {
     const p = await api('progress');
-    if (p) {
-      $('#progTxt').textContent = 'Fase: ' + (p.fase || '') + ' — ' + (p.pct || 0) + '% ' + (p.extra || '');
-      $('#btnCancelJob').hidden = !(p.fase || '').toLowerCase().includes('whisper');
+    if (!p) return;
+    const t = $('#progTxt');
+    // nessun job in corso: la riga NON deve restare ferma sulla fase
+    // intermediate letta 3 minuti fa ("strutturazione LLM — 15%") mentre la
+    // lezione era gia' finita. Il polling del progresso parte infatti solo a
+    // job aperto (setInterval su `busy`), quindi finiva senza mai rifrescare.
+    if (!p.job_running) {
+      const fase = (p.fase || '').toLowerCase();
+      t.textContent = (fase && fase !== 'inattiva')
+        ? 'Ultima generazione: ' + (p.fase || '') + ' — ' + (p.pct || 0) + '% ' + (p.extra || '')
+        : '';
+      return;
     }
+    t.textContent = 'Fase: ' + (p.fase || '') + ' — ' + (p.pct || 0) + '% ' + (p.extra || '');
+    $('#btnCancelJob').hidden = !(p.fase || '').toLowerCase().includes('whisper');
   } catch (e) { /* ignora */ }
 }
 async function clearHistory() {
@@ -484,7 +525,8 @@ async function refreshPlayer() {
   } catch (e) { m.textContent = '✗ ' + e.message; }
 }
 function visibile() { return !document.hidden; }
-setInterval(() => { if (busy && visibile()) refreshProg(); }, 2000);
+// il refresh del progresso e' continuo (vedi fondo file): deve valere anche a
+// job fermo, altrimenti la riga resta con la fase intermedia
 
 $('#btnText').onclick = () => {
   const t = $('#txtBody').value.trim();
@@ -830,12 +872,34 @@ $('#btnUp').onclick = () => doUpload(false);
 $('#btnUpGen').onclick = () => doUpload(true);
 $('#btnUpX').onclick = clearUpload;
 
+// I link della sezione 2: uno per riga, o tutti incollati insieme separati da
+// spazi/virgole. Stessa regex del server (tools/sources.split_links): se il
+// browser trovasse piu' link del backend, la richiesta verrebbe rifiutata.
+function parseLinks(text) {
+  const out = [], visti = new Set();
+  const re = /https?:\/\/[^\s<>"']+/gi;
+  let m;
+  while ((m = re.exec(text || ''))) {
+    const u = m[0].replace(/[.,;:!?]+$/, '');
+    const k = u.toLowerCase();
+    if (u && !visti.has(k)) { visti.add(k); out.push(u); }
+  }
+  return out;
+}
+
 $('#btnUrl').onclick = () => {
-  const u = $('#url').value.trim();
-  if (!/^https?:\/\//i.test(u)) { alert('Incolla un indirizzo completo (https://…).'); return; }
-  startJob('build', { source: u, force: $('#forceAll').checked,
-                      bozza: $('#bozzaAll').checked, single: $('#singleAll').checked,
-                      profilo: profilo() });
+  const urls = parseLinks($('#url').value);
+  if (!urls.length) { alert('Incolla almeno un indirizzo completo (https://…).'); return; }
+  const opts = { force: $('#forceAll').checked, bozza: $('#bozzaAll').checked,
+                 single: $('#singleAll').checked, profilo: profilo() };
+  if (urls.length > 1) {
+    if (!confirm(urls.length + ' link: verrà generata UNA lezione che ne unisce i contenuti.\nProcedere?')) return;
+  }
+  const payload = Object.assign(urls.length > 1 ? { sources: urls } : { source: urls[0] }, opts);
+  // svuota il campo solo se la richiesta e' partita: se viene rifiutata
+  // (coda piena, PIN, link non valido) i link restano da riprovare
+  const campo = $('#url');
+  startJob('build', payload).then((ok) => { if (ok) campo.value = ''; });
 };
 
 // ---------------------------------------------------- voce anteprima + editor
@@ -954,9 +1018,13 @@ loadVoices();
 refresh();
 loadLan();
 loadSettings();
+refreshProg();
+// il progresso si legge anche a job fermo: altrimenti la riga resta con la
+// fase intermedia dell'ultima generazione ("strutturazione LLM — 15%")
+setInterval(refreshProg, 2000);
 setInterval(() => { if (!busy && visibile()) refresh(); }, 4000);
 // tornando in primo piano l'elenco va ricaricato subito: con la scheda
 // nascosta i timer sono throttlati e la lista potrebbe essere vecchia
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) { refresh(); if (busy) refreshProg(); }
+  if (!document.hidden) { refresh(); refreshProg(); }
 });
